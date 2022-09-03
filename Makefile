@@ -11,11 +11,10 @@ stTafLibs = ${commonTafLibs} ${LDLIBS}
 all: all_libs all_progs
 all_libs: dependencies ${LIBDIR}/stTaf.a
 
-all_progs: all_libs
-	${MAKE} ${BINDIR}/stTafTests
+all_progs: all_libs ${BINDIR}/stTafTests ${BINDIR}/maf_to_taf
 
 dependencies:
-	mkdir ${LIBDIR} ${BINDIR}
+	mkdir -p ${LIBDIR} ${BINDIR}
 	cd submodules/sonLib && PKG_CONFIG_PATH=${CWD}/lib/pkgconfig:${PKG_CONFIG_PATH} ${MAKE}
 	mkdir -p ${BINDIR} ${LIBDIR} ${INCLDIR}
 	rm -rf submodules/sonLib/bin/*.dSYM
@@ -30,9 +29,9 @@ ${LIBDIR}/stTaf.a : ${libSources} ${libHeaders}  ${stTafDependencies}
 ${BINDIR}/stTafTests : ${libTests} ${LIBDIR}/stTaf.a ${stTafDependencies}
 	${CC} ${CPPFLAGS} ${CFLAGS} ${LDFLAGS} -o ${BINDIR}/stTafTests ${libTests} ${libSources} ${LIBDIR}/stTaf.a ${stTafLibs} ${LDLIBS}
 
+${BINDIR}/maf_to_taf : maf_to_taf.c ${LIBDIR}/stTaf.a ${stTafDependencies}
+	${CC} ${CPPFLAGS} ${CFLAGS} -o ${BINDIR}/maf_to_paf maf_to_taf.c ${libSources} ${LIBDIR}/stTaf.a ${stTafLibs} ${LDLIBS}
+
 clean :
 	cd submodules/sonLib && ${MAKE} clean
 	rm -rf *.o ${LIBDIR} ${BINDIR}
-
-
-
