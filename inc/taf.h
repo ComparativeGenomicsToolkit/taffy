@@ -37,6 +37,12 @@ void alignment_destruct(Alignment *alignment);
 void Alignment_Row_destruct(Alignment_Row *row);
 
 /*
+ * Parse a header line that mist start with the header_prefix and then be composed of a series of key value tags,
+ * each delimited by the delimiter word.
+ */
+stList *parse_header(stList *tokens, char *header_prefix, char *delimiter);
+
+/*
  * Use the O(ND) alignment to diff the rows between two alignments and connect together their rows
  * so that we can determine which rows in the right_alignment are a continuation of rows in the
  * left_alignment. We use this for efficiently outputting TAF.
@@ -46,7 +52,7 @@ void alignment_link_adjacent(Alignment *left_alignment, Alignment *right_alignme
 /*
  * Read a maf header line
  */
-stList *maf_read_header(LI *li);
+stList *maf_read_header(FILE *fh);
 
 /*
  * Read a maf alignment block from the file stream. Return NULL if none available
@@ -56,7 +62,7 @@ Alignment *maf_read_block(FILE *fh);
 /*
  * Write a maf header line
  */
-stList *maf_write_header(stList *tags, FILE *fh);
+void maf_write_header(stList *tags, FILE *fh);
 
 /*
  * Write a maf block
@@ -77,7 +83,7 @@ Alignment *taf_read_block(Alignment *p_block, bool run_length_encode_bases, LI *
 /*
  * Write a taf header line
  */
-stList *taf_write_header(stList *tags, FILE *fh);
+void taf_write_header(stList *tags, FILE *fh);
 
 /*
  * Write a taf block.

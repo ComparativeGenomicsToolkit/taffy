@@ -62,8 +62,8 @@ bases in the column (see below) and then some optional coordinates and tags.)
 
 (Aligned bases are either a run-length encoded
 representation or simply as a sequence of aligned characters. To specify
-which format to use we use the tag "run_length_encoded_bases=1" in the header.
-If "run_length_encoded_bases=0" or the tag is not specified the format is
+which format to use we use the tag "run_length_encode_bases=1" in the header.
+If "run_length_encode_bases=0" or the tag is not specified the format is
 to NOT use run length encoding.)
 
 

@@ -11,7 +11,7 @@ stTafLibs = ${commonTafLibs} ${LDLIBS}
 all: all_libs all_progs
 all_libs: dependencies ${LIBDIR}/stTaf.a
 
-all_progs: all_libs ${BINDIR}/stTafTests ${BINDIR}/maf_to_taf
+all_progs: all_libs ${BINDIR}/stTafTests ${BINDIR}/maf_to_taf ${BINDIR}/taf_to_maf
 
 dependencies:
 	mkdir -p ${LIBDIR} ${BINDIR}
@@ -30,7 +30,11 @@ ${BINDIR}/stTafTests : ${libTests} ${LIBDIR}/stTaf.a ${stTafDependencies}
 	${CC} ${CPPFLAGS} ${CFLAGS} ${LDFLAGS} -o ${BINDIR}/stTafTests ${libTests} ${libSources} ${LIBDIR}/stTaf.a ${stTafLibs} ${LDLIBS}
 
 ${BINDIR}/maf_to_taf : maf_to_taf.c ${LIBDIR}/stTaf.a ${stTafDependencies}
-	${CC} ${CPPFLAGS} ${CFLAGS} -o ${BINDIR}/maf_to_paf maf_to_taf.c ${libSources} ${LIBDIR}/stTaf.a ${stTafLibs} ${LDLIBS}
+	${CC} ${CPPFLAGS} ${CFLAGS} -o ${BINDIR}/maf_to_taf maf_to_taf.c ${libSources} ${LIBDIR}/stTaf.a ${stTafLibs} ${LDLIBS}
+
+${BINDIR}/taf_to_maf : taf_to_maf.c ${LIBDIR}/stTaf.a ${stTafDependencies}
+	${CC} ${CPPFLAGS} ${CFLAGS} -o ${BINDIR}/taf_to_maf taf_to_maf.c ${libSources} ${LIBDIR}/stTaf.a ${stTafLibs} ${LDLIBS}
+
 
 clean :
 	cd submodules/sonLib && ${MAKE} clean

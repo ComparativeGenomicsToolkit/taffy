@@ -122,7 +122,10 @@ char *get_bases(int64_t column_length, stList *tokens, bool run_length_encode_ba
     return column;
 }
 
-Alignment *taf_read_block(Alignment *p_block, bool run_length_encode_bases, LI *li) {
+/*
+ * Gets the first non-empty line, return NULL if reaches end of file
+ */
+static stList *get_first_line(LI *li) {
     stList *tokens = NULL;
     while(1) { // Loop to find the tokens for the first line
         // Read column with coordinates first, using previous alignment block and the coordinates
@@ -139,11 +142,21 @@ Alignment *taf_read_block(Alignment *p_block, bool run_length_encode_bases, LI *
 
         if (stList_length(tokens) == 0) { // Is a white space only line, just ignore it
             stList_destruct(tokens);
+            tokens = NULL;
             continue;
         }
         else { // We have the first line of the block
             break;
         }
+    }
+    return tokens;
+}
+
+Alignment *taf_read_block(Alignment *p_block, bool run_length_encode_bases, LI *li) {
+    stList *tokens = get_first_line(li); // Get the first non-empty line
+
+    if(tokens == NULL) { // If there are no more lines to be had return NULL
+        return NULL;
     }
 
     // Find the coordinates
@@ -207,7 +220,15 @@ Alignment *taf_read_block(Alignment *p_block, bool run_length_encode_bases, LI *
     stList_destruct(alignment_columns);
 
     return block;
+}
 
+stList *taf_read_header(LI *li) {
+    stList *tokens = get_first_line(li);
+    assert(tokens != NULL); // There has to be a valid header line
+    stList *tags = parse_header(tokens, "#", ":");
+    stList_destruct(tokens);
+
+    return tags;
 }
 
 void write_column(Alignment_Row *row, int64_t column, FILE *fh, bool run_length_encode_bases) {
@@ -295,3 +316,14 @@ void taf_write_block(Alignment *p_alignment, Alignment *alignment, bool run_leng
         }
     }
 }
+
+void taf_write_header(stList *tags, FILE *fh) {
+    assert(stList_length(tags) % 2 == 0); // list must be a sequence of alternative key:value pairs
+    fprintf(fh, "#");
+    for(int64_t i=0; i<stList_length(tags); i+=2) {
+        fprintf(fh, " %s:%s", (char *)stList_get(tags, i), (char *)stList_get(tags, i+1));
+    }
+    fprintf(fh, "\n");
+}
+
+

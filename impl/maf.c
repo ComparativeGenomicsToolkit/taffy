@@ -58,6 +58,16 @@ Alignment *maf_read_block(FILE *fh) {
     }
 }
 
+stList *maf_read_header(FILE *fh) {
+    char *line = stFile_getLineFromFile(fh);
+    stList *tokens = stString_split(line);
+    free(line);
+    stList *tags = parse_header(tokens, "##maf", "=");
+    stList_destruct(tokens);
+
+    return tags;
+}
+
 void maf_write_block(Alignment *alignment, FILE *fh) {
     fprintf(fh, "a\n");
     Alignment_Row *row = alignment->row;
@@ -68,4 +78,15 @@ void maf_write_block(Alignment *alignment, FILE *fh) {
     }
     fprintf(fh, "\n"); // Add a blank line at the end of the block
 }
+
+void maf_write_header(stList *tags, FILE *fh) {
+    assert(stList_length(tags) % 2 == 0); // list must be a sequence of alternative key:value pairs
+    fprintf(fh, "##maf");
+    for(int64_t i=0; i<stList_length(tags); i+=2) {
+        fprintf(fh, " %s=%s", (char *)stList_get(tags, i), (char *)stList_get(tags, i+1));
+    }
+    fprintf(fh, "\n");
+}
+
+
 

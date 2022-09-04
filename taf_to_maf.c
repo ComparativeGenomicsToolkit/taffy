@@ -1,5 +1,5 @@
 /*
- * maf_to_taf: Convert a maf alignment into a taf alignment
+ * taf_to_maf: Convert a taf alignment into a maf alignment
  *
  *  Released under the MIT license, see LICENSE.txt
 */
@@ -9,13 +9,11 @@
 #include <time.h>
 
 void usage() {
-    fprintf(stderr, "maf_to_taf [options]\n");
-    fprintf(stderr, "Convert a maf format alignment to taf format\n");
-    fprintf(stderr, "-i --inputFile : Input maf file to invert. If not specified reads from stdin\n");
-    fprintf(stderr, "-o --outputFile : Output taf file. If not specified outputs to stdout\n");
+    fprintf(stderr, "taf_to_maf [options]\n");
+    fprintf(stderr, "Convert a taf format alignment to maf format\n");
+    fprintf(stderr, "-i --inputFile : Input taf file to invert. If not specified reads from stdin\n");
+    fprintf(stderr, "-o --outputFile : Output maf file. If not specified outputs to stdout\n");
     fprintf(stderr, "-l --logLevel : Set the log level\n");
-    fprintf(stderr, "-r --runLengthEncodeBases : Run length encode bases\n");
-    fprintf(stderr, "-s --repeatCoordinatesEveryNColumns : Repeat coordinates of each sequence at least every n columns. Off by default.\n");
     fprintf(stderr, "-h --help : Print this help message\n");
 }
 
@@ -28,8 +26,7 @@ int main(int argc, char *argv[]) {
     char *logLevelString = NULL;
     char *inputFile = NULL;
     char *outputFile = NULL;
-    bool run_length_encode_bases=0;
-    int64_t repeat_coordinates_every_n_columns = -1;
+    bool run_length_encode_bases = 0;
 
     ///////////////////////////////////////////////////////////////////////////
     // Parse the inputs
@@ -39,13 +36,11 @@ int main(int argc, char *argv[]) {
         static struct option long_options[] = { { "logLevel", required_argument, 0, 'l' },
                                                 { "inputFile", required_argument, 0, 'i' },
                                                 { "outputFile", required_argument, 0, 'o' },
-                                                { "runLengthEncodeBases", no_argument, 0, 'r' },
-                                                { "repeatCoordinatesEveryNColumns", required_argument, 0, 's' },
                                                 { "help", no_argument, 0, 'h' },
                                                 { 0, 0, 0, 0 } };
 
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:o:hrs:", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:o:h", long_options, &option_index);
         if (key == -1) {
             break;
         }
@@ -59,12 +54,6 @@ int main(int argc, char *argv[]) {
                 break;
             case 'o':
                 outputFile = optarg;
-                break;
-            case 'r':
-                run_length_encode_bases = 1;
-                break;
-            case 's':
-                repeat_coordinates_every_n_columns = atol(optarg);
                 break;
             case 'h':
                 usage();
@@ -82,32 +71,33 @@ int main(int argc, char *argv[]) {
     st_setLogLevelFromString(logLevelString);
     st_logInfo("Input file string : %s\n", inputFile);
     st_logInfo("Output file string : %s\n", outputFile);
-    st_logInfo("Run length encode bases : %s\n", run_length_encode_bases ? "True" : "False");
-    st_logInfo("Repeat coordinates every n bases : %" PRIi64 "\n", outputFile, repeat_coordinates_every_n_columns);
 
     //////////////////////////////////////////////
-    // Read in the maf blocks and convert to sequence of taf columns
+    // Read in the taf blocks and convert to sequence of maf blocks
     //////////////////////////////////////////////
 
     FILE *input = inputFile == NULL ? stdin : fopen(inputFile, "r");
     FILE *output = outputFile == NULL ? stdout : fopen(outputFile, "w");
+    LI *li = LI_construct(input);
 
-    // Read the maf header and write the taf header
-    stList *tags = maf_read_header(input);
-    if(run_length_encode_bases) {
-        stList_append(tags, stString_copy("run_length_encode_bases"));
-        stList_append(tags, stString_copy("1"));
-    }
-    taf_write_header(tags, output);
-    stList_destruct(tags);
-
-    // Now read in the maf blocks and write the alignment
-    Alignment *alignment, *p_alignment = NULL;
-    while((alignment = maf_read_block(input)) != NULL) {
-        if(p_alignment != NULL) {
-            alignment_link_adjacent(p_alignment, alignment);
+    // Pass the header line to determine parameters and write the maf header
+    stList *tags = taf_read_header(li);
+    assert(stList_length(tags) % 2 == 0);
+    for(int64_t i=0; i<stList_length(tags); i+=2) {
+        char *key = stList_get(tags, i);
+        char *value = stList_get(tags, i+1);
+        if(strcmp(key, "run_length_encode_bases") == 0 && strcmp(value, "1") == 0) {
+            run_length_encode_bases = 1;
+            stList_remove(tags, i); // Remove this tag from the maf output as not relevant
+            stList_remove(tags, i);
         }
-        taf_write_block(p_alignment, alignment, run_length_encode_bases, output);
+    }
+    maf_write_header(tags, output);
+    fprintf(output, "\n"); // Add an extra line on
+
+    Alignment *alignment, *p_alignment = NULL;
+    while((alignment = taf_read_block(p_alignment, run_length_encode_bases, li)) != NULL) {
+        maf_write_block(alignment, output);
         if(p_alignment != NULL) {
             alignment_destruct(p_alignment);
         }
@@ -128,7 +118,7 @@ int main(int argc, char *argv[]) {
         fclose(output);
     }
 
-    st_logInfo("maf_to_taf is done, %" PRIi64 " seconds have elapsed\n", time(NULL) - startTime);
+    st_logInfo("taf_to_maf is done, %" PRIi64 " seconds have elapsed\n", time(NULL) - startTime);
 
     //while(1);
     //assert(0);

@@ -60,3 +60,20 @@ void alignment_link_adjacent(Alignment *left_alignment, Alignment *right_alignme
     WFA_destruct(wfa);
 }
 
+stList *parse_header(stList *tokens, char *header_prefix, char *delimiter) {
+    stList *tags = stList_construct3(0, free);
+    if(stList_length(tokens) == 0 || strcmp((char *)stList_get(tokens, 0), header_prefix) != 0) {
+        st_errAbort("Header line does not start with %s\n", header_prefix);
+    }
+    for(int64_t i=1; i<stList_length(tokens); i++) {
+        char *tag = stList_get(tokens, i);
+        stList *tag_tokens = stString_splitByString(tag, delimiter);
+        if(stList_length(tag_tokens) != 2) {
+            st_errAbort("Header line tags not separated by ':' character: %s\n", tag);
+        }
+        stList_append(tags, stString_copy(stList_get(tag_tokens, 0)));
+        stList_append(tags, stString_copy(stList_get(tag_tokens, 1)));
+    }
+    return tags;
+}
+
