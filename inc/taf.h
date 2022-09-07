@@ -47,7 +47,24 @@ stList *parse_header(stList *tokens, char *header_prefix, char *delimiter);
  * so that we can determine which rows in the right_alignment are a continuation of rows in the
  * left_alignment. We use this for efficiently outputting TAF.
  */
-void alignment_link_adjacent(Alignment *left_alignment, Alignment *right_alignment);
+void alignment_link_adjacent(Alignment *left_alignment, Alignment *right_alignment, bool allow_row_substitutions);
+
+/*
+ * Gets the number of columns in the alignment
+ */
+int64_t alignment_length(Alignment *alignment);
+
+/*
+ * Gets the sum of the interstitial gaps between this block and the next one
+ */
+int64_t alignment_total_gap_length(Alignment *left_alignment);
+
+/*
+ * Merge together adjacent blocks into one alignment. Requires that the alignment
+ * rows are linked together (e.g. with alignment_link_adjacent). Destroys the input
+ * alignments in the process and returns a merged alignment.
+ */
+Alignment *alignment_merge_adjacent(Alignment *left_alignment, Alignment *right_alignment);
 
 /*
  * Read a maf header line

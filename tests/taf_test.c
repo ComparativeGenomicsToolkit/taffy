@@ -13,7 +13,7 @@ static void test_taf(CuTest *testCase) {
     Alignment *alignment, *p_alignment = NULL;
     while((alignment = maf_read_block(file)) != NULL) {
         if(p_alignment != NULL) {
-            alignment_link_adjacent(p_alignment, alignment);
+            alignment_link_adjacent(p_alignment, alignment, 1);
         }
         taf_write_block(p_alignment, alignment, run_length_encode_bases, out_file);
         if(p_alignment != NULL) {

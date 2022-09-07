@@ -105,7 +105,7 @@ int main(int argc, char *argv[]) {
     Alignment *alignment, *p_alignment = NULL;
     while((alignment = maf_read_block(input)) != NULL) {
         if(p_alignment != NULL) {
-            alignment_link_adjacent(p_alignment, alignment);
+            alignment_link_adjacent(p_alignment, alignment, 1);
         }
         taf_write_block(p_alignment, alignment, run_length_encode_bases, output);
         if(p_alignment != NULL) {

@@ -36,11 +36,11 @@ static Alignment *parse_coordinates_and_establish_block(Alignment *p_block, stLi
     while(l_row != NULL) {
         Alignment_Row *row = st_calloc(1, sizeof(Alignment_Row));
         alignment->row_number++; // Increment the row number
-        // Clone the fields
-        *row = *l_row;
-        row->bases = NULL; row->left_gap_sequence = NULL;
-        row->start += l_row->length;
-        row->sequence_name = stString_copy(l_row->sequence_name); // copy memory that needs to be copied
+        // Copy the relevant fields
+        row->start = l_row->start + l_row->length;
+        row->sequence_name = stString_copy(l_row->sequence_name);
+        row->sequence_length = l_row->sequence_length;
+        row->strand = l_row->strand;
         // Link up the previous and current rows
         *p_row = row;
         p_row = &(row->n_row);
@@ -67,11 +67,11 @@ static Alignment *parse_coordinates_and_establish_block(Alignment *p_block, stLi
         if(op_type[0] == 'i') { // Is inserting a row
             alignment->row_number++;
             Alignment_Row *new_row = st_calloc(1, sizeof(Alignment_Row)); // Make the new row
-            // Connect it up
+            // Connect it up, putting the new row immediately before the old one
             new_row->n_row = *row;
             *row = new_row;
             // Fill it out
-            parse_coordinates(*row, &j, tokens);
+            parse_coordinates(new_row, &j, tokens);
         } else if(op_type[0] == 's') { // Is substituting a row
             free((*row)->sequence_name); // clean up
             parse_coordinates(*row, &j, tokens);
