@@ -50,6 +50,7 @@ static Alignment *parse_coordinates_and_establish_block(Alignment *p_block, stLi
         // Get the next row to copy
         l_row = l_row->n_row;
     }
+    assert(p_block == NULL || alignment->row_number == p_block->row_number);
 
     // Now parse the tokens to edit the rows
     int64_t j;
@@ -76,10 +77,14 @@ static Alignment *parse_coordinates_and_establish_block(Alignment *p_block, stLi
             free((*row)->sequence_name); // clean up
             parse_coordinates(*row, &j, tokens);
         } else if(op_type[0] == 'd') { // Is deleting a row
-            // Remove the row
+            // Remove the row from the list of rows
             alignment->row_number--;
             Alignment_Row *r = *row;
             *row = r->n_row;
+            // Fix left pointer of row in previous block
+            assert(r->l_row != NULL);
+            r->l_row->r_row = NULL;
+            // Now delete the row
             r->n_row = NULL;
             Alignment_Row_destruct(r);
         } else if(op_type[0] == 'g') { // Is making a gap without the sequence specified

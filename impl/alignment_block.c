@@ -65,6 +65,9 @@ void alignment_link_adjacent(Alignment *left_alignment, Alignment *right_alignme
         Alignment_Row *right_row = stList_get(aligned_rows, i+1);
         left_row->r_row = right_row;
         right_row->l_row = left_row;
+        if(!allow_row_substitutions) {
+            assert(rows_equal(left_row, right_row));
+        }
     }
     // clean up
     stList_destruct(left_rows);
@@ -148,6 +151,9 @@ Alignment *alignment_merge_adjacent(Alignment *left_alignment, Alignment *right_
 
             // Update p_l_row to point at l_row's n_row pointer
             p_l_row = &(l_row->n_row);
+
+            // Increase the row number
+            left_alignment->row_number++;
         }
         else {
             // Update p_l_row to point at r_row->l_row's n_row pointer
@@ -187,17 +193,24 @@ Alignment *alignment_merge_adjacent(Alignment *left_alignment, Alignment *right_
                 assert(j+i < total_interstitial_gap_length);
                 gap_string[j+i] = l_row->r_row->left_gap_sequence != NULL ? l_row->r_row->left_gap_sequence[j] : 'N';
             }
+            i += interstitial_bases; // update i
 
             // Is not a deletion, so merge together two adjacent rows
             char *bases = stString_print("%s%s%s", l_row->bases, gap_string, l_row->r_row->bases);
-            free(l_row->bases);
+            free(l_row->bases); // clean up
             free(gap_string);
             l_row->bases = bases;
 
             // Update the left row's length coordinate
             l_row->length += interstitial_bases + l_row->r_row->length;
-            // Remove ref to the right row as we'll delete it at the end
-            l_row->r_row = NULL;
+            // Update the l_row's r_row pointer...
+            if(l_row->r_row->r_row != NULL) { // Check
+                assert(l_row->r_row->r_row->l_row == l_row->r_row);
+            }
+            l_row->r_row = l_row->r_row->r_row;
+            if(l_row->r_row != NULL) {
+                l_row->r_row->l_row = l_row;
+            }
         }
 
         l_row = l_row->n_row; // Move to the next left alignment row

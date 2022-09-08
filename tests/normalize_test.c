@@ -13,14 +13,11 @@ static void test_normalize(CuTest *testCase) {
             alignment_link_adjacent(p_alignment, alignment, 0);
             if((alignment_length(p_alignment) < 50 || alignment_length(alignment) < 50) &&
                 alignment_total_gap_length(p_alignment) < 50) {
-                //maf_write_block(p_alignment, stderr);
-                //maf_write_block(alignment, stderr);
-                //st_uglyf("Merging\n");
+
                 p_alignment = alignment_merge_adjacent(p_alignment, alignment);
-                //maf_write_block(p_alignment, stderr);
+
             }
             else {
-                maf_write_block(p_alignment, stderr);
                 alignment_destruct(p_alignment);
                 p_alignment = alignment;
             }
@@ -30,7 +27,7 @@ static void test_normalize(CuTest *testCase) {
         }
     }
     if(p_alignment != NULL) {
-        maf_write_block(p_alignment, stderr);
+        //maf_write_block(p_alignment, stderr);
         alignment_destruct(p_alignment);
     }
     fclose(file);

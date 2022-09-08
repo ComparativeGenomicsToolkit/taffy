@@ -11,7 +11,7 @@ stTafLibs = ${commonTafLibs} ${LDLIBS}
 all: all_libs all_progs
 all_libs: dependencies ${LIBDIR}/stTaf.a
 
-all_progs: all_libs ${BINDIR}/stTafTests ${BINDIR}/maf_to_taf ${BINDIR}/taf_to_maf ${BINDIR}/maf_norm
+all_progs: all_libs ${BINDIR}/stTafTests ${BINDIR}/maf_to_taf ${BINDIR}/taf_to_maf ${BINDIR}/taf_norm
 
 dependencies:
 	mkdir -p ${LIBDIR} ${BINDIR}
@@ -35,8 +35,8 @@ ${BINDIR}/maf_to_taf : maf_to_taf.c ${LIBDIR}/stTaf.a ${stTafDependencies}
 ${BINDIR}/taf_to_maf : taf_to_maf.c ${LIBDIR}/stTaf.a ${stTafDependencies}
 	${CC} ${CPPFLAGS} ${CFLAGS} -o ${BINDIR}/taf_to_maf taf_to_maf.c ${libSources} ${LIBDIR}/stTaf.a ${stTafLibs} ${LDLIBS}
 
-${BINDIR}/maf_norm : maf_norm.c ${LIBDIR}/stTaf.a ${stTafDependencies}
-	${CC} ${CPPFLAGS} ${CFLAGS} -o ${BINDIR}/maf_norm maf_norm.c ${libSources} ${LIBDIR}/stTaf.a ${stTafLibs} ${LDLIBS}
+${BINDIR}/taf_norm : taf_norm.c ${LIBDIR}/stTaf.a ${stTafDependencies}
+	${CC} ${CPPFLAGS} ${CFLAGS} -o ${BINDIR}/taf_norm taf_norm.c ${libSources} ${LIBDIR}/stTaf.a ${stTafLibs} ${LDLIBS}
 
 
 clean :
