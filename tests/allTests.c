@@ -24,7 +24,10 @@ static int allTests(void) {
     CuSuiteSummary(suite, output);
     CuSuiteDetails(suite, output);
     printf("%s\n", output->buffer);
-    return suite->failCount > 0;
+    bool failed_tests = suite->failCount > 0;
+    CuSuiteDelete(suite);
+    CuStringDelete(output);
+    return failed_tests;
 }
 
 int main(int argc, char *argv[]) {
