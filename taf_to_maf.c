@@ -93,7 +93,6 @@ int main(int argc, char *argv[]) {
         }
     }
     maf_write_header(tags, output);
-    fprintf(output, "\n"); // Add an extra line on
 
     Alignment *alignment, *p_alignment = NULL;
     while((alignment = taf_read_block(p_alignment, run_length_encode_bases, li)) != NULL) {

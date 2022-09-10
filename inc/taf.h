@@ -37,6 +37,12 @@ void alignment_destruct(Alignment *alignment);
 void Alignment_Row_destruct(Alignment_Row *row);
 
 /*
+ * Returns non-zero if left_row represents a substring on the same contig and strand as right_row, but
+ * immediately before
+ */
+bool alignment_row_is_predecessor(Alignment_Row *left_row, Alignment_Row *right_row);
+
+/*
  * Parse a header line that mist start with the header_prefix and then be composed of a series of key value tags,
  * each delimited by the delimiter word.
  */

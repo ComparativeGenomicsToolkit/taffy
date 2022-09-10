@@ -183,7 +183,7 @@ int main(int argc, char *argv[]) {
         fclose(output);
     }
 
-    st_logInfo("taf_normalize is done, %" PRIi64 " seconds have elapsed\n", time(NULL) - startTime);
+    st_logInfo("taf_norm is done, %" PRIi64 " seconds have elapsed\n", time(NULL) - startTime);
 
     //while(1);
     //assert(0);

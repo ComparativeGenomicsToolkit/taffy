@@ -33,7 +33,7 @@ static stList *get_rows_in_a_list(Alignment_Row *row) {
     return l;
 }
 
-static bool rows_equal(Alignment_Row *left_row, Alignment_Row *right_row) {
+bool alignment_row_is_predecessor(Alignment_Row *left_row, Alignment_Row *right_row) {
     // Do the rows match
     return strcmp(left_row->sequence_name, right_row->sequence_name) == 0 && left_row->strand == right_row->strand &&
             left_row->start + left_row->length <= right_row->start;
@@ -43,7 +43,7 @@ void alignment_link_adjacent(Alignment *left_alignment, Alignment *right_alignme
     stList *left_rows = get_rows_in_a_list(left_alignment->row);
     stList *right_rows = get_rows_in_a_list(right_alignment->row);
     // get the alignment of the rows
-    WFA *wfa = WFA_construct(left_rows, right_rows, (bool (*)(void *, void *))rows_equal, 1,
+    WFA *wfa = WFA_construct(left_rows, right_rows, (bool (*)(void *, void *))alignment_row_is_predecessor, 1,
                              allow_row_substitutions ? 1 : 100000000); // Use unit gap and mismatch costs for the diff
                              // unless we disallow substitutions, in which case use an arbitrarily large mismatch cost
     stList *aligned_rows = WFA_get_alignment(wfa);
@@ -66,7 +66,7 @@ void alignment_link_adjacent(Alignment *left_alignment, Alignment *right_alignme
         left_row->r_row = right_row;
         right_row->l_row = left_row;
         if(!allow_row_substitutions) {
-            assert(rows_equal(left_row, right_row));
+            assert(alignment_row_is_predecessor(left_row, right_row));
         }
     }
     // clean up
@@ -84,7 +84,11 @@ int64_t alignment_total_gap_length(Alignment *left_alignment) {
     Alignment_Row *l_row = left_alignment->row;
     int64_t total_interstitial_gap_length = 0;
     while(l_row != NULL) {
-        if(l_row->r_row != NULL && rows_equal(l_row, l_row->r_row)) {
+        if(l_row->r_row != NULL && alignment_row_is_predecessor(l_row, l_row->r_row)) {
+            //int64_t i = l_row->r_row->start - (l_row->start + l_row->length);
+            //if(i > total_interstitial_gap_length) {
+            //    total_interstitial_gap_length = i;
+            //}
             total_interstitial_gap_length += l_row->r_row->start - (l_row->start + l_row->length);
         }
         l_row = l_row->n_row; // Move to the next left alignment row
@@ -192,6 +196,7 @@ Alignment *alignment_merge_adjacent(Alignment *left_alignment, Alignment *right_
             for(int64_t j=0; j<interstitial_bases; j++) {
                 assert(j+i < total_interstitial_gap_length);
                 gap_string[j+i] = l_row->r_row->left_gap_sequence != NULL ? l_row->r_row->left_gap_sequence[j] : 'N';
+                //gap_string[j] = l_row->r_row->left_gap_sequence != NULL ? l_row->r_row->left_gap_sequence[j] : 'N';
             }
             i += interstitial_bases; // update i
 

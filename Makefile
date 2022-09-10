@@ -11,7 +11,7 @@ stTafLibs = ${commonTafLibs} ${LDLIBS}
 all: all_libs all_progs
 all_libs: dependencies ${LIBDIR}/stTaf.a
 
-all_progs: all_libs ${BINDIR}/stTafTests ${BINDIR}/maf_to_taf ${BINDIR}/taf_to_maf ${BINDIR}/taf_norm
+all_progs: all_libs ${BINDIR}/stTafTests ${BINDIR}/maf_to_taf ${BINDIR}/taf_to_maf ${BINDIR}/taf_norm ${BINDIR}/taf_add_gap_bases
 
 dependencies:
 	mkdir -p ${LIBDIR} ${BINDIR}
@@ -38,6 +38,8 @@ ${BINDIR}/taf_to_maf : taf_to_maf.c ${LIBDIR}/stTaf.a ${stTafDependencies}
 ${BINDIR}/taf_norm : taf_norm.c ${LIBDIR}/stTaf.a ${stTafDependencies}
 	${CC} ${CPPFLAGS} ${CFLAGS} -o ${BINDIR}/taf_norm taf_norm.c ${libSources} ${LIBDIR}/stTaf.a ${stTafLibs} ${LDLIBS}
 
+${BINDIR}/taf_add_gap_bases : taf_add_gap_bases.c ${LIBDIR}/stTaf.a ${stTafDependencies}
+	${CC} ${CPPFLAGS} ${CFLAGS} -o ${BINDIR}/taf_add_gap_bases taf_add_gap_bases.c ${libSources} ${LIBDIR}/stTaf.a ${stTafLibs} ${LDLIBS}
 
 clean :
 	cd submodules/sonLib && ${MAKE} clean

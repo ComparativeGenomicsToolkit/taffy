@@ -85,7 +85,7 @@ void maf_write_header(stList *tags, FILE *fh) {
     for(int64_t i=0; i<stList_length(tags); i+=2) {
         fprintf(fh, " %s=%s", (char *)stList_get(tags, i), (char *)stList_get(tags, i+1));
     }
-    fprintf(fh, "\n");
+    fprintf(fh, "\n\n"); // Add an extra new line to space between the header and the a lines
 }
 
 
