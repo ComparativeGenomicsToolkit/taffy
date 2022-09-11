@@ -80,16 +80,20 @@ int64_t alignment_length(Alignment *alignment) {
     return alignment->row == NULL ? 0 : strlen(alignment->row->bases);
 }
 
-int64_t alignment_total_gap_length(Alignment *left_alignment) {
+int64_t alignment_total_gap_length(Alignment *left_alignment, bool align_gap_sequences) {
     Alignment_Row *l_row = left_alignment->row;
     int64_t total_interstitial_gap_length = 0;
     while(l_row != NULL) {
         if(l_row->r_row != NULL && alignment_row_is_predecessor(l_row, l_row->r_row)) {
-            //int64_t i = l_row->r_row->start - (l_row->start + l_row->length);
-            //if(i > total_interstitial_gap_length) {
-            //    total_interstitial_gap_length = i;
-            //}
-            total_interstitial_gap_length += l_row->r_row->start - (l_row->start + l_row->length);
+            int64_t i = l_row->r_row->start - (l_row->start + l_row->length);
+            if(align_gap_sequences) {
+                if (i > total_interstitial_gap_length) {
+                    total_interstitial_gap_length = i;
+                }
+            }
+            else {
+                total_interstitial_gap_length += i;
+            }
         }
         l_row = l_row->n_row; // Move to the next left alignment row
     }
@@ -122,16 +126,24 @@ static char *make_gap(int64_t length) {
     return stString_copy(gap_alignment);
 }
 
-Alignment *alignment_merge_adjacent(Alignment *left_alignment, Alignment *right_alignment) {
-    // First link together the adjacent blocks
-    alignment_link_adjacent(left_alignment, right_alignment, 0);
+Alignment *alignment_merge_adjacent(Alignment *left_alignment, Alignment *right_alignment, bool align_gap_sequences) {
+    // First un-link any rows that are substitutions as these can't be merged
+    Alignment_Row *r_row = right_alignment->row;
+    while(r_row != NULL) {
+        if(r_row->l_row != NULL && !alignment_row_is_predecessor(r_row->l_row, r_row)) {
+            assert(r_row->l_row->r_row == r_row);
+            r_row->l_row->r_row = NULL; // unlink 1
+            r_row->l_row = NULL; // unlink 2
+        }
+        r_row = r_row->n_row;
+    }
 
     // Get the length of the left and right alignments
     int64_t left_alignment_length = alignment_length(left_alignment);
     int64_t right_alignment_length = alignment_length(right_alignment);
 
     // Add the new rows in the right alignment to the left alignment
-    Alignment_Row *r_row = right_alignment->row, **p_l_row = &(left_alignment->row);
+    r_row = right_alignment->row; Alignment_Row **p_l_row = &(left_alignment->row);
     while(r_row != NULL) {
         if(r_row->l_row == NULL) { // Is an insertion
             // Make a new l_row
@@ -167,7 +179,7 @@ Alignment *alignment_merge_adjacent(Alignment *left_alignment, Alignment *right_
     }
 
     // Calculate the sum of the length of any interstitial inserts
-    int64_t total_interstitial_gap_length = alignment_total_gap_length(left_alignment);
+    int64_t total_interstitial_gap_length = alignment_total_gap_length(left_alignment, align_gap_sequences);
 
     // Now finally extend the left alignment rows to include the right alignment rows
     int64_t i=0; // An index into the interstitial alignment coordinate
@@ -194,9 +206,13 @@ Alignment *alignment_merge_adjacent(Alignment *left_alignment, Alignment *right_
             char *gap_string = make_gap(total_interstitial_gap_length);
             int64_t interstitial_bases = l_row->r_row->start - (l_row->start + l_row->length);
             for(int64_t j=0; j<interstitial_bases; j++) {
-                assert(j+i < total_interstitial_gap_length);
-                gap_string[j+i] = l_row->r_row->left_gap_sequence != NULL ? l_row->r_row->left_gap_sequence[j] : 'N';
-                //gap_string[j] = l_row->r_row->left_gap_sequence != NULL ? l_row->r_row->left_gap_sequence[j] : 'N';
+                if(align_gap_sequences) {
+                    gap_string[j] = l_row->r_row->left_gap_sequence != NULL ? l_row->r_row->left_gap_sequence[j] : 'N';
+                }
+                else {
+                    assert(j + i < total_interstitial_gap_length);
+                    gap_string[j + i] = l_row->r_row->left_gap_sequence != NULL ? l_row->r_row->left_gap_sequence[j] : 'N';
+                }
             }
             i += interstitial_bases; // update i
 

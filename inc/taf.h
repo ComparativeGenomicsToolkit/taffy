@@ -61,16 +61,20 @@ void alignment_link_adjacent(Alignment *left_alignment, Alignment *right_alignme
 int64_t alignment_length(Alignment *alignment);
 
 /*
- * Gets the sum of the interstitial gaps between this block and the next one
+ * Gets the sum of the interstitial gaps between this block and the next one. If align_gap_sequences
+ * is non-zero the length of longest individual sequence is returned instead.
  */
-int64_t alignment_total_gap_length(Alignment *left_alignment);
+int64_t alignment_total_gap_length(Alignment *left_alignment, bool align_gap_sequences);
 
 /*
  * Merge together adjacent blocks into one alignment. Requires that the alignment
  * rows are linked together (e.g. with alignment_link_adjacent). Destroys the input
  * alignments in the process and returns a merged alignment.
+ *
+ * If align_gap_sequences is non-zero then sequences are aligned.
  */
-Alignment *alignment_merge_adjacent(Alignment *left_alignment, Alignment *right_alignment);
+Alignment *alignment_merge_adjacent(Alignment *left_alignment, Alignment *right_alignment,
+                                    bool align_gap_sequences);
 
 /*
  * Read a maf header line

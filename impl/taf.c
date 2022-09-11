@@ -290,12 +290,16 @@ void write_coordinates(Alignment_Row *p_row, Alignment_Row *row, FILE *fh) {
                     i, row->sequence_name, row->start, row->strand ? '+' : '-', row->sequence_length);
         }
         else {
-            if(strcmp(row->l_row->sequence_name, row->sequence_name) == 0 &&
-                row->l_row->strand == row->strand &&
-                row->l_row->start + row->l_row->length <= row->start) {
-                if(row->l_row->start + row->l_row->length < row->start) { // if there is an indel
-                    fprintf(fh, " g %" PRIi64 " %" PRIi64 "",
-                            i, row->start - (row->l_row->start + row->l_row->length));
+            if(alignment_row_is_predecessor(row->l_row, row)) {
+                int64_t gap_length = row->start - (row->l_row->start + row->l_row->length);
+                if(gap_length > 0) { // if there is an indel
+                    if(row->left_gap_sequence != NULL) {
+                        assert(strlen(row->left_gap_sequence) == gap_length);
+                        fprintf(fh, " G %" PRIi64 " %s", i, row->left_gap_sequence);
+                    }
+                    else {
+                        fprintf(fh, " g %" PRIi64 " %" PRIi64 "", i, gap_length);
+                    }
                 }
             }
             else { // Substitute one row for another

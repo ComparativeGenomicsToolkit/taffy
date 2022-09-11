@@ -20,6 +20,7 @@ void usage() {
     fprintf(stderr, "-k --maf : Print maf output instead of taf\n");
     fprintf(stderr, "-m --maximumBlockLengthToMerge : Only merge together any two adjacent blocks if one or both is less than this many bases long, by default: %" PRIi64 "\n", maximum_block_length_to_merge);
     fprintf(stderr, "-n --maximumGapLength : Only merge together two adjacent blocks if the total number of unaligned bases between the blocks is less than this many bases, by default: %" PRIi64 "\n", maximum_gap_length);
+    fprintf(stderr, "-p --alignGapSequences : Align gap strings between blocks rather than leaving them unaligned\n");
     fprintf(stderr, "-h --help : Print this help message\n");
 }
 
@@ -60,6 +61,7 @@ int main(int argc, char *argv[]) {
     char *outputFile = NULL;
     bool run_length_encode_bases = 0;
     bool output_maf = 0;
+    bool align_gap_sequences = 0;
 
     ///////////////////////////////////////////////////////////////////////////
     // Parse the inputs
@@ -73,10 +75,11 @@ int main(int argc, char *argv[]) {
                                                 { "help", no_argument, 0, 'h' },
                                                 { "maximumBlockLengthToMerge", required_argument, 0, 'm' },
                                                 { "maximumGapLength", required_argument, 0, 'n' },
+                                                { "alignGapSequences", no_argument, 0, 'p' },
                                                 { 0, 0, 0, 0 } };
 
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:o:hm:n:k", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:o:hm:n:kp", long_options, &option_index);
         if (key == -1) {
             break;
         }
@@ -103,6 +106,9 @@ int main(int argc, char *argv[]) {
             case 'n':
                 maximum_gap_length = atol(optarg);
                 break;
+            case 'p':
+                align_gap_sequences = 1;
+                break;
             default:
                 usage();
                 return 1;
@@ -118,6 +124,8 @@ int main(int argc, char *argv[]) {
     st_logInfo("Output file string : %s\n", outputFile);
     st_logInfo("Maximum block length to merge : %" PRIi64 "\n", maximum_block_length_to_merge);
     st_logInfo("Maximum gap length : %" PRIi64 "\n", maximum_gap_length);
+    st_logInfo("Output maf : %s\n", output_maf ? "true" : "false");
+    st_logInfo("Align gap sequences : %s\n", align_gap_sequences ? "true" : "false");
 
     //////////////////////////////////////////////
     // Read in the taf blocks and merge blocks that are sufficiently small
@@ -146,11 +154,10 @@ int main(int argc, char *argv[]) {
     Alignment *alignment, *p_alignment = NULL, *p_p_alignment = NULL;
     while((alignment = get_next_taf_block(li, run_length_encode_bases)) != NULL) {
         if(p_alignment != NULL) {
-            alignment_link_adjacent(p_alignment, alignment, 0);
             if ((alignment_length(p_alignment) <= maximum_block_length_to_merge ||
                  alignment_length(alignment) <= maximum_block_length_to_merge) &&
-                    alignment_total_gap_length(p_alignment) <= maximum_gap_length) {
-                p_alignment = alignment_merge_adjacent(p_alignment, alignment);
+                    alignment_total_gap_length(p_alignment, align_gap_sequences) <= maximum_gap_length) {
+                p_alignment = alignment_merge_adjacent(p_alignment, alignment, align_gap_sequences);
             } else {
                 output_maf ? maf_write_block(p_alignment, output) : taf_write_block(p_p_alignment, p_alignment, run_length_encode_bases, output); // Write the maf block
                 if(p_p_alignment != NULL) {

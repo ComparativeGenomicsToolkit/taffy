@@ -66,7 +66,6 @@ which format to use we use the tag "run_length_encode_bases=1" in the header.
 If "run_length_encode_bases=0" or the tag is not specified the format is
 to NOT use run length encoding.)
 
-
     coordinates_column -> ';' coordinates
     
     coordinates -> coordinate_operation coordinates 
@@ -78,7 +77,6 @@ to NOT use run length encoding.)
                          -> 's' row coordinate
                          -> 'g' row gap_length
                          -> 'G' row gap_string
-
 
 (The 'i' stands for insertion, the 'd' for deletion, the 's' for substitution, 'g' and 'G' for gap. These operations
 allow us to update the coordinates of the sequences as we go, and work as their name suggests. Rows are indexed from zero.
@@ -104,7 +102,6 @@ long substrings. Using the 'G' instead of 'g' allows one to instead specify the 
     strand -> '+'
            -> '-'
 
-
 The following shows by example the translation between the MAF format and TAF format.
 
 The MAF file (602 bytes):
@@ -123,7 +120,6 @@ The MAF file (602 bytes):
     s       simHuman.chr6   446338  8       +       601863  TTCTTCCG
     s       simMouse.chr6   460762  8       +       636262  TTTTACCG
     s       simRat.chr6     470355  8       +       647215  TTTTACCG
-
 
 The corresponding TAF file (262 bytes):
 

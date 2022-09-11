@@ -18,16 +18,17 @@ static void test_normalize(CuTest *testCase) {
     // Read a maf and write a copy of it
     FILE *file = fopen(example_file, "r");
     Alignment *alignment, *p_alignment = NULL;
+    bool align_gap_sequences = 1;
     while((alignment = maf_read_block(file)) != NULL) {
         if(p_alignment != NULL) {
             // Align the rows of the block
             alignment_link_adjacent(p_alignment, alignment, 0);
 
             // And the expected length of the alignment
-            int64_t combined_alignment_length = alignment_length(p_alignment) + alignment_length(alignment) + alignment_total_gap_length(p_alignment);
+            int64_t combined_alignment_length = alignment_length(p_alignment) + alignment_length(alignment) + alignment_total_gap_length(p_alignment, align_gap_sequences);
 
             if((alignment_length(p_alignment) < 50 || alignment_length(alignment) < 50) &&
-                alignment_total_gap_length(p_alignment) < 50) {
+                alignment_total_gap_length(p_alignment, align_gap_sequences) < 50) {
 
                 // Calculate the number of expected rows and get list of row coordinates
                 uint64_t combined_alignment_rows=0;
@@ -47,7 +48,7 @@ static void test_normalize(CuTest *testCase) {
                     row = row->n_row;
                 }
 
-                p_alignment = alignment_merge_adjacent(p_alignment, alignment);
+                p_alignment = alignment_merge_adjacent(p_alignment, alignment, align_gap_sequences);
 
                 // Check we have the expected number of rows
                 CuAssertIntEquals(testCase, combined_alignment_rows, p_alignment->row_number);

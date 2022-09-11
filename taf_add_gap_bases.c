@@ -41,6 +41,7 @@ void add_gap_strings(Alignment *p_alignment, Alignment *alignment, stHash *fasta
                 }
                 else {
                     row->left_gap_sequence = stString_getSubString(seq, row->l_row->start + row->l_row->length, gap_length);
+                    assert(strlen(row->left_gap_sequence) == gap_length);
                 }
             }
         }
