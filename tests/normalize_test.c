@@ -89,9 +89,9 @@ static void test_normalize(CuTest *testCase) {
     fclose(file);
 }
 
-static void test_maf_norm(CuTest *testCase) {
+static void test_maf_norm_to_maf(CuTest *testCase) {
     /*
-     * Run taf_norm with the evolver mammals files anc check command succeeds.
+     * Run taf_norm with the evolver mammals to output a maf and check command succeeds.
      */
     // Example maf file
     char *example_file = "./tests/evolverMammals.maf";
@@ -101,9 +101,22 @@ static void test_maf_norm(CuTest *testCase) {
     CuAssertIntEquals(testCase, 0, i); // return value should be zero
 }
 
+static void test_maf_norm(CuTest *testCase) {
+    /*
+     * Run taf_norm with the evolver mammals files and check command succeeds.
+     */
+    // Example maf file
+    char *example_file = "./tests/evolverMammals.maf";
+    char *output_file = "./tests/evolverMammals.taf.norm";
+    int i = st_system("./bin/maf_to_taf -i %s | ./bin/taf_add_gap_bases ./tests/seqs/* | ./bin/taf_norm -p > %s",
+                      example_file, output_file);
+    CuAssertIntEquals(testCase, 0, i); // return value should be zero
+}
+
 CuSuite* normalize_test_suite(void) {
     CuSuite* suite = CuSuiteNew();
     SUITE_ADD_TEST(suite, test_normalize);
     SUITE_ADD_TEST(suite, test_maf_norm);
+    SUITE_ADD_TEST(suite, test_maf_norm_to_maf);
     return suite;
 }
