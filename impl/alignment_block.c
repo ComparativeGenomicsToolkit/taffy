@@ -117,6 +117,19 @@ stList *parse_header(stList *tokens, char *header_prefix, char *delimiter) {
     return tags;
 }
 
+int64_t alignment_number_of_common_rows(Alignment *left_alignment, Alignment *right_alignment) {
+    // First un-link any rows that are substitutions as these can't be merged
+    Alignment_Row *r_row = right_alignment->row;
+    int64_t shared_rows = 0;
+    while (r_row != NULL) {
+        if (r_row->l_row != NULL && alignment_row_is_predecessor(r_row->l_row, r_row)) {
+            shared_rows++;
+        }
+        r_row = r_row->n_row;
+    }
+    return shared_rows;
+}
+
 static char *make_gap(int64_t length) {
     char gap_alignment[length+1];
     for(int64_t i=0; i<length; i++) {

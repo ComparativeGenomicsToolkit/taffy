@@ -8,8 +8,9 @@
 #include <getopt.h>
 #include <time.h>
 
-int64_t maximum_block_length_to_merge = 10;
-int64_t maximum_gap_length = 10;
+int64_t maximum_block_length_to_merge = 200;
+int64_t maximum_gap_length = 30;
+float fraction_shared_rows = 0.6;
 
 void usage() {
     fprintf(stderr, "taf_norm [options]\n");
@@ -21,6 +22,7 @@ void usage() {
     fprintf(stderr, "-m --maximumBlockLengthToMerge : Only merge together any two adjacent blocks if one or both is less than this many bases long, by default: %" PRIi64 "\n", maximum_block_length_to_merge);
     fprintf(stderr, "-n --maximumGapLength : Only merge together two adjacent blocks if the total number of unaligned bases between the blocks is less than this many bases, by default: %" PRIi64 "\n", maximum_gap_length);
     fprintf(stderr, "-p --alignGapSequences : Align gap strings between blocks rather than leaving them unaligned\n");
+    fprintf(stderr, "-q --fractionSharedRows : The fraction of rows between two blocks that need to be shared for a merge, default: %f\n", fraction_shared_rows);
     fprintf(stderr, "-h --help : Print this help message\n");
 }
 
@@ -76,10 +78,11 @@ int main(int argc, char *argv[]) {
                                                 { "maximumBlockLengthToMerge", required_argument, 0, 'm' },
                                                 { "maximumGapLength", required_argument, 0, 'n' },
                                                 { "alignGapSequences", no_argument, 0, 'p' },
+                                                { "fractionSharedRows", required_argument, 0, 'q' },
                                                 { 0, 0, 0, 0 } };
 
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:o:hm:n:kp", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:o:hm:n:kpq:", long_options, &option_index);
         if (key == -1) {
             break;
         }
@@ -109,6 +112,9 @@ int main(int argc, char *argv[]) {
             case 'p':
                 align_gap_sequences = 1;
                 break;
+            case 'q':
+                fraction_shared_rows = atof(optarg);
+                break;
             default:
                 usage();
                 return 1;
@@ -126,6 +132,7 @@ int main(int argc, char *argv[]) {
     st_logInfo("Maximum gap length : %" PRIi64 "\n", maximum_gap_length);
     st_logInfo("Output maf : %s\n", output_maf ? "true" : "false");
     st_logInfo("Align gap sequences : %s\n", align_gap_sequences ? "true" : "false");
+    st_logInfo("Fraction shared rows to merge adjacent blocks : %f\n", fraction_shared_rows);
 
     //////////////////////////////////////////////
     // Read in the taf blocks and merge blocks that are sufficiently small
@@ -154,9 +161,12 @@ int main(int argc, char *argv[]) {
     Alignment *alignment, *p_alignment = NULL, *p_p_alignment = NULL;
     while((alignment = get_next_taf_block(li, run_length_encode_bases)) != NULL) {
         if(p_alignment != NULL) {
-            if ((alignment_length(p_alignment) <= maximum_block_length_to_merge ||
+            int64_t common_rows = alignment_number_of_common_rows(p_alignment, alignment);
+            int64_t total_rows = alignment->row_number + p_alignment->row_number - common_rows;
+            if (common_rows >= total_rows * fraction_shared_rows &&
+                (alignment_length(p_alignment) <= maximum_block_length_to_merge ||
                  alignment_length(alignment) <= maximum_block_length_to_merge) &&
-                    alignment_total_gap_length(p_alignment, align_gap_sequences) <= maximum_gap_length) {
+                 alignment_total_gap_length(p_alignment, align_gap_sequences) <= maximum_gap_length) {
                 p_alignment = alignment_merge_adjacent(p_alignment, alignment, align_gap_sequences);
             } else {
                 output_maf ? maf_write_block(p_alignment, output) : taf_write_block(p_p_alignment, p_alignment, run_length_encode_bases, output); // Write the maf block

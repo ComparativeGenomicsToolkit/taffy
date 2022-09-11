@@ -67,6 +67,11 @@ int64_t alignment_length(Alignment *alignment);
 int64_t alignment_total_gap_length(Alignment *left_alignment, bool align_gap_sequences);
 
 /*
+ * Number of shared rows between two alignments
+ */
+int64_t alignment_number_of_common_rows(Alignment *left_alignment, Alignment *right_alignment);
+
+/*
  * Merge together adjacent blocks into one alignment. Requires that the alignment
  * rows are linked together (e.g. with alignment_link_adjacent). Destroys the input
  * alignments in the process and returns a merged alignment.
