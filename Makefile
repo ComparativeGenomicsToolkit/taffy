@@ -41,6 +41,9 @@ ${BINDIR}/taf_norm : taf_norm.c ${LIBDIR}/stTaf.a ${stTafDependencies}
 ${BINDIR}/taf_add_gap_bases : taf_add_gap_bases.c ${LIBDIR}/stTaf.a ${stTafDependencies}
 	${CC} ${CPPFLAGS} ${CFLAGS} -o ${BINDIR}/taf_add_gap_bases taf_add_gap_bases.c ${libSources} ${LIBDIR}/stTaf.a ${stTafLibs} ${LDLIBS}
 
+test : all
+	${BINDIR}/stTafTests
+
 clean :
 	cd submodules/sonLib && ${MAKE} clean
 	rm -rf *.o ${LIBDIR} ${BINDIR}

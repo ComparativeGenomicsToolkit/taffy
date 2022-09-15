@@ -93,7 +93,7 @@ long substrings. Using the 'G' instead of 'g' allows one to instead specify the 
     
     gap_string -> alphabet string ([A-Z,a-z]*)
     
-    coordinate -> sequence_name offset strand
+    coordinate -> sequence_name offset strand sequence_length
     
     sequence_name -> string without white space
     
@@ -101,6 +101,16 @@ long substrings. Using the 'G' instead of 'g' allows one to instead specify the 
     
     strand -> '+'
            -> '-'
+
+    sequence_length -> integer >= 0
+
+Coordinates in TAF use the same conventions as MAF format. That is,
+zero-based, half-open coordinates, with a negative strand meaning that 
+coordinates are with respect to the reverse complement sequence. The 
+inclusion of the sequence_length in the coordinate, while bloating,
+does make it easy to convert back and forth between maf and taf.
+
+# Taf Example
 
 The following shows by example the translation between the MAF format and TAF format.
 
@@ -142,3 +152,59 @@ The corresponding TAF file (262 bytes):
     CCCCC
     CCCCC
     AGGGG
+
+# Installing Taf
+
+Do build this repo clone the repo as follows and then make:
+
+    git clone https://github.com/benedictpaten/taf.git --recursive
+    cd taf && make
+
+To test the installation do:
+
+    make test
+
+This will run the unitests. You should see that all tests pass okay. You will 
+then want to add the taf/bin directory to your path. 
+
+# Taf Utilities
+
+This repo contains various tools for working with taf files and converting to and 
+from maf. For example, to convert a maf file to a taf use:
+
+    maf_to_taf -i MAF_FILE
+
+To go back to maf use:
+
+    taf_to_maf -i TAF_FILE
+
+There is also a utility for adding sequences between blocks to a taf file
+
+    taf_add_gap_bases
+
+And finally, a utility to merge together short alignment blocks to create a more
+"normalized" maf/taf file:
+
+    taf_norm
+
+For example, to normalize a maf file do the following:
+
+    maf_to_taf -i MAF_FILE | taf_add_gap_bases SEQUENCE_FILES | .taf_norm -k > out.maf
+
+The maf_to_taf converts MAF_FILE into taf, taf_add_gap_bases adds in missing
+unaligned sequences between maf blocks and taf_norm then merges together the blocks. The 
+-k option causes the output to be in maf format.
+
+# C Library
+
+There is also a simple C library for working with taf/maf files. See taf.h in the
+inc directory.
+
+# TODOs
+
+Things that are ongoing:
+
+* Finish adding in support for repeatCoordinatesEveryNColumns in maf_to_taf
+* Add support for tag parsing to non-header lines - this is in the spec but the parser doesn't yet support it
+* Create an index format for random access to TAF files
+* Add a binary/compressed version
