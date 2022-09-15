@@ -61,10 +61,9 @@ void alignment_link_adjacent(Alignment *left_alignment, Alignment *right_alignme
 int64_t alignment_length(Alignment *alignment);
 
 /*
- * Gets the sum of the interstitial gaps between this block and the next one. If align_gap_sequences
- * is non-zero the length of longest individual sequence is returned instead.
+ * Gets the max length of an interstitial gap sequence between this block and the next one.
  */
-int64_t alignment_total_gap_length(Alignment *left_alignment, bool align_gap_sequences);
+int64_t alignment_total_gap_length(Alignment *left_alignment);
 
 /*
  * Number of shared rows between two alignments
@@ -74,12 +73,10 @@ int64_t alignment_number_of_common_rows(Alignment *left_alignment, Alignment *ri
 /*
  * Merge together adjacent blocks into one alignment. Requires that the alignment
  * rows are linked together (e.g. with alignment_link_adjacent). Destroys the input
- * alignments in the process and returns a merged alignment.
- *
- * If align_gap_sequences is non-zero then sequences are aligned.
+ * alignments in the process and returns a merged alignment. If there are interstitial
+ * sequences between the blocks, aligns these sequences together.
  */
-Alignment *alignment_merge_adjacent(Alignment *left_alignment, Alignment *right_alignment,
-                                    bool align_gap_sequences);
+Alignment *alignment_merge_adjacent(Alignment *left_alignment, Alignment *right_alignment);
 
 /*
  * Read a maf header line

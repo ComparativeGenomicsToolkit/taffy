@@ -148,8 +148,11 @@ int64_t WFS_get_max_diag(WFS *wfs, int64_t s) {
 }
 
 struct _WFA {
-    stList *string1;
-    stList *string2;
+    void *string1;
+    void *string2;
+    int64_t string1_length;
+    int64_t string2_length;
+    size_t element_size; // the size in bytes of each element in string1 and string2
     int64_t gap_score, mismatch_score;
     bool (*elements_equal)(void *, void *);
     int64_t s; // The starting alignment score
@@ -159,6 +162,10 @@ struct _WFA {
 void WFA_destruct(WFA *wfa) {
     WFS_destruct(wfa->wfs);
     free(wfa);
+}
+
+void *get_element(void *string, size_t element_size, int64_t i) {
+    return &(((char *)string)[i * element_size]);
 }
 
 void WFA_extend(WFA *wfa) {
@@ -172,8 +179,9 @@ void WFA_extend(WFA *wfa) {
     for(int64_t k=wf->min_diag; k<=wf->max_diag; k++) {
         int64_t h = WF_get_fp(wf, k);
         if(h >= 0 && h - k >= 0) {  // If h = x-y such that x >= 0 and y >= 0
-            while(h < stList_length(wfa->string1) && h - k < stList_length(wfa->string2) &&
-            wfa->elements_equal(stList_get(wfa->string1, h), stList_get(wfa->string2, h - k))) {
+            while(h < wfa->string1_length && h - k < wfa->string2_length &&
+            wfa->elements_equal(get_element(wfa->string1, wfa->element_size, h),
+                                get_element(wfa->string2, wfa->element_size, h - k))) {
                 // Extend the furthest point
                 h += 1;
                 WF_set_fp(wf, k, h);
@@ -186,7 +194,7 @@ bool WFA_done(WFA *wfa) {
     /*
      * Are we at the end of the dp matrix?
     */
-    return WFS_get_fp(wfa->wfs, wfa->s, stList_length(wfa->string1) - stList_length(wfa->string2)) == stList_length(wfa->string1);
+    return WFS_get_fp(wfa->wfs, wfa->s, wfa->string1_length - wfa->string2_length) == wfa->string1_length;
 }
 
 static int64_t max(int64_t i, int64_t j) {
@@ -227,7 +235,8 @@ void WFA_next(WFA *wfa) {
     }
 }
 
-WFA *WFA_construct(stList *string1, stList *string2, bool (*elements_equal)(void *, void *),
+WFA *WFA_construct(void *string1, void *string2, int64_t string1_length, int64_t string2_length,
+                   size_t element_size, bool (*elements_equal)(void *, void *),
                    int64_t gap_score, int64_t mismatch_score) {
     /* Finds an optimal global alignment of two strings using WFS algorithm.
     * The algorithm is as described in https://doi.org/10.1093/bioinformatics/btaa777
@@ -247,6 +256,9 @@ WFA *WFA_construct(stList *string1, stList *string2, bool (*elements_equal)(void
     WFA *wfa = st_calloc(1, sizeof(WFA));
     wfa->string1 = string1;
     wfa->string2 = string2;
+    wfa->string1_length = string1_length;
+    wfa->string2_length = string2_length;
+    wfa->element_size = element_size;
     wfa->gap_score = gap_score;
     wfa->mismatch_score = mismatch_score;
     wfa->elements_equal = elements_equal;
@@ -271,28 +283,31 @@ int64_t WFA_get_alignment_score(WFA *wfa) {
     return wfa->s;
 }
 
-stList *WFA_get_alignment(WFA *wfa) {
+void WFA_get_alignment(WFA *wfa, int64_t *elements_aligned_to_string1) {
     /*
-    * Returns an alignment of the two string.Implements the traceback algorithm.
+    * Returns an alignment of the two string. Implements the traceback algorithm. The alignment is represented
+     * as an array of integers of length equal to the length of string1, the entries represent the indices of positions
+     * in string2, with -1 if the position in string1 is aligned to a gap.
     */
     int64_t t = wfa->s;  // The score of the sub-alignment that we're tracing back
-    int64_t k = stList_length(wfa->string1) - stList_length(wfa->string2);  // The diagonal we're tracing back on
-    int64_t f = stList_length(wfa->string1);  // The furthest point
-    stList *alignment = stList_construct();  // The alignment, represented as a sequence of (x, y) pairs
+    int64_t k = wfa->string1_length - wfa->string2_length;  // The diagonal we're tracing back on
+    int64_t f = wfa->string1_length;  // The furthest point
+    //stList *alignment = stList_construct();  // The alignment, represented as a sequence of (x, y) pairs
+    for(int64_t i=0; i<wfa->string1_length; i++) { // Initialize the alignment positions to be all gaps
+        elements_aligned_to_string1[i] = -1;
+    }
     assert(WFS_get_fp(wfa->wfs, t, k) == f);  // This is the condition that must be true at the beginning of trace back
     while (k != 0 || f != 0) {  // While we haven't gotten to the first cell in the dp matrix
         // Do backtrace dp calcs
         int64_t a = WFS_get_fp(wfa->wfs, t - wfa->mismatch_score, k);  // match
         int64_t b = WFS_get_fp(wfa->wfs, t - wfa->gap_score, k - 1);  // insert in string1 (x)
         int64_t c = WFS_get_fp(wfa->wfs, t - wfa->gap_score, k + 1);  // insert in string2 (y)
-        //  print("a", a, "b", b, "c", c, "f", f, "k", k)
 
         while (f > max(max(a, b + 1), max(c, 0))) {  // The plus one for an insert in string1 is necessary
             // k = x - y, f = x
             int64_t x = f;
             int64_t y = -(k - f);
-            stList_append(alignment, stList_get(wfa->string2, y - 1));
-            stList_append(alignment, stList_get(wfa->string1, x - 1));  // subtract one to get seq coordinates
+            elements_aligned_to_string1[x-1] = y-1; // subtract one to get sequence coordinates
             f -= 1;
         }
 
@@ -309,8 +324,4 @@ stList *WFA_get_alignment(WFA *wfa) {
             t -= wfa->gap_score;
         }
     }
-
-    stList_reverse(alignment); // reverse to get back the set of matched pairs in order of the strings
-
-    return alignment;
 }

@@ -39,14 +39,23 @@ bool alignment_row_is_predecessor(Alignment_Row *left_row, Alignment_Row *right_
             left_row->start + left_row->length <= right_row->start;
 }
 
+bool alignment_row_is_predecessor_2(Alignment_Row **left_row, Alignment_Row **right_row) {
+    // Do the rows match - this one is needed to work with the OND aligner which compares pointers to the objects being
+    // compared
+    return alignment_row_is_predecessor(left_row[0], right_row[0]);
+}
+
 void alignment_link_adjacent(Alignment *left_alignment, Alignment *right_alignment, bool allow_row_substitutions) {
     stList *left_rows = get_rows_in_a_list(left_alignment->row);
     stList *right_rows = get_rows_in_a_list(right_alignment->row);
     // get the alignment of the rows
-    WFA *wfa = WFA_construct(left_rows, right_rows, (bool (*)(void *, void *))alignment_row_is_predecessor, 1,
+    WFA *wfa = WFA_construct(stList_getBackingArray(left_rows), stList_getBackingArray(right_rows),
+                             stList_length(left_rows), stList_length(right_rows),
+                             sizeof(void *), (bool (*)(void *, void *))alignment_row_is_predecessor_2, 1,
                              allow_row_substitutions ? 1 : 100000000); // Use unit gap and mismatch costs for the diff
                              // unless we disallow substitutions, in which case use an arbitrarily large mismatch cost
-    stList *aligned_rows = WFA_get_alignment(wfa);
+    int64_t aligned_rows[stList_length(left_rows)];
+    WFA_get_alignment(wfa, aligned_rows);
     // Remove any previous links
     Alignment_Row *row = left_alignment->row;
     while(row != NULL) {
@@ -58,21 +67,21 @@ void alignment_link_adjacent(Alignment *left_alignment, Alignment *right_alignme
         row->l_row = NULL;
         row = row->n_row;
     }
-    // connect up the rows
-    assert(stList_length(aligned_rows) % 2 == 0); // must be even length
-    for(int64_t i=0; i<stList_length(aligned_rows); i+=2) {
-        Alignment_Row *left_row = stList_get(aligned_rows, i);
-        Alignment_Row *right_row = stList_get(aligned_rows, i+1);
-        left_row->r_row = right_row;
-        right_row->l_row = left_row;
-        if(!allow_row_substitutions) {
-            assert(alignment_row_is_predecessor(left_row, right_row));
+    // connect up the rows according to the alignment
+    for(int64_t i=0; i<stList_length(left_rows); i++) {
+        if(aligned_rows[i] != -1) {
+            Alignment_Row *left_row = stList_get(left_rows, i);
+            Alignment_Row *right_row = stList_get(right_rows, aligned_rows[i]);
+            left_row->r_row = right_row;
+            right_row->l_row = left_row;
+            if(!allow_row_substitutions) {
+                assert(alignment_row_is_predecessor(left_row, right_row));
+            }
         }
     }
     // clean up
     stList_destruct(left_rows);
     stList_destruct(right_rows);
-    stList_destruct(aligned_rows);
     WFA_destruct(wfa);
 }
 
@@ -80,19 +89,14 @@ int64_t alignment_length(Alignment *alignment) {
     return alignment->row == NULL ? 0 : strlen(alignment->row->bases);
 }
 
-int64_t alignment_total_gap_length(Alignment *left_alignment, bool align_gap_sequences) {
+int64_t alignment_total_gap_length(Alignment *left_alignment) {
     Alignment_Row *l_row = left_alignment->row;
     int64_t total_interstitial_gap_length = 0;
     while(l_row != NULL) {
         if(l_row->r_row != NULL && alignment_row_is_predecessor(l_row, l_row->r_row)) {
             int64_t i = l_row->r_row->start - (l_row->start + l_row->length);
-            if(align_gap_sequences) {
-                if (i > total_interstitial_gap_length) {
-                    total_interstitial_gap_length = i;
-                }
-            }
-            else {
-                total_interstitial_gap_length += i;
+            if (i > total_interstitial_gap_length) {
+                total_interstitial_gap_length = i;
             }
         }
         l_row = l_row->n_row; // Move to the next left alignment row
@@ -130,16 +134,171 @@ int64_t alignment_number_of_common_rows(Alignment *left_alignment, Alignment *ri
     return shared_rows;
 }
 
-static char *make_gap(int64_t length) {
+static char *make_run(int64_t length, char c) {
     char gap_alignment[length+1];
     for(int64_t i=0; i<length; i++) {
-        gap_alignment[i] = '-';
+        gap_alignment[i] = c;
     }
     gap_alignment[length] = '\0';
     return stString_copy(gap_alignment);
 }
 
-Alignment *alignment_merge_adjacent(Alignment *left_alignment, Alignment *right_alignment, bool align_gap_sequences) {
+int64_t make_msa(int64_t string_no, int64_t column_no, int64_t max_alignment_length,
+                 int64_t msa[string_no][column_no], char *strings[string_no], int64_t string_lengths[string_no],
+                 char msa_strings[string_no][max_alignment_length]) {
+    /*
+     * Convert the list of aligned columns in msa into a 2D alignment of the strings.
+     */
+    // Build the MSA
+    int64_t offsets[string_no];
+    int64_t alignment_offset=0;
+    for (int64_t i=0; i<string_no; i++) { // Initialize the offsets
+        offsets[i] = -1;
+    }
+    for(int64_t j=0; j<column_no; j++) {
+        // Work out the max indel length before position j
+        int64_t max_indel=0;
+        for(int64_t i=0; i<string_no; i++) {
+            int64_t k=msa[i][j]; // Position in sequence i aligned to column j of longest sequence
+            if(k != -1) { // Is not a gap, work out length
+                max_indel = k - offsets[i] - 1 > max_indel ? k - offsets[i] - 1 : max_indel;
+            }
+        }
+
+        // Now fill in the indels and column j
+        for(int64_t i=0; i<string_no; i++) {
+            int64_t k=msa[i][j]; // Position in sequence i aligned to column j of longest sequence
+            if(k != -1) { // Is not a gap
+                // Fill in the unaligned sequence in sequence i
+                int64_t l=0;
+                while(++offsets[i] < k) {
+                    msa_strings[i][alignment_offset+l++] = strings[i][offsets[i]];
+                }
+
+                // Add trailing gaps
+                while(l<max_indel) {
+                    msa_strings[i][alignment_offset+l++] = '-';
+                }
+
+                // Add aligned position
+                msa_strings[i][alignment_offset+max_indel] = strings[i][offsets[i]];
+            }
+            else { // Add gaps to alignment to account for max indel and column j
+                for(int64_t l=0; l<=max_indel; l++) {
+                    msa_strings[i][alignment_offset+l] = '-';
+                }
+            }
+        }
+        // Update the length of the alignment built so far
+        alignment_offset += max_indel + 1; // indel length and the ref position
+    }
+    // Now add in any suffix gaps
+    int64_t max_indel=0;
+    for(int64_t i=0; i<string_no; i++) {
+        int64_t j = string_lengths[i] - offsets[i] - 1;
+        max_indel = j > max_indel ? j : max_indel;
+    }
+    for(int64_t i=0; i<string_no; i++) {
+        int64_t j=0;
+        while(++offsets[i] < string_lengths[i]) {
+            msa_strings[i][alignment_offset+j++] = strings[i][offsets[i]];
+        }
+        while(j < max_indel) {
+            msa_strings[i][alignment_offset+j++] = '-';
+        }
+    }
+    alignment_offset += max_indel;
+    assert(alignment_offset <= 2*column_no); // Sanity check alignment does not exceed theoretical max length
+    return alignment_offset;
+}
+
+bool cmp_chars(void *a, void *b) {
+    return ((char *)a)[0] == ((char *)b)[0];
+}
+
+int64_t align_interstitial_gaps(Alignment *alignment) {
+    /*
+     * Align the sequences that lie within the gaps between two adjacent blocks.
+     * Return the length of the interstitial alignment.
+     */
+
+    // Add any missing gap strings in
+    Alignment_Row *row = alignment->row;
+    while (row != NULL) {
+        if(row->l_row != NULL && alignment_row_is_predecessor(row->l_row, row) && row->left_gap_sequence == NULL) {
+            row->left_gap_sequence = make_run(row->start - (row->l_row->start + row->l_row->length), 'N');
+        }
+        row = row->n_row;
+    }
+
+    // Find the longest gap sequence and number of sequences to align
+    //TODO: Consider not allowing picking the longest sequence if it is all Ns
+    row = alignment->row;
+    char *longest_string;
+    int64_t string_no=0, longest_string_length=0;
+    while (row != NULL) {
+        if(row->left_gap_sequence != NULL) {
+            string_no++; // Increase the number of strings we are aligning
+            if(strlen(row->left_gap_sequence) > longest_string_length) {
+                longest_string = row->left_gap_sequence;
+                longest_string_length = strlen(longest_string);
+            }
+        }
+        row = row->n_row;
+    }
+
+    // Align each sequence to the longest sequence
+    int64_t msa[string_no][longest_string_length]; // A longest sequence x sequence number sized integer matrix,
+    // each entry is the index of the position aligned at that node (or -1 if unaligned)
+    char *row_strings[string_no]; // The gap strings
+    int64_t row_string_lengths[string_no];
+    row = alignment->row;
+    int64_t i=0;
+    while (row != NULL) {
+        if(row->left_gap_sequence != NULL) {
+            row_strings[i] = row->left_gap_sequence;
+            row_string_lengths[i] = strlen(row_strings[i]);
+            // TODO: Consider making WFA have affine gaps
+            WFA *wfa = WFA_construct(longest_string, row_strings[i], longest_string_length, row_string_lengths[i],
+                                     sizeof(char), (bool (*)(void *, void *))cmp_chars, 1, 1);
+            WFA_get_alignment(wfa, msa[i]); i++;
+            WFA_destruct(wfa);
+        }
+        row = row->n_row;
+    }
+
+    // Now convert to a traditional MSA
+    int64_t max_alignment_length = longest_string_length*2;
+    char msa_strings[string_no][max_alignment_length]; // can not be longer than 2x the longest string
+    int64_t msa_length = make_msa(string_no, longest_string_length, max_alignment_length, msa, row_strings,
+                                  row_string_lengths, msa_strings);
+
+    // Now copy the alignment strings back to the sequences
+    row = alignment->row; i=0;
+    while (row != NULL) {
+        if(row->left_gap_sequence != NULL) {
+            // Do a quick check that the sequence is as expected
+            int64_t j=0, l=0;
+            while(l < msa_length) {
+                assert(j <= row_string_lengths[i]);
+                if(msa_strings[i][l] != '-') {
+                    assert(row->left_gap_sequence[j] == msa_strings[i][l]);
+                    j++;
+                }
+                l++;
+            }
+            assert(j == row_string_lengths[i]);
+            //
+            free(row->left_gap_sequence);
+            row->left_gap_sequence = stString_getSubString(msa_strings[i++], 0, msa_length);
+        }
+        row = row->n_row;
+    }
+
+    return msa_length;
+}
+
+Alignment *alignment_merge_adjacent(Alignment *left_alignment, Alignment *right_alignment) {
     // First un-link any rows that are substitutions as these can't be merged
     Alignment_Row *r_row = right_alignment->row;
     while(r_row != NULL) {
@@ -168,7 +327,7 @@ Alignment *alignment_merge_adjacent(Alignment *left_alignment, Alignment *right_
             l_row->length = 0; // is an empty alignment
             l_row->sequence_length = r_row->sequence_length;
             l_row->strand = r_row->strand;
-            l_row->bases = make_gap(left_alignment_length);
+            l_row->bases = make_run(left_alignment_length, '-');
 
             // Connect the left and right rows
             l_row->r_row = r_row;
@@ -191,13 +350,13 @@ Alignment *alignment_merge_adjacent(Alignment *left_alignment, Alignment *right_
         r_row = r_row->n_row; // Move to the next right alignment row
     }
 
-    // Calculate the sum of the length of any interstitial inserts
-    int64_t total_interstitial_gap_length = alignment_total_gap_length(left_alignment, align_gap_sequences);
+    // Align the interstitial insert sequences, padding the left_gap_sequence strings with gaps to represent the alignment
+    int64_t interstitial_alignment_length = align_interstitial_gaps(right_alignment);
 
     // Now finally extend the left alignment rows to include the right alignment rows
     int64_t i=0; // An index into the interstitial alignment coordinate
     Alignment_Row *l_row = left_alignment->row;
-    char *right_gap = make_gap(right_alignment_length + total_interstitial_gap_length); // any trailing bases needed
+    char *right_gap = make_run(right_alignment_length + interstitial_alignment_length, '-'); // any trailing bases needed
     while(l_row != NULL) {
         if(l_row->r_row == NULL) {
             // Is a deletion, so add in trailing gaps equal in length to the right alignment length plus any interstitial
@@ -211,34 +370,19 @@ Alignment *alignment_merge_adjacent(Alignment *left_alignment, Alignment *right_
             assert(strcmp(l_row->sequence_name, l_row->r_row->sequence_name) == 0);
             assert(l_row->strand == l_row->r_row->strand);
             assert(l_row->start + l_row->length <= l_row->r_row->start);
-            if(l_row->r_row->left_gap_sequence != NULL) { // if the left gap sequence is defined, it's length must bridge the gap
-                assert(l_row->r_row->start - (l_row->start + l_row->length) == strlen(l_row->r_row->left_gap_sequence));
-            }
-
-            // Make any interstitial gap
-            char *gap_string = make_gap(total_interstitial_gap_length);
-            int64_t interstitial_bases = l_row->r_row->start - (l_row->start + l_row->length);
-            for(int64_t j=0; j<interstitial_bases; j++) {
-                if(align_gap_sequences) {
-                    gap_string[j] = l_row->r_row->left_gap_sequence != NULL ? l_row->r_row->left_gap_sequence[j] : 'N';
-                }
-                else {
-                    assert(j + i < total_interstitial_gap_length);
-                    gap_string[j + i] = l_row->r_row->left_gap_sequence != NULL ? l_row->r_row->left_gap_sequence[j] : 'N';
-                }
-            }
-            i += interstitial_bases; // update i
 
             // Is not a deletion, so merge together two adjacent rows
-            char *bases = stString_print("%s%s%s", l_row->bases, gap_string, l_row->r_row->bases);
+            assert(l_row->r_row->left_gap_sequence != NULL);
+            assert(strlen(l_row->r_row->left_gap_sequence) == interstitial_alignment_length);
+            char *bases = stString_print("%s%s%s", l_row->bases, l_row->r_row->left_gap_sequence, l_row->r_row->bases);
             free(l_row->bases); // clean up
-            free(gap_string);
             l_row->bases = bases;
 
             // Update the left row's length coordinate
+            int64_t interstitial_bases = l_row->r_row->start - (l_row->start + l_row->length);
             l_row->length += interstitial_bases + l_row->r_row->length;
             // Update the l_row's r_row pointer...
-            if(l_row->r_row->r_row != NULL) { // Check
+            if(l_row->r_row->r_row != NULL) { // Check pointers are correct
                 assert(l_row->r_row->r_row->l_row == l_row->r_row);
             }
             l_row->r_row = l_row->r_row->r_row;

@@ -139,9 +139,14 @@ static stList *get_random_string() {
     return random_string;
 }
 
-static bool elements_equal(void *a, void *b) {
+static bool elements_equal_2(void *a, void *b) {
     // Do the rows match
     return strcmp((char *)a, (char *)b) == 0;
+}
+
+static bool elements_equal(void *a, void *b) {
+    // Do the rows match
+    return strcmp(((char **)a)[0], ((char **)b)[0]) == 0;
 }
 
 static void append(char *a, char **x) {
@@ -179,20 +184,23 @@ static void print_alignment(stList *string1, stList *string2, stList *alignment)
     free(x); free(y);
 }
 
-static int64_t score_alignment(stList *string1, stList *string2, stList *alignment, int64_t mismatch_score, int64_t gap_score) {
-    int64_t i=0, j=0, alignment_score = 0;
-    for(int64_t k=0; k<stList_length(alignment); k+=2) {
-        char *a = stList_get(alignment, k);
-        char *b = stList_get(alignment, k+1);
-        while(stList_get(string1, i) != a) {
-            alignment_score += gap_score; i++;
+static int64_t score_alignment(stList *string1, stList *string2, int64_t *alignment, int64_t mismatch_score, int64_t gap_score) {
+    int64_t j=0, alignment_score = 0;
+    for(int64_t k=0; k<stList_length(string1); k++) {
+        char *a = stList_get(string1, k);
+        if(alignment[k] == -1) {
+            alignment_score += gap_score;
         }
-        while(stList_get(string2, j) != b) {
-            alignment_score += gap_score; j++;
+        else {
+            assert(j <= alignment[k]);
+            while(j < alignment[k]) {
+                alignment_score += gap_score; j++;
+            }
+            char *b = stList_get(string2, j++);
+            alignment_score += strcmp(a, b) == 0 ? 0 : mismatch_score;
         }
-        alignment_score += strcmp(a, b) == 0 ? 0 : mismatch_score; i++; j++;
     }
-    alignment_score += (stList_length(string1) - i) * gap_score;
+    assert(j <= stList_length(string2));
     alignment_score += (stList_length(string2) - j) * gap_score;
     return alignment_score;
 }
@@ -207,8 +215,9 @@ void test_ond(CuTest *testCase) {
         int64_t mismatch_score = st_randomInt(1, 10);
         int64_t gap_score = st_randomInt(1, 10);
 
-        NeedlemanWunsch *nw = NeedlemanWunsch_construct(x, y, 0, -gap_score, -mismatch_score, elements_equal);
-        WFA *wfa = WFA_construct(x, y, elements_equal, gap_score, mismatch_score);
+        NeedlemanWunsch *nw = NeedlemanWunsch_construct(x, y, 0, -gap_score, -mismatch_score, elements_equal_2);
+        WFA *wfa = WFA_construct(stList_getBackingArray(x), stList_getBackingArray(y),
+                                 stList_length(x), stList_length(y), sizeof(void *), elements_equal, gap_score, mismatch_score);
 
         // The scores of the alignment should be the same
         st_logInfo("OND Test %i Length x: %i Length y: %i Gap score: %i Mismatch score: %i Alignment score: %i\n",
@@ -218,10 +227,10 @@ void test_ond(CuTest *testCase) {
 
         // The actual alignments should be the same
         stList *nw_alignment = NeedlemanWunsch_get_alignment(nw);
-        stList *wfa_alignment = WFA_get_alignment(wfa);
+        int64_t wfa_alignment[stList_length(x)];
+        WFA_get_alignment(wfa, wfa_alignment);
 
         print_alignment(x, y, nw_alignment);
-        print_alignment(x, y, wfa_alignment);
 
         int64_t alignment_score = score_alignment(x, y, wfa_alignment, mismatch_score, gap_score);
         CuAssertIntEquals(testCase, alignment_score, WFA_get_alignment_score(wfa));
@@ -234,7 +243,6 @@ void test_ond(CuTest *testCase) {
         stList_destruct(x);
         stList_destruct(y);
         stList_destruct(nw_alignment);
-        stList_destruct(wfa_alignment);
     }
 }
 
