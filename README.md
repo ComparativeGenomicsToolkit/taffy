@@ -4,16 +4,18 @@ This is a specification for a "transposed alignment format", or maybe "terrific 
 is to describe a multiple sequence alignment as a series of columns, one per line, with bases in the
 columns optionally run-length encoded, and row coordinates given as needed after the bases in each column.
 Where coordinates are not given it is assumed the coordinates continue from the previous column.
-User defined tags, as key:value pairs, are also included to allow the alignemnt
+User defined tags, as key:value pairs, are also included to allow the alignment
 columns to be annotated.
 
 The format supports line based indexing for rapid retrieval of any column or contiguous sequence of columns from
-the file. The format is intentionally simple but should prove quite space efficient for large alignments.
+the file. The format is intentionally simple but should prove quite space efficient for large alignments 
+(see stats below).
 
-Its key potential benefits over the MAF format are that it does not suffer the same
-issue with fragmentation as the number of sequences grows (there are no blocks!), is often less verbose (particularly
-for large alignments), is very easy to index as each column of the alignment is a single line, and supports
-extensible column annotations.
+Its key potential benefits over the MAF format are that:
+* it does not suffer the same issue with fragmentation as the number of sequences grows (there are no blocks!),
+* is often less verbose (particularly for large alignments), 
+* is very easy to index, as each column of the alignment is a single line, 
+* it supports extensible column annotations.
 
 The format is composed of a sequence of a header and some columns.
 Tokens are separated by white-space. The syntax is defined as follows:
@@ -180,7 +182,7 @@ To go back to maf use:
 
 There is also a utility for adding sequences between blocks to a taf file
 
-    taf_add_gap_bases
+    taf_add_gap_bases SEQ_FILES -i TAF_FILE
 
 And finally, a utility to merge together short alignment blocks to create a more
 "normalized" maf/taf file:
@@ -189,7 +191,7 @@ And finally, a utility to merge together short alignment blocks to create a more
 
 For example, to normalize a maf file do the following:
 
-    maf_to_taf -i MAF_FILE | taf_add_gap_bases SEQUENCE_FILES | .taf_norm -k > out.maf
+    maf_to_taf -i MAF_FILE | taf_add_gap_bases SEQUENCE_FILES | taf_norm -k > out.maf
 
 The maf_to_taf converts MAF_FILE into taf, taf_add_gap_bases adds in missing
 unaligned sequences between maf blocks and taf_norm then merges together the blocks. The 
@@ -200,11 +202,62 @@ unaligned sequences between maf blocks and taf_norm then merges together the blo
 There is also a simple C library for working with taf/maf files. See taf.h in the
 inc directory.
 
+# Comparison Stats
+
+Using the file:  https://hgwdev.gi.ucsc.edu/~markd/cactus/cactus241way/ucscNames/chr3_KI270777v1_alt.maf
+(A randomly chosen alignment part of the Cactus 241-way alignment).
+Running the command:
+
+    maf_to_taf -i ./chr3_KI270777v1_alt.maf > ./chr3_KI270777v1_alt.taf
+
+Took: 
+    
+    22.29s user 0.34s system 99% cpu 22.685 total
+
+And results in:
+
+    -rw-r--r--   1 benedictpaten  staff  753714843 Dec 15  2020 chr3_KI270777v1_alt.maf
+    -rw-r--r--   1 benedictpaten  staff   50840928 Sep 15 11:28 chr3_KI270777v1_alt.taf
+
+That is a 14.8x compression. Gzipped:
+
+    -rw-r--r--   1 benedictpaten  staff  89574699 Dec 15  2020 chr3_KI270777v1_alt.maf.gz
+    -rw-r--r--   1 benedictpaten  staff  14038446 Sep 15 11:28 chr3_KI270777v1_alt.taf.gz
+
+The .taf.gzip is 6.39x smaller than the .maf.gz and 53x smaller than the .maf
+The .taf is 1.9x smaller than the .maf.gz.
+
+Normalizing the maf file using the command:
+
+    maf_to_taf -i ./chr3_KI270777v1_alt.maf | taf_norm -k > ./chr3_KI270777v1_alt.norm.maf
+
+Took: 
+
+    23.60s user 0.23s system 97% cpu 24.460 total
+
+Resulting in:
+
+    -rw-r--r--   1 benedictpaten  staff  753714843 Dec 15  2020 chr3_KI270777v1_alt.maf
+    -rw-r--r--   1 benedictpaten  staff  156736026 Sep 15 11:35 chr3_KI270777v1_alt.norm.maf
+    -rw-r--r--   1 benedictpaten  staff   50840928 Sep 15 11:28 chr3_KI270777v1_alt.taf
+
+So the normalized maf is 4.8x smaller than the maf and 3x larger than the taf.
+The number of blocks in the maf file is also reduced as blocks are merged together by the 
+normalization process:
+
+    taf % grep '^a' ./chr3_KI270777v1_alt.maf | wc -l                                                                    
+        45924
+    taf % grep '^a' ./chr3_KI270777v1_alt.norm.maf | wc -l
+        7157
+
+Which is a 6.97x reduction in block number.
+
 # TODOs
 
 Things that are ongoing:
 
 * Finish adding in support for repeatCoordinatesEveryNColumns in maf_to_taf
 * Add support for tag parsing to non-header lines - this is in the spec but the parser doesn't yet support it
+* Make taf_add_gap_bases use indexed fastas to avoid loading everything into memory
 * Create an index format for random access to TAF files
 * Add a binary/compressed version
