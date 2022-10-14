@@ -114,7 +114,7 @@ int main(int argc, char *argv[]) {
                                                 { 0, 0, 0, 0 } };
 
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:o:hm:k", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:o:s:a:hm:k", long_options, &option_index);
         if (key == -1) {
             break;
         }
