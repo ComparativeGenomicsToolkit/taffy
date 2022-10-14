@@ -15,11 +15,10 @@
 int64_t maximum_gap_string_length = 50;
 
 void usage() {
-    fprintf(stderr, "taf_add_gap_bases [options]\n");
+    fprintf(stderr, "taf_add_gap_bases SEQ_FILExN [options]\n");    
     fprintf(stderr, "Add interstitial gap strings to taf file\n");
     fprintf(stderr, "-i --inputFile : Input taf file to normalize. If not specified reads from stdin\n");
     fprintf(stderr, "-o --outputFile : Output taf file. If not specified outputs to stdout\n");
-    fprintf(stderr, "-f --fastaFile : Fasta file for extracting gap sequence (multipel allowed)\n");
     fprintf(stderr, "-a --halFile : HAL file for extracting gap sequence (MAF must be created with hal2maf *without* --onlySequenceNames)\n");
     fprintf(stderr, "-m --maximumGapStringLength : The maximum size of a gap string to add, be default: %" PRIi64 "\n",
             maximum_gap_string_length);
@@ -93,7 +92,6 @@ int main(int argc, char *argv[]) {
     char *logLevelString = NULL;
     char *inputFile = NULL;
     char *outputFile = NULL;
-    stList* fasta_files = stList_construct();
     char *hal_file = NULL;
     bool run_length_encode_bases = 0;
     bool output_maf = 0;
@@ -106,7 +104,6 @@ int main(int argc, char *argv[]) {
         static struct option long_options[] = { { "logLevel", required_argument, 0, 'l' },
                                                 { "inputFile", required_argument, 0, 'i' },
                                                 { "outputFile", required_argument, 0, 'o' },
-                                                { "fastaFile", required_argument, 0, 'f' },
                                                 { "halFile", required_argument, 0, 'a' },
                                                 { "maf", no_argument, 0, 'k' },
                                                 { "help", no_argument, 0, 'h' },
@@ -129,9 +126,6 @@ int main(int argc, char *argv[]) {
             case 'o':
                 outputFile = optarg;
                 break;
-            case 'f':
-                stList_append(fasta_files, optarg);
-                break;
             case 'a':
                 hal_file = optarg;
                 break;
@@ -150,8 +144,8 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    if ((hal_file == NULL) == (stList_length(fasta_files) == 0)) {
-        fprintf(stderr, "[taf] Either -s or -a (but not both) must be used to specifiy the input sequence\n");
+    if ((hal_file == NULL) == (optind >= argc)) {
+        fprintf(stderr, "[taf] Sequences must be specified either via fasta arguments OR the -a option (but not both)\n");
         return 1;
     }
 #ifndef USE_HAL
@@ -171,7 +165,7 @@ int main(int argc, char *argv[]) {
     if (hal_file) {
         st_logInfo("HAL file string : %s\n", hal_file);
     } else {
-        st_logInfo("Number of input FASTA files : %ld\n", stList_length(fasta_files));
+        st_logInfo("Number of input FASTA files : %ld\n", argc - optind);
     }            
     st_logInfo("Maximum maximum gap string length : %" PRIi64 "\n", maximum_gap_string_length);
 
@@ -180,14 +174,14 @@ int main(int argc, char *argv[]) {
     //////////////////////////////////////////////
     stHash *fastas = NULL;
     int hal_handle = -1;
-    if (stList_length(fasta_files) > 0) {
+    if (optind < argc) {
         fastas = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, free, free);
-        for (int64_t i = 0; i < stList_length(fasta_files); ++i) {
-            char *seq_file = stList_get(fasta_files, i);
+        while(optind < argc) {
+            char *seq_file = argv[optind++];
             st_logInfo("Parsing sequence file : %s\n", seq_file);
             FILE *fh = fopen(seq_file, "r");
             fastaReadToFunction(fh, fastas, add_to_hash);
-            fclose(fh);            
+            fclose(fh);
         }
         st_logInfo("Finished parsing sequence files\n");
     } else {
@@ -248,7 +242,6 @@ int main(int argc, char *argv[]) {
         fclose(output);
     }
 
-    stList_destruct(fasta_files);
     if (fastas) {
         stHash_destruct(fastas);
     }
