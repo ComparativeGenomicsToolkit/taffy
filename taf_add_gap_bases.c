@@ -52,7 +52,7 @@ char *get_sequence_fragment(const char* sequence_name, int64_t start, int64_t le
             st_errAbort("[taf] Error: could not parse MAF sequence %s into GENOME.CONTIG\n", sequence_name);
         }
         char* species_name = stString_getSubString(sequence_name, 0, dot-sequence_name);
-        char* chrom_name = dot + 1;        
+        char* chrom_name = dot + 1;
         fragment = halGetDna(hal_handle, species_name, chrom_name, start, start + length, NULL);
         free(species_name);
 #else
@@ -114,7 +114,7 @@ int main(int argc, char *argv[]) {
                                                 { 0, 0, 0, 0 } };
 
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:o:s:a:hm:k", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:o:f:a:hm:k", long_options, &option_index);
         if (key == -1) {
             break;
         }
@@ -180,7 +180,7 @@ int main(int argc, char *argv[]) {
     //////////////////////////////////////////////
     stHash *fastas = NULL;
     int hal_handle = -1;
-    if (fasta_files) {
+    if (stList_length(fasta_files) > 0) {
         fastas = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, free, free);
         for (int64_t i = 0; i < stList_length(fasta_files); ++i) {
             char *seq_file = stList_get(fasta_files, i);
