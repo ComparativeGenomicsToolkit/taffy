@@ -8,6 +8,8 @@
 #include <getopt.h>
 #include <time.h>
 
+int64_t repeat_coordinates_every_n_columns = 1000;
+
 void usage() {
     fprintf(stderr, "maf_to_taf [options]\n");
     fprintf(stderr, "Convert a maf format alignment to taf format\n");
@@ -15,7 +17,7 @@ void usage() {
     fprintf(stderr, "-o --outputFile : Output taf file. If not specified outputs to stdout\n");
     fprintf(stderr, "-l --logLevel : Set the log level\n");
     fprintf(stderr, "-r --runLengthEncodeBases : Run length encode bases\n");
-    fprintf(stderr, "-s --repeatCoordinatesEveryNColumns : Repeat coordinates of each sequence at least every n columns. Off by default.\n");
+    fprintf(stderr, "-s --repeatCoordinatesEveryNColumns : Repeat coordinates of each sequence at least every n columns. By default: %" PRIi64 "\n", repeat_coordinates_every_n_columns);
     fprintf(stderr, "-h --help : Print this help message\n");
 }
 
@@ -29,7 +31,6 @@ int main(int argc, char *argv[]) {
     char *inputFile = NULL;
     char *outputFile = NULL;
     bool run_length_encode_bases=0;
-    int64_t repeat_coordinates_every_n_columns = -1;
 
     ///////////////////////////////////////////////////////////////////////////
     // Parse the inputs
@@ -83,7 +84,7 @@ int main(int argc, char *argv[]) {
     st_logInfo("Input file string : %s\n", inputFile);
     st_logInfo("Output file string : %s\n", outputFile);
     st_logInfo("Run length encode bases : %s\n", run_length_encode_bases ? "True" : "False");
-    st_logInfo("Repeat coordinates every n bases : %" PRIi64 "\n", outputFile, repeat_coordinates_every_n_columns);
+    st_logInfo("Repeat coordinates every n bases : %" PRIi64 "\n", repeat_coordinates_every_n_columns);
 
     //////////////////////////////////////////////
     // Read in the maf blocks and convert to sequence of taf columns
@@ -107,7 +108,7 @@ int main(int argc, char *argv[]) {
         if(p_alignment != NULL) {
             alignment_link_adjacent(p_alignment, alignment, 1);
         }
-        taf_write_block(p_alignment, alignment, run_length_encode_bases, output);
+        taf_write_block(p_alignment, alignment, run_length_encode_bases, repeat_coordinates_every_n_columns, output);
         if(p_alignment != NULL) {
             alignment_destruct(p_alignment);
         }

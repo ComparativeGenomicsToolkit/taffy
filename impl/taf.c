@@ -271,7 +271,7 @@ void write_column(Alignment_Row *row, int64_t column, FILE *fh, bool run_length_
     }
 }
 
-void write_coordinates(Alignment_Row *p_row, Alignment_Row *row, FILE *fh) {
+void write_coordinates(Alignment_Row *p_row, Alignment_Row *row, int64_t repeat_coordinates_every_n_columns, FILE *fh) {
     int64_t i = 0;
     fprintf(fh, " ;");
     while(p_row != NULL) { // Write any row deletions
@@ -288,21 +288,33 @@ void write_coordinates(Alignment_Row *p_row, Alignment_Row *row, FILE *fh) {
         if(row->l_row == NULL) { // if the row is inserted
             fprintf(fh, " i %" PRIi64 " %s %" PRIi64 " %c %" PRIi64 "",
                     i, row->sequence_name, row->start, row->strand ? '+' : '-', row->sequence_length);
+            row->bases_since_coordinates_reported = 0;
         }
         else {
             if(alignment_row_is_predecessor(row->l_row, row)) {
-                int64_t gap_length = row->start - (row->l_row->start + row->l_row->length);
-                if(gap_length > 0) { // if there is an indel
-                    if(row->left_gap_sequence != NULL) {
-                        assert(strlen(row->left_gap_sequence) == gap_length);
-                        fprintf(fh, " G %" PRIi64 " %s", i, row->left_gap_sequence);
-                    }
-                    else {
-                        fprintf(fh, " g %" PRIi64 " %" PRIi64 "", i, gap_length);
+                row->bases_since_coordinates_reported = row->l_row->bases_since_coordinates_reported + row->l_row->length;
+                if(repeat_coordinates_every_n_columns > 0 &&
+                   row->bases_since_coordinates_reported > repeat_coordinates_every_n_columns) { // Report the coordinates again
+                    // so they are easy to find
+                    row->bases_since_coordinates_reported = 0;
+                    fprintf(fh, " s %" PRIi64 " %s %" PRIi64 " %c %" PRIi64 "",
+                            i, row->sequence_name, row->start, row->strand ? '+' : '-', row->sequence_length);
+                }
+                else {
+                    int64_t gap_length = row->start - (row->l_row->start + row->l_row->length);
+                    if(gap_length > 0) { // if there is an indel
+                        if(row->left_gap_sequence != NULL) {
+                            assert(strlen(row->left_gap_sequence) == gap_length);
+                            fprintf(fh, " G %" PRIi64 " %s", i, row->left_gap_sequence);
+                        }
+                        else {
+                            fprintf(fh, " g %" PRIi64 " %" PRIi64 "", i, gap_length);
+                        }
                     }
                 }
             }
             else { // Substitute one row for another
+                row->bases_since_coordinates_reported = 0;
                 fprintf(fh, " s %" PRIi64 " %s %" PRIi64 " %c %" PRIi64 "",
                         i, row->sequence_name, row->start, row->strand ? '+' : '-', row->sequence_length);
             }
@@ -311,13 +323,14 @@ void write_coordinates(Alignment_Row *p_row, Alignment_Row *row, FILE *fh) {
     }
 }
 
-void taf_write_block(Alignment *p_alignment, Alignment *alignment, bool run_length_encode_bases, FILE *fh) {
+void taf_write_block(Alignment *p_alignment, Alignment *alignment, bool run_length_encode_bases,
+                     int64_t repeat_coordinates_every_n_columns, FILE *fh) {
     Alignment_Row *row = alignment->row;
     if(row != NULL) {
         int64_t column_no = strlen(row->bases);
         assert(column_no > 0);
         write_column(row, 0, fh, run_length_encode_bases);
-        write_coordinates(p_alignment != NULL ? p_alignment->row : NULL, row, fh);
+        write_coordinates(p_alignment != NULL ? p_alignment->row : NULL, row, repeat_coordinates_every_n_columns, fh);
         fprintf(fh, "\n");
         for(int64_t i=1; i<column_no; i++) {
             write_column(row, i, fh, run_length_encode_bases);
@@ -334,5 +347,3 @@ void taf_write_header(stList *tags, FILE *fh) {
     }
     fprintf(fh, "\n");
 }
-
-
