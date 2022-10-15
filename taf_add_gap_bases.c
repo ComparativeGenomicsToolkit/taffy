@@ -33,9 +33,35 @@ void add_to_hash(void *fastas, const char *fasta_header, const char *sequence, i
     stHash_insert((stHash *)fastas, stString_copy(fasta_header), stString_copy(sequence));
 }
 
+// it turns out just scanning for a "." doesn't work, even with the output of hal2maf.  The reason is
+// that spcecies names can contain "." characters -- at least they do in the VGP alignment.
+// so this function uses knowloedge of the genome names to greedily scan for a prefix ending in "."
+// that corresponds to a genome name in the hal. the extracted genome name is returned if found
+// (it must be freed)
+char *extract_genome_name(const char *sequence_name, stSet *hal_species) {
+    char *dot = NULL;
+    int64_t offset = 0;
+    const char *last = sequence_name + strlen(sequence_name) - 1;
+
+    do {
+        dot = strchr(sequence_name + offset, '.');
+        if (dot != NULL && dot != last && dot != sequence_name) {
+            char *species_name = stString_getSubString(sequence_name, 0, dot-sequence_name);
+            if (stSet_search(hal_species, species_name) != NULL) {
+                return species_name;
+            } else if (dot != last) {
+                free(species_name);
+                offset += (dot-sequence_name) + 1;
+            }
+        }
+    } while (dot != NULL);
+
+    st_errAbort("[taf] Error: Unable to find a . that splits %s so that the left side is a genome in the HAL\n", sequence_name);
+}
+
 // get a dna interval either from the fastas hash file or from the hal_handle
 // note the string returned needs to be freed
-char *get_sequence_fragment(const char* sequence_name, int64_t start, int64_t length, stHash *fastas, int hal_handle) {
+char *get_sequence_fragment(const char* sequence_name, int64_t start, int64_t length, stHash *fastas, int hal_handle, stSet *hal_species) {
     char *fragment = NULL;
     if (fastas) {
         assert(hal_handle == -1);
@@ -46,12 +72,8 @@ char *get_sequence_fragment(const char* sequence_name, int64_t start, int64_t le
     } else {
 #ifdef USE_HAL
         assert(fastas == NULL);
-        char *dot = strchr(sequence_name, '.');
-        if (dot == NULL || *(dot+1) == '\0' || dot == sequence_name) {
-            st_errAbort("[taf] Error: could not parse MAF sequence %s into GENOME.CONTIG\n", sequence_name);
-        }
-        char* species_name = stString_getSubString(sequence_name, 0, dot-sequence_name);
-        char* chrom_name = dot + 1;
+        char* species_name = extract_genome_name(sequence_name, hal_species);
+        char* chrom_name = (char*)sequence_name + strlen(species_name) + 1;
         fragment = halGetDna(hal_handle, species_name, chrom_name, start, start + length, NULL);
         free(species_name);
 #else
@@ -63,13 +85,13 @@ char *get_sequence_fragment(const char* sequence_name, int64_t start, int64_t le
 }
 
 
-void add_gap_strings(Alignment *p_alignment, Alignment *alignment, stHash *fastas, int hal_handle) {
+void add_gap_strings(Alignment *p_alignment, Alignment *alignment, stHash *fastas, int hal_handle, stSet *hal_species) {
     Alignment_Row *row = alignment->row;
     while(row != NULL) {
         if(row->l_row != NULL && alignment_row_is_predecessor(row->l_row, row)) {
             int64_t gap_length = row->start - (row->l_row->start + row->l_row->length);
             if(gap_length <= maximum_gap_string_length && row->left_gap_sequence == NULL) {
-                char* seq_interval = get_sequence_fragment(row->sequence_name, row->l_row->start + row->l_row->length, gap_length, fastas, hal_handle);
+                char* seq_interval = get_sequence_fragment(row->sequence_name, row->l_row->start + row->l_row->length, gap_length, fastas, hal_handle, hal_species);
                 if(seq_interval == NULL) {
                     st_logDebug("[taf] Missing sequence for gap, seq name: %s, skipping!\n", row->sequence_name);
                 }
@@ -173,6 +195,7 @@ int main(int argc, char *argv[]) {
     // Read in the sequence files
     //////////////////////////////////////////////
     stHash *fastas = NULL;
+    stSet *hal_species = NULL;
     int hal_handle = -1;
     if (optind < argc) {
         fastas = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, free, free);
@@ -187,6 +210,14 @@ int main(int argc, char *argv[]) {
     } else {
 #ifdef USE_HAL
         hal_handle = halOpen(hal_file, NULL);
+        // make a table of every species in the hal. this will be used to try to parse
+        // contig names with lots of dots in them where we don't know which dot separates genome from chrom...
+        hal_species = stSet_construct3(stHash_stringKey, stHash_stringEqualKey, free);
+        struct hal_species_t *species_list = halGetSpecies(hal_handle, NULL);
+        for (struct hal_species_t *species = species_list; species != NULL; species = species->next) {
+            stSet_insert(hal_species, stString_copy(species->name));
+        }
+        halFreeSpeciesList(species_list);
 #endif
     }
 
@@ -214,7 +245,7 @@ int main(int argc, char *argv[]) {
     while((alignment = taf_read_block(p_alignment, run_length_encode_bases, li)) != NULL) {
         // Add in the gap strings if there is a previous block
         if(p_alignment != NULL) {
-            add_gap_strings(p_alignment, alignment, fastas, hal_handle);
+            add_gap_strings(p_alignment, alignment, fastas, hal_handle, hal_species);
         }
 
         // Write the block
@@ -244,6 +275,9 @@ int main(int argc, char *argv[]) {
 
     if (fastas) {
         stHash_destruct(fastas);
+    }
+    if (hal_species) {
+        stSet_destruct(hal_species);
     }
 
     st_logInfo("taf_add_gap_bases is done, %" PRIi64 " seconds have elapsed\n", time(NULL) - startTime);
