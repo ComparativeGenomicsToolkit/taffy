@@ -72,19 +72,15 @@ CPPFLAGS += ${inclDirs:%=-I${rootPath}/%} -I${LIBDIR} -I${rootPath}/include
 # libraries can't be added until they are build, so add as to LDLIBS until needed
 sonLibLibs = ${sonLibDir}/sonLib.a ${sonLibDir}/cuTest.a
 
+# optional hal support toggled on by setting HALDIR (ex to ../hal)
+ifdef HALDIR
+	LDLIBS += ${HALDIR}/lib/libHalBlockViz.a ${HALDIR}/lib/libHalLiftover.a ${HALDIR}/lib/libHalLod.a ${HALDIR}/lib/libHalMaf.a ${HALDIR}/lib/libHal.a
+	CFLAGS += -I${HALDIR}/api/inc -I${HALDIR}/blockViz/inc -DUSE_HAL
+	CPPFLAGS += -I${HALDIR}/api/inc -I${HALDIR}/blockViz/inc -DUSE_HAL
+	CXX = h5c++
+endif
+
 # note: the CACTUS_STATIC_LINK_FLAGS below can generally be empty -- it's used by the static builder script only
 LDLIBS += ${sonLibLibs} ${LIBS} -L${rootPath}/lib -Wl,-rpath,${rootPath}/lib -lz -lbz2 -lpthread -lm -lstdc++ -lm ${CACTUS_STATIC_LINK_FLAGS}
 LIBDEPENDS = ${sonLibDir}/sonLib.a ${sonLibDir}/cuTest.a
 
-# optional hal support
-# HDF5LIBDIR needs to be set to the directory containing the three libraries referred below
-# Note: On ubuntu, you only get the static hdf5 libs from a local source install (as opposed to one from apt).
-#       An example of how to do so can be found here: https://github.com/ComparativeGenomicsToolkit/cactus/blob/master/build-tools/makeBinRelease
-# Normally, we can use h5cc/h5c++ and not worry about hdf5 flags, but I couldn't figure out how to get those working in order to link the C++ HAL with the C code here.
-# So I'm just modelling after what the browser does here: https://github.com/ucscGenomeBrowser/kent/blob/master/src/inc/common.mk#L114
-ifdef HALDIR
-	LDLIBS += ${HALDIR}/lib/libHalBlockViz.a ${HALDIR}/lib/libHalLiftover.a ${HALDIR}/lib/libHalLod.a ${HALDIR}/lib/libHalMaf.a ${HALDIR}/lib/libHal.a 
-	LDLIBS += ${HDF5LIBDIR}libhdf5_cpp.a ${HDF5LIBDIR}libhdf5.a ${HDF5LIBDIR}libhdf5_hl.a -ldl
-	CFLAGS += -I${HALDIR}/api/inc -I${HALDIR}/blockViz/inc -DUSE_HAL
-	CPPFLAGS += -I${HALDIR}/api/inc -I${HALDIR}/blockViz/inc -DUSE_HAL
-endif
