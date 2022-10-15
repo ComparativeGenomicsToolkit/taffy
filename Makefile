@@ -47,3 +47,8 @@ test : all
 clean :
 	cd submodules/sonLib && ${MAKE} clean
 	rm -rf *.o ${LIBDIR} ${BINDIR}
+
+static :
+	CFLAGS="$${CFLAGS} -static" \
+	CPPFLAGS="$${CXXFLAGS} -static" \
+	make all
