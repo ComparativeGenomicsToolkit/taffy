@@ -151,10 +151,10 @@ int64_t make_msa(int64_t string_no, int64_t column_no, int64_t max_alignment_len
      */
     // Build the MSA
     int64_t offsets[string_no];
-    int64_t alignment_offset=0;
     for (int64_t i=0; i<string_no; i++) { // Initialize the offsets
         offsets[i] = -1;
     }
+    int64_t alignment_offset=0;
     for(int64_t j=0; j<column_no; j++) {
         // Work out the max indel length before position j
         int64_t max_indel=0;
@@ -208,7 +208,6 @@ int64_t make_msa(int64_t string_no, int64_t column_no, int64_t max_alignment_len
         }
     }
     alignment_offset += max_indel;
-    assert(alignment_offset <= 2*column_no); // Sanity check alignment does not exceed theoretical max length
     return alignment_offset;
 }
 
@@ -268,10 +267,11 @@ int64_t align_interstitial_gaps(Alignment *alignment) {
     }
 
     // Now convert to a traditional MSA
-    int64_t max_alignment_length = longest_string_length*2;
+    int64_t max_alignment_length = (longest_string_length+1)*2;
     char msa_strings[string_no][max_alignment_length]; // can not be longer than 2x the longest string
     int64_t msa_length = make_msa(string_no, longest_string_length, max_alignment_length, msa, row_strings,
                                   row_string_lengths, msa_strings);
+    assert(msa_length <= max_alignment_length);
 
     // Now copy the alignment strings back to the sequences
     row = alignment->row; i=0;
