@@ -234,11 +234,13 @@ int64_t align_interstitial_gaps(Alignment *alignment) {
     //TODO: Consider not allowing picking the longest sequence if it is all Ns
     row = alignment->row;
     char *longest_string;
-    int64_t string_no=0, longest_string_length=0;
+    int64_t string_no=0, longest_string_length=0, total_string_length=0;
     while (row != NULL) {
         if(row->left_gap_sequence != NULL) {
             string_no++; // Increase the number of strings we are aligning
-            if(strlen(row->left_gap_sequence) > longest_string_length) {
+            int64_t i=strlen(row->left_gap_sequence);
+            total_string_length += i;
+            if(i > longest_string_length) {
                 longest_string = row->left_gap_sequence;
                 longest_string_length = strlen(longest_string);
             }
@@ -267,8 +269,9 @@ int64_t align_interstitial_gaps(Alignment *alignment) {
     }
 
     // Now convert to a traditional MSA
-    int64_t max_alignment_length = (longest_string_length+1)*2;
-    char msa_strings[string_no][max_alignment_length]; // can not be longer than 2x the longest string
+    int64_t max_alignment_length = total_string_length < (longest_string_length+1)*longest_string_length ? total_string_length : (longest_string_length+1)*longest_string_length;
+    char msa_strings[string_no][max_alignment_length]; // can not be longer than the minimum of the total length of the strings (where all bases
+    // are unique gaps) and the square of the longest sequence length
     int64_t msa_length = make_msa(string_no, longest_string_length, max_alignment_length, msa, row_strings,
                                   row_string_lengths, msa_strings);
     assert(msa_length <= max_alignment_length);
