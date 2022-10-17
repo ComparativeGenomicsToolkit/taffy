@@ -6,7 +6,6 @@ libHeaders = inc/*.h
 libTests = tests/*.c
 
 stTafDependencies =  ${LIBDEPENDS}
-stTafLibs = ${commonTafLibs} ${LDLIBS}
 
 all: all_libs all_progs
 all_libs: dependencies ${LIBDIR}/stTaf.a
@@ -27,19 +26,19 @@ ${LIBDIR}/stTaf.a : ${libSources} ${libHeaders}  ${stTafDependencies}
 	mv stTaf.a ${LIBDIR}/
 
 ${BINDIR}/stTafTests : ${libTests} ${LIBDIR}/stTaf.a ${stTafDependencies}
-	${CC} ${CPPFLAGS} ${CFLAGS} ${LDFLAGS} -o ${BINDIR}/stTafTests ${libTests} ${libSources} ${LIBDIR}/stTaf.a ${stTafLibs} ${LDLIBS}
+	${CC} ${CPPFLAGS} ${CFLAGS} ${LDFLAGS} -o ${BINDIR}/stTafTests ${libTests} ${LIBDIR}/stTaf.a ${LDLIBS}
 
 ${BINDIR}/maf_to_taf : maf_to_taf.c ${LIBDIR}/stTaf.a ${stTafDependencies}
-	${CC} ${CPPFLAGS} ${CFLAGS} -o ${BINDIR}/maf_to_taf maf_to_taf.c ${libSources} ${LIBDIR}/stTaf.a ${stTafLibs} ${LDLIBS}
+	${CC} ${CPPFLAGS} ${CFLAGS} -o ${BINDIR}/maf_to_taf maf_to_taf.c ${LIBDIR}/stTaf.a ${LDLIBS}
 
 ${BINDIR}/taf_to_maf : taf_to_maf.c ${LIBDIR}/stTaf.a ${stTafDependencies}
-	${CC} ${CPPFLAGS} ${CFLAGS} -o ${BINDIR}/taf_to_maf taf_to_maf.c ${libSources} ${LIBDIR}/stTaf.a ${stTafLibs} ${LDLIBS}
+	${CC} ${CPPFLAGS} ${CFLAGS} -o ${BINDIR}/taf_to_maf taf_to_maf.c ${LIBDIR}/stTaf.a ${LDLIBS}
 
 ${BINDIR}/taf_norm : taf_norm.c ${LIBDIR}/stTaf.a ${stTafDependencies}
-	${CC} ${CPPFLAGS} ${CFLAGS} -o ${BINDIR}/taf_norm taf_norm.c ${libSources} ${LIBDIR}/stTaf.a ${stTafLibs} ${LDLIBS}
+	${CC} ${CPPFLAGS} ${CFLAGS} -o ${BINDIR}/taf_norm taf_norm.c ${LIBDIR}/stTaf.a ${LDLIBS}
 
-${BINDIR}/taf_add_gap_bases : taf_add_gap_bases.c ${LIBDIR}/stTaf.a ${stTafDependencies}
-	${CC} ${CPPFLAGS} ${CFLAGS} -o ${BINDIR}/taf_add_gap_bases taf_add_gap_bases.c ${libSources} ${LIBDIR}/stTaf.a ${stTafLibs} ${LDLIBS}
+${BINDIR}/taf_add_gap_bases : taf_add_gap_bases.cpp ${LIBDIR}/stTaf.a ${stTafDependencies}
+	${CXX} ${CPPFLAGS} ${CFLAGS} -o ${BINDIR}/taf_add_gap_bases taf_add_gap_bases.cpp ${LIBDIR}/stTaf.a ${LDLIBS}
 
 test : all
 	${BINDIR}/stTafTests
@@ -47,3 +46,8 @@ test : all
 clean :
 	cd submodules/sonLib && ${MAKE} clean
 	rm -rf *.o ${LIBDIR} ${BINDIR}
+
+static :
+	CFLAGS="$${CFLAGS} -static" \
+	CPPFLAGS="$${CXXFLAGS} -static" \
+	make all
