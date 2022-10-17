@@ -24,6 +24,8 @@ struct _row { // Each row encodes the information about an aligned sequence
     Alignment_Row *l_row;  // connection to a left row (may be NULL)
     Alignment_Row *r_row;  // connection to a right row (may be NULL)
     Alignment_Row *n_row;  // the next row in the alignment
+    int64_t bases_since_coordinates_reported; // this number is used by taf write coordinates to
+    // indicate how many bases ago were the row's coordinates printed
 };
 
 /*
@@ -117,7 +119,8 @@ void taf_write_header(stList *tags, FILE *fh);
 /*
  * Write a taf block.
  */
-void taf_write_block(Alignment *p_alignment, Alignment *alignment, bool run_length_encode_bases, FILE *fh);
+void taf_write_block(Alignment *p_alignment, Alignment *alignment, bool run_length_encode_bases,
+                     int64_t repeat_coordinates_every_n_columns, FILE *fh);
 
 #endif /* STTAF_H_ */
 

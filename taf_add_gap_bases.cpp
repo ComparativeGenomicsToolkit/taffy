@@ -14,6 +14,7 @@ extern "C" {
 #endif
 
 int64_t maximum_gap_string_length = 50;
+int64_t repeat_coordinates_every_n_columns = 1000;
 
 void usage() {
     fprintf(stderr, "taf_add_gap_bases SEQ_FILExN [options]\n");    
@@ -24,6 +25,7 @@ void usage() {
     fprintf(stderr, "-m --maximumGapStringLength : The maximum size of a gap string to add, be default: %" PRIi64 "\n",
             maximum_gap_string_length);
     fprintf(stderr, "-l --logLevel : Set the log level\n");
+    fprintf(stderr, "-s --repeatCoordinatesEveryNColumns : Repeat coordinates of each sequence at least every n columns. By default: %" PRIi64 "\n", repeat_coordinates_every_n_columns);
     fprintf(stderr, "-h --help : Print this help message\n");
 }
 
@@ -137,10 +139,11 @@ int main(int argc, char *argv[]) {
                                                 { "maf", no_argument, 0, 'k' },
                                                 { "help", no_argument, 0, 'h' },
                                                 { "maximumGapStringLength", required_argument, 0, 'm' },
+                                                { "repeatCoordinatesEveryNColumns", required_argument, 0, 's' },
                                                 { 0, 0, 0, 0 } };
 
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:o:f:a:hm:k", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:o:a:hm:ks:", long_options, &option_index);
         if (key == -1) {
             break;
         }
@@ -163,6 +166,9 @@ int main(int argc, char *argv[]) {
                 return 0;
             case 'k':
                 output_maf = 1;
+                break;
+            case 's':
+                repeat_coordinates_every_n_columns = atol(optarg);
                 break;
             case 'm':
                 maximum_gap_string_length = atol(optarg);
@@ -197,6 +203,7 @@ int main(int argc, char *argv[]) {
         st_logInfo("Number of input FASTA files : %ld\n", argc - optind);
     }            
     st_logInfo("Maximum maximum gap string length : %" PRIi64 "\n", maximum_gap_string_length);
+    st_logInfo("Repeat coordinates every n bases : %" PRIi64 "\n", repeat_coordinates_every_n_columns);
 
     //////////////////////////////////////////////
     // Read in the sequence files
@@ -256,7 +263,7 @@ int main(int argc, char *argv[]) {
         }
 
         // Write the block
-        taf_write_block(p_alignment, alignment, run_length_encode_bases, output);
+        taf_write_block(p_alignment, alignment, run_length_encode_bases, repeat_coordinates_every_n_columns, output);
 
         // Clean up the previous alignment
         if(p_alignment != NULL) {

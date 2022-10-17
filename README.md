@@ -256,7 +256,6 @@ Which is a 6.97x reduction in block number.
 
 Things that are ongoing:
 
-* Finish adding in support for repeatCoordinatesEveryNColumns in maf_to_taf
 * Add support for tag parsing to non-header lines - this is in the spec but the parser doesn't yet support it
 * Make taf_add_gap_bases use indexed fastas to avoid loading everything into memory
 * Create an index format for random access to TAF files

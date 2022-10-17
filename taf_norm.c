@@ -11,6 +11,7 @@
 int64_t maximum_block_length_to_merge = 200;
 int64_t maximum_gap_length = 30;
 float fraction_shared_rows = 0.6;
+int64_t repeat_coordinates_every_n_columns = 1000;
 
 void usage() {
     fprintf(stderr, "taf_norm [options]\n");
@@ -22,6 +23,7 @@ void usage() {
     fprintf(stderr, "-m --maximumBlockLengthToMerge : Only merge together any two adjacent blocks if one or both is less than this many bases long, by default: %" PRIi64 "\n", maximum_block_length_to_merge);
     fprintf(stderr, "-n --maximumGapLength : Only merge together two adjacent blocks if the total number of unaligned bases between the blocks is less than this many bases, by default: %" PRIi64 "\n", maximum_gap_length);
     fprintf(stderr, "-q --fractionSharedRows : The fraction of rows between two blocks that need to be shared for a merge, default: %f\n", fraction_shared_rows);
+    fprintf(stderr, "-s --repeatCoordinatesEveryNColumns : Repeat coordinates of each sequence at least every n columns. By default: %" PRIi64 "\n", repeat_coordinates_every_n_columns);
     fprintf(stderr, "-h --help : Print this help message\n");
 }
 
@@ -76,10 +78,11 @@ int main(int argc, char *argv[]) {
                                                 { "maximumBlockLengthToMerge", required_argument, 0, 'm' },
                                                 { "maximumGapLength", required_argument, 0, 'n' },
                                                 { "fractionSharedRows", required_argument, 0, 'q' },
+                                                { "repeatCoordinatesEveryNColumns", required_argument, 0, 's' },
                                                 { 0, 0, 0, 0 } };
 
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:o:hm:n:kq:", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:o:hm:n:kq:s:", long_options, &option_index);
         if (key == -1) {
             break;
         }
@@ -109,6 +112,9 @@ int main(int argc, char *argv[]) {
             case 'q':
                 fraction_shared_rows = atof(optarg);
                 break;
+            case 's':
+                repeat_coordinates_every_n_columns = atol(optarg);
+                break;
             default:
                 usage();
                 return 1;
@@ -125,6 +131,7 @@ int main(int argc, char *argv[]) {
     st_logInfo("Maximum block length to merge : %" PRIi64 "\n", maximum_block_length_to_merge);
     st_logInfo("Maximum gap length : %" PRIi64 "\n", maximum_gap_length);
     st_logInfo("Output maf : %s\n", output_maf ? "true" : "false");
+    st_logInfo("Repeat coordinates every n bases : %" PRIi64 "\n", repeat_coordinates_every_n_columns);
     st_logInfo("Fraction shared rows to merge adjacent blocks : %f\n", fraction_shared_rows);
 
     //////////////////////////////////////////////
@@ -162,7 +169,7 @@ int main(int argc, char *argv[]) {
                  alignment_total_gap_length(p_alignment) <= maximum_gap_length) {
                 p_alignment = alignment_merge_adjacent(p_alignment, alignment);
             } else {
-                output_maf ? maf_write_block(p_alignment, output) : taf_write_block(p_p_alignment, p_alignment, run_length_encode_bases, output); // Write the maf block
+                output_maf ? maf_write_block(p_alignment, output) : taf_write_block(p_p_alignment, p_alignment, run_length_encode_bases, repeat_coordinates_every_n_columns, output); // Write the maf block
                 if(p_p_alignment != NULL) {
                     alignment_destruct(p_p_alignment); // Clean up the left-most block
                 }
@@ -175,7 +182,7 @@ int main(int argc, char *argv[]) {
         }
     }
     if(p_alignment != NULL) {
-        output_maf ? maf_write_block(p_alignment, output) : taf_write_block(p_p_alignment, p_alignment, run_length_encode_bases, output); // Write the last taf block
+        output_maf ? maf_write_block(p_alignment, output) : taf_write_block(p_p_alignment, p_alignment, run_length_encode_bases, -1, output); // Write the last taf block
         alignment_destruct(p_alignment);
         if(p_p_alignment != NULL) {
             alignment_destruct(p_p_alignment);
