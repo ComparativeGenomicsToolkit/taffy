@@ -38,7 +38,7 @@ ${BINDIR}/taf_norm : taf_norm.c ${LIBDIR}/stTaf.a ${stTafDependencies}
 	${CC} ${CFLAGS} -o ${BINDIR}/taf_norm taf_norm.c ${LIBDIR}/stTaf.a ${LDLIBS}
 
 ${BINDIR}/taf_add_gap_bases : taf_add_gap_bases.cpp ${LIBDIR}/stTaf.a ${stTafDependencies}
-	${CXX} ${CPPFLAGS} -o ${BINDIR}/taf_add_gap_bases taf_add_gap_bases.cpp ${LIBDIR}/stTaf.a ${LDLIBS}
+	${CXX} ${CPPFLAGS} ${CXXFLAGS} -o ${BINDIR}/taf_add_gap_bases taf_add_gap_bases.cpp ${LIBDIR}/stTaf.a ${LDLIBS}
 
 test : all
 	${BINDIR}/stTafTests

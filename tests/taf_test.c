@@ -31,7 +31,8 @@ static void test_taf(CuTest *testCase) {
     file = fopen(example_file, "r");
     FILE *file_copy = fopen(temp_copy, "r");
     LI *li = LI_construct(file_copy);
-    Alignment *alignment2, *p_alignment2;
+    Alignment *alignment2 = NULL;
+    Alignment *p_alignment2 = NULL;
     while((alignment = maf_read_block(file)) != NULL) {
         // Alignment *taf_read_block(Alignment *p_block, bool run_length_encode_bases, LI *li)
         alignment2 = taf_read_block(p_alignment2, run_length_encode_bases, li);
