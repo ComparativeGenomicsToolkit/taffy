@@ -233,7 +233,7 @@ int64_t align_interstitial_gaps(Alignment *alignment) {
     // Find the longest gap sequence and number of sequences to align
     //TODO: Consider not allowing picking the longest sequence if it is all Ns
     row = alignment->row;
-    char *longest_string;
+    char *longest_string = NULL;
     int64_t string_no=0, longest_string_length=0, total_string_length=0;
     while (row != NULL) {
         if(row->left_gap_sequence != NULL) {
