@@ -357,7 +357,6 @@ Alignment *alignment_merge_adjacent(Alignment *left_alignment, Alignment *right_
     int64_t interstitial_alignment_length = align_interstitial_gaps(right_alignment);
 
     // Now finally extend the left alignment rows to include the right alignment rows
-    int64_t i=0; // An index into the interstitial alignment coordinate
     Alignment_Row *l_row = left_alignment->row;
     char *right_gap = make_run(right_alignment_length + interstitial_alignment_length, '-'); // any trailing bases needed
     while(l_row != NULL) {

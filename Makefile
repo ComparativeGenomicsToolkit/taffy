@@ -21,24 +21,24 @@ dependencies:
 	ln -f submodules/sonLib/lib/*.a ${LIBDIR}
 
 ${LIBDIR}/stTaf.a : ${libSources} ${libHeaders}  ${stTafDependencies}
-	${CC} ${CPPFLAGS} ${CFLAGS} ${LDFLAGS} -c ${libSources}
+	${CC} ${CFLAGS} ${LDFLAGS} -c ${libSources}
 	${AR} rc stTaf.a *.o
 	mv stTaf.a ${LIBDIR}/
 
 ${BINDIR}/stTafTests : ${libTests} ${LIBDIR}/stTaf.a ${stTafDependencies}
-	${CC} ${CPPFLAGS} ${CFLAGS} ${LDFLAGS} -o ${BINDIR}/stTafTests ${libTests} ${LIBDIR}/stTaf.a ${LDLIBS}
+	${CC} ${CFLAGS} ${LDFLAGS} -o ${BINDIR}/stTafTests ${libTests} ${LIBDIR}/stTaf.a ${LDLIBS}
 
 ${BINDIR}/maf_to_taf : maf_to_taf.c ${LIBDIR}/stTaf.a ${stTafDependencies}
-	${CC} ${CPPFLAGS} ${CFLAGS} -o ${BINDIR}/maf_to_taf maf_to_taf.c ${LIBDIR}/stTaf.a ${LDLIBS}
+	${CC} ${CFLAGS} -o ${BINDIR}/maf_to_taf maf_to_taf.c ${LIBDIR}/stTaf.a ${LDLIBS}
 
 ${BINDIR}/taf_to_maf : taf_to_maf.c ${LIBDIR}/stTaf.a ${stTafDependencies}
-	${CC} ${CPPFLAGS} ${CFLAGS} -o ${BINDIR}/taf_to_maf taf_to_maf.c ${LIBDIR}/stTaf.a ${LDLIBS}
+	${CC} ${CFLAGS} -o ${BINDIR}/taf_to_maf taf_to_maf.c ${LIBDIR}/stTaf.a ${LDLIBS}
 
 ${BINDIR}/taf_norm : taf_norm.c ${LIBDIR}/stTaf.a ${stTafDependencies}
-	${CC} ${CPPFLAGS} ${CFLAGS} -o ${BINDIR}/taf_norm taf_norm.c ${LIBDIR}/stTaf.a ${LDLIBS}
+	${CC} ${CFLAGS} -o ${BINDIR}/taf_norm taf_norm.c ${LIBDIR}/stTaf.a ${LDLIBS}
 
 ${BINDIR}/taf_add_gap_bases : taf_add_gap_bases.cpp ${LIBDIR}/stTaf.a ${stTafDependencies}
-	${CXX} ${CPPFLAGS} ${CFLAGS} -o ${BINDIR}/taf_add_gap_bases taf_add_gap_bases.cpp ${LIBDIR}/stTaf.a ${LDLIBS}
+	${CXX} ${CPPFLAGS} -o ${BINDIR}/taf_add_gap_bases taf_add_gap_bases.cpp ${LIBDIR}/stTaf.a ${LDLIBS}
 
 test : all
 	${BINDIR}/stTafTests
