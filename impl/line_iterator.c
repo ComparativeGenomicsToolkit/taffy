@@ -8,7 +8,7 @@ struct _LI {
 LI *LI_construct(FILE *fh) {
     LI *li = st_calloc(1, sizeof(LI));
     li->fh = fh;
-    li->line = li->line = stFile_getLineFromFile(fh);
+    li->line = stFile_getLineFromFile(fh);
     return li;
 }
 
