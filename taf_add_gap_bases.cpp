@@ -101,7 +101,21 @@ void add_gap_strings(Alignment *p_alignment, Alignment *alignment, stHash *fasta
         if(row->l_row != NULL && alignment_row_is_predecessor(row->l_row, row)) {
             int64_t gap_length = row->start - (row->l_row->start + row->l_row->length);
             if(gap_length <= maximum_gap_string_length && row->left_gap_sequence == NULL) {
-                char* seq_interval = get_sequence_fragment(row->sequence_name, row->l_row->start + row->l_row->length, gap_length, fastas, hal_handle, hal_species);
+                char* seq_interval = NULL;
+                int64_t i = row->l_row->start + row->l_row->length;
+                assert(i >= 0 && i < row->sequence_length);
+                if(row->strand) {
+                    seq_interval = get_sequence_fragment(row->sequence_name, i, gap_length, fastas, hal_handle, hal_species);
+                }
+                else { // Case sequence is on the negative strand
+                    assert(row->sequence_length - i - gap_length >= 0);
+                    char *s = get_sequence_fragment(row->sequence_name,
+                                                    row->sequence_length - i - gap_length, gap_length, fastas, hal_handle, hal_species);
+                    if(s != NULL) {
+                        seq_interval = stString_reverseComplementString(s);
+                        free(s);
+                    }
+                }
                 if(seq_interval == NULL) {
                     st_logDebug("[taf] Missing sequence for gap, seq name: %s, skipping!\n", row->sequence_name);
                 }
