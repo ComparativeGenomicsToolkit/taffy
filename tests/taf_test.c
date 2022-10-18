@@ -65,7 +65,6 @@ static void test_taf(CuTest *testCase) {
 
     LI_destruct(li);
     fclose(file);
-    fclose(out_file);
 }
 
 CuSuite* taf_test_suite(void) {
