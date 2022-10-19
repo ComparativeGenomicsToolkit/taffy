@@ -46,7 +46,6 @@ static void test_maf(CuTest *testCase) {
     CuAssertTrue(testCase, maf_read_block(file_copy) == NULL);
 
     fclose(file);
-    fclose(out_file);
 }
 
 CuSuite* maf_test_suite(void) {

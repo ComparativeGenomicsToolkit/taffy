@@ -121,7 +121,7 @@ void add_gap_strings(Alignment *p_alignment, Alignment *alignment, stHash *fasta
                 }
                 else {
                     row->left_gap_sequence = seq_interval;
-                    assert(strlen(row->left_gap_sequence) == gap_length);
+                    assert(strlen(row->left_gap_sequence) == (size_t)gap_length);
                 }
             }
         }
@@ -140,7 +140,6 @@ int main(int argc, char *argv[]) {
     char *outputFile = NULL;
     char *hal_file = NULL;
     bool run_length_encode_bases = 0;
-    bool output_maf = 0;
 
     ///////////////////////////////////////////////////////////////////////////
     // Parse the inputs
@@ -151,14 +150,13 @@ int main(int argc, char *argv[]) {
                                                 { "inputFile", required_argument, 0, 'i' },
                                                 { "outputFile", required_argument, 0, 'o' },
                                                 { "halFile", required_argument, 0, 'a' },
-                                                { "maf", no_argument, 0, 'k' },
                                                 { "help", no_argument, 0, 'h' },
                                                 { "maximumGapStringLength", required_argument, 0, 'm' },
                                                 { "repeatCoordinatesEveryNColumns", required_argument, 0, 's' },
                                                 { 0, 0, 0, 0 } };
 
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:o:a:hm:ks:", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:o:a:hm:s:", long_options, &option_index);
         if (key == -1) {
             break;
         }
@@ -179,9 +177,6 @@ int main(int argc, char *argv[]) {
             case 'h':
                 usage();
                 return 0;
-            case 'k':
-                output_maf = 1;
-                break;
             case 's':
                 repeat_coordinates_every_n_columns = atol(optarg);
                 break;

@@ -67,7 +67,8 @@ dataSetsPath=/Users/benedictpaten/Dropbox/Documents/work/myPapers/genomeCactusPa
 
 inclDirs = inc submodules/sonLib/C/inc submodules/sonLib/externalTools/cutest
 
-CPPFLAGS += ${inclDirs:%=-I${rootPath}/%} -I${LIBDIR} -I${rootPath}/include
+CFLAGS += ${inclDirs:%=-I${rootPath}/%} -I${LIBDIR} -I${rootPath}/include
+CXXFLAGS += ${inclDirs:%=-I${rootPath}/%} -I${LIBDIR} -I${rootPath}/include
 
 # libraries can't be added until they are build, so add as to LDLIBS until needed
 sonLibLibs = ${sonLibDir}/sonLib.a ${sonLibDir}/cuTest.a
@@ -76,8 +77,21 @@ sonLibLibs = ${sonLibDir}/sonLib.a ${sonLibDir}/cuTest.a
 ifdef HALDIR
 	LDLIBS += ${HALDIR}/lib/libHalBlockViz.a ${HALDIR}/lib/libHalLiftover.a ${HALDIR}/lib/libHalLod.a ${HALDIR}/lib/libHalMaf.a ${HALDIR}/lib/libHal.a
 	CFLAGS += -I${HALDIR}/api/inc -I${HALDIR}/blockViz/inc -DUSE_HAL
-	CPPFLAGS += -I${HALDIR}/api/inc -I${HALDIR}/blockViz/inc -DUSE_HAL
+	CXXFLAGS += -I${HALDIR}/api/inc -I${HALDIR}/blockViz/inc -DUSE_HAL
 	CXX = h5c++
+
+# This bit copied from HAL: todo -- we should probably just use hal's include.mk directly
+# add compiler flag and kent paths if udc is enabled
+# relies on KENTSRC containing path to top level kent/src dir
+# and MACHTYPE being specified.
+# This MUST follow PHAST defs, as they both have a gff.h
+	ifdef ENABLE_UDC
+#  Find htslib as in kent/src/inc/common.mk:
+		MACHTYPE = x86_64
+		CXXFLAGS += -DENABLE_UDC-I${KENTSRC}/inc -I${KENTSRC}/htslib -pthread
+		LDLIBS += ${KENTSRC}/lib/${MACHTYPE}/jkweb.a ${KENTSRC}/htslib/libhts.a -lcurl -lssl -lcrypto -pthread
+	endif
+
 endif
 
 # note: the CACTUS_STATIC_LINK_FLAGS below can generally be empty -- it's used by the static builder script only
