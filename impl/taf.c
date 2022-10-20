@@ -230,7 +230,7 @@ Alignment *taf_read_block(Alignment *p_block, bool run_length_encode_bases, LI *
 stList *taf_read_header(LI *li) {
     stList *tokens = get_first_line(li);
     assert(tokens != NULL); // There has to be a valid header line
-    stList *tags = parse_header(tokens, "#", ":");
+    stList *tags = parse_header(tokens, "#taf", ":");
     stList_destruct(tokens);
 
     return tags;
@@ -341,7 +341,7 @@ void taf_write_block(Alignment *p_alignment, Alignment *alignment, bool run_leng
 
 void taf_write_header(stList *tags, FILE *fh) {
     assert(stList_length(tags) % 2 == 0); // list must be a sequence of alternative key:value pairs
-    fprintf(fh, "#");
+    fprintf(fh, "#taf");
     for(int64_t i=0; i<stList_length(tags); i+=2) {
         fprintf(fh, " %s:%s", (char *)stList_get(tags, i), (char *)stList_get(tags, i+1));
     }

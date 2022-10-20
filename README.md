@@ -17,12 +17,12 @@ Its key potential benefits over the MAF format are that:
 * is very easy to index, as each column of the alignment is a single line, 
 * it supports extensible column annotations.
 
-The format is composed of a sequence of a header and some columns.
+The format is composed of a header and then a sequence of columns.
 Tokens are separated by white-space. The syntax is defined as follows:
 
     .taf -> header '\n' columns
     
-    header -> tag_string
+    header -> '#taf' tags
     
     tag_string -> '#' tags
     
@@ -35,7 +35,7 @@ Tokens are separated by white-space. The syntax is defined as follows:
     key -> alphanumerical string
     value -> alphanumerical string
 
-    empty_string -> zero length string, e.g. ""
+    empty_string -> zero length string, e.g. ''
 
 (The header is therefore just a possibly empty sequence of key:value pairs)
 
@@ -133,9 +133,9 @@ The MAF file (602 bytes):
     s       simMouse.chr6   460762  8       +       636262  TTTTACCG
     s       simRat.chr6     470355  8       +       647215  TTTTACCG
 
-The corresponding TAF file (262 bytes):
+The corresponding TAF file (265 bytes):
 
-    # version:1 scoring:N/A
+    #taf version:1 scoring:N/A
     CTTT ; i 0 simDog.chr6 437451 + i 1 simHuman.chr6 446327 + i 2 simMouse.chr6 460751 + i 3 simRat.chr6 470339 11
     CCTT
     CCCC
