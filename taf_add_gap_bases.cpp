@@ -10,7 +10,7 @@ extern "C" {
 #include <getopt.h>
 #include <time.h>
 
-static int64_t max_hal_genomes = 100;
+static int64_t max_hal_genomes = 10000;
 #ifdef USE_HAL
 #include "halBlockViz.h"
 #include <unordered_map>
