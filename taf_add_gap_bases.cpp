@@ -9,8 +9,44 @@ extern "C" {
 #include "bioioC.h"
 #include <getopt.h>
 #include <time.h>
+
+static int64_t max_hal_genomes = 100;
 #ifdef USE_HAL
 #include "halBlockViz.h"
+#include <unordered_map>
+#include <list>
+// set up a quick C++ LRU cache to limit number of open genomes (and hence the memory usage of their sequence position caches)
+// note: it's pointer (and not string) based, so all access must go through the stable values in the hal_species set
+typedef std::list<const char*> GenomeLruList;
+typedef std::unordered_map<const char*, GenomeLruList::iterator> GenomeLruCache;
+static GenomeLruList genome_lru_list;
+static GenomeLruCache genome_lru_cache;
+void update_genome_lru(int hal_handle, const char* genome_name) {
+    GenomeLruCache::iterator i = genome_lru_cache.find(genome_name);
+    if (i != genome_lru_cache.end()) {
+        // if it's in the cache, we pop it to the front of the list
+        assert(i->second != genome_lru_list.end());                    
+        if (i->second != genome_lru_list.begin()) {
+            genome_lru_list.erase(i->second);
+            genome_lru_list.push_front(genome_name);
+            i->second = genome_lru_list.begin();
+        }        
+    } else {
+        // if it's not in the cache,
+        if (genome_lru_cache.size() >= (size_t)max_hal_genomes) {
+            // we remove the LRU if necessary (last in the list)
+            const char* last = genome_lru_list.back();
+            GenomeLruCache::iterator j = genome_lru_cache.find(last);
+            halCloseGenome(hal_handle, last, NULL);
+            assert(j != genome_lru_cache.end());
+            genome_lru_cache.erase(j);
+            genome_lru_list.pop_back();
+        }
+        // then add it to both structures
+        GenomeLruList::iterator k = genome_lru_list.insert(genome_lru_list.begin(), genome_name);
+        genome_lru_cache[genome_name] = k;
+    }    
+}
 #endif
 
 int64_t maximum_gap_string_length = 50;
@@ -22,7 +58,9 @@ void usage() {
     fprintf(stderr, "-i --inputFile : Input taf file to normalize. If not specified reads from stdin\n");
     fprintf(stderr, "-o --outputFile : Output taf file. If not specified outputs to stdout\n");
     fprintf(stderr, "-a --halFile : HAL file for extracting gap sequence (MAF must be created with hal2maf *without* --onlySequenceNames)\n");
-    fprintf(stderr, "-m --maximumGapStringLength : The maximum size of a gap string to add, be default: %" PRIi64 "\n",
+    fprintf(stderr, "-g --maxHalGenomes : Maximum number of HAL genomes to have open at once (to limit memory), by default: %" PRIi64 "\n",
+            max_hal_genomes);
+    fprintf(stderr, "-m --maximumGapStringLength : The maximum size of a gap string to add, by default: %" PRIi64 "\n",
             maximum_gap_string_length);
     fprintf(stderr, "-l --logLevel : Set the log level\n");
     fprintf(stderr, "-s --repeatCoordinatesEveryNColumns : Repeat coordinates of each sequence at least every n columns. By default: %" PRIi64 "\n", repeat_coordinates_every_n_columns);
@@ -43,7 +81,7 @@ void add_to_hash(void *fastas, const char *fasta_header, const char *sequence, i
 // that spcecies names can contain "." characters -- at least they do in the VGP alignment.
 // so this function uses knowloedge of the genome names to greedily scan for a prefix ending in "."
 // that corresponds to a genome name in the hal. the extracted genome name is returned if found
-// (it must be freed)
+// (returned value is a pointer from within hal_species and does not need freeing)
 char *extract_genome_name(const char *sequence_name, stSet *hal_species) {
     const char *dot = NULL;
     int64_t offset = 0;
@@ -53,10 +91,11 @@ char *extract_genome_name(const char *sequence_name, stSet *hal_species) {
         dot = strchr(sequence_name + offset, '.');
         if (dot != NULL && dot != last && dot != sequence_name) {
             char *species_name = stString_getSubString(sequence_name, 0, dot-sequence_name);
-            if (stSet_search(hal_species, species_name) != NULL) {
-                return species_name;
+            void *search_ret = stSet_search(hal_species, species_name);
+            free(species_name);
+            if (search_ret != NULL) {
+                return (char*)search_ret;
             } else if (dot != last) {
-                free(species_name);
                 offset += (dot-sequence_name) + 1;
             }
         }
@@ -82,10 +121,11 @@ char *get_sequence_fragment(const char* sequence_name, int64_t start, int64_t le
     } else {
 #ifdef USE_HAL
         assert(fastas == NULL);
+        // note: this pointer is coming right out of the hal_species set -- no need to free
         char* species_name = extract_genome_name(sequence_name, hal_species);
         char* chrom_name = (char*)sequence_name + strlen(species_name) + 1;
+        update_genome_lru(hal_handle, species_name);
         fragment = halGetDna(hal_handle, species_name, chrom_name, start, start + length, NULL);
-        free(species_name);
 #else
         assert(false);
 #endif
@@ -150,13 +190,14 @@ int main(int argc, char *argv[]) {
                                                 { "inputFile", required_argument, 0, 'i' },
                                                 { "outputFile", required_argument, 0, 'o' },
                                                 { "halFile", required_argument, 0, 'a' },
+                                                { "maxHalGenomes", required_argument, 0, 'g' },                                                
                                                 { "help", no_argument, 0, 'h' },
                                                 { "maximumGapStringLength", required_argument, 0, 'm' },
                                                 { "repeatCoordinatesEveryNColumns", required_argument, 0, 's' },
                                                 { 0, 0, 0, 0 } };
 
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:o:a:hm:s:", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:o:a:g:hm:s:", long_options, &option_index);
         if (key == -1) {
             break;
         }
@@ -174,6 +215,9 @@ int main(int argc, char *argv[]) {
             case 'a':
                 hal_file = optarg;
                 break;
+            case 'g':
+                max_hal_genomes = atol(optarg);
+                break;                
             case 'h':
                 usage();
                 return 0;
@@ -250,7 +294,15 @@ int main(int argc, char *argv[]) {
     //////////////////////////////////////////////
 
     FILE *input = inputFile == NULL ? stdin : fopen(inputFile, "r");
+    if (!input) {
+        fprintf(stderr, "[taf] Unable to open input file %s\n", inputFile);
+        return 1;
+    }
     FILE *output = outputFile == NULL ? stdout : fopen(outputFile, "w");
+    if (!output) {
+        fprintf(stderr, "[taf] Unable to open output file %s\n", outputFile);
+        return 1;
+    }        
     LI *li = LI_construct(input);
 
     // Pass the header line to determine parameters and write the updated taf header
