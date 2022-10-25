@@ -15,36 +15,41 @@ static int64_t max_hal_genomes = 100;
 #include "halBlockViz.h"
 #include <unordered_map>
 #include <list>
-// set up a quick C++ LRU cache to limit number of open genomes (and hence the memory usage of their sequence position caches)
+// set up a quick C++ MRU cache to limit number of open genomes (and hence the memory usage of their sequence position caches)
 // note: it's pointer (and not string) based, so all access must go through the stable values in the hal_species set
-typedef std::list<const char*> GenomeLruList;
-typedef std::unordered_map<const char*, GenomeLruList::iterator> GenomeLruCache;
-static GenomeLruList genome_lru_list;
-static GenomeLruCache genome_lru_cache;
-void update_genome_lru(int hal_handle, const char* genome_name) {
-    GenomeLruCache::iterator i = genome_lru_cache.find(genome_name);
-    if (i != genome_lru_cache.end()) {
+// also: first implemented LRU (evict least instead of most recently used) but it seemed too easy to hit worst-case scenarios
+//       can toggle between by changing front() and pop_front() to back() and pop_back() in the eviction code. 
+typedef std::list<const char*> GenomeMruList;
+typedef std::unordered_map<const char*, GenomeMruList::iterator> GenomeMruCache;
+static GenomeMruList genome_mru_list;
+static GenomeMruCache genome_mru_cache;
+size_t hit_count = 0;
+size_t access_count = 0;
+
+void update_genome_mru(int hal_handle, const char* genome_name) {
+    GenomeMruCache::iterator i = genome_mru_cache.find(genome_name);
+    if (i != genome_mru_cache.end()) {
         // if it's in the cache, we pop it to the front of the list
-        assert(i->second != genome_lru_list.end());                    
-        if (i->second != genome_lru_list.begin()) {
-            genome_lru_list.erase(i->second);
-            genome_lru_list.push_front(genome_name);
-            i->second = genome_lru_list.begin();
+        assert(i->second != genome_mru_list.end());                    
+        if (i->second != genome_mru_list.begin()) {
+            genome_mru_list.erase(i->second);
+            genome_mru_list.push_front(genome_name);
+            i->second = genome_mru_list.begin();
         }        
     } else {
         // if it's not in the cache,
-        if (genome_lru_cache.size() >= (size_t)max_hal_genomes) {
-            // we remove the LRU if necessary (last in the list)
-            const char* last = genome_lru_list.back();
-            GenomeLruCache::iterator j = genome_lru_cache.find(last);
+        if (genome_mru_cache.size() >= (size_t)max_hal_genomes) {
+            // we remove the MRU if necessary (last in the list)
+            const char* last = genome_mru_list.front();
+            GenomeMruCache::iterator j = genome_mru_cache.find(last);
             halCloseGenome(hal_handle, last, NULL);
-            assert(j != genome_lru_cache.end());
-            genome_lru_cache.erase(j);
-            genome_lru_list.pop_back();
+            assert(j != genome_mru_cache.end());
+            genome_mru_cache.erase(j);
+            genome_mru_list.pop_front();
         }
         // then add it to both structures
-        GenomeLruList::iterator k = genome_lru_list.insert(genome_lru_list.begin(), genome_name);
-        genome_lru_cache[genome_name] = k;
+        GenomeMruList::iterator k = genome_mru_list.insert(genome_mru_list.begin(), genome_name);
+        genome_mru_cache[genome_name] = k;
     }    
 }
 #endif
@@ -124,7 +129,7 @@ char *get_sequence_fragment(const char* sequence_name, int64_t start, int64_t le
         // note: this pointer is coming right out of the hal_species set -- no need to free
         char* species_name = extract_genome_name(sequence_name, hal_species);
         char* chrom_name = (char*)sequence_name + strlen(species_name) + 1;
-        update_genome_lru(hal_handle, species_name);
+        update_genome_mru(hal_handle, species_name);
         fragment = halGetDna(hal_handle, species_name, chrom_name, start, start + length, NULL);
 #else
         assert(false);
