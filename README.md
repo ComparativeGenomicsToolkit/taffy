@@ -24,18 +24,13 @@ Tokens are separated by white-space. The syntax is defined as follows:
     
     header -> '#taf' tags
     
-    tag_string -> '#' tags
-    
     tags -> tag tags
-         -> tag
-         -> empty_string   
+         -> ''   
     
     tag -> key':'value
     
     key -> alphanumerical string
-    value -> alphanumerical string
-
-    empty_string -> zero length string, e.g. ''
+    value -> alphanumerical string'
 
 (The header is therefore just a possibly empty sequence of key:value pairs)
 
@@ -49,6 +44,8 @@ Tokens are separated by white-space. The syntax is defined as follows:
 
 (Columns are encoded, one per line. Each column encodes an alignment of the
 bases in the column (see below) and then some optional coordinates and tags.)
+
+    tag_string -> '#' tags
 
     bases -> run_length_encoded_bases
           -> bases
@@ -70,9 +67,8 @@ to NOT use run length encoding.)
 
     coordinates_column -> ';' coordinates
     
-    coordinates -> coordinate_operation coordinates 
-                -> coordinate_operation
-                -> empty_string
+    coordinates -> coordinate_operation coordinates
+                -> ''
     
     coordinate_operation -> 'i' row coordinate
                          -> 'd' row
@@ -186,7 +182,7 @@ There is also a utility for adding sequences between blocks to a taf file
 
 And finally, a utility to merge together short alignment blocks to create a more
 "normalized" maf/taf file:
-
+ 
     taf_norm
 
 For example, to normalize a maf file do the following:

@@ -1,5 +1,6 @@
 #include "CuTest.h"
 #include "taf.h"
+#include "bioioC.h"
 
 static char *make_row_string(Alignment_Row *row) {
     int64_t length = row->length;
@@ -88,6 +89,16 @@ static void test_normalize(CuTest *testCase) {
     fclose(file);
 }
 
+void add_to_hash(void *fastas, const char *fasta_header, const char *sequence, int64_t length) {
+    if(stHash_search((stHash *)fastas, (void *)fasta_header) != NULL) {
+        // c++ gives an angry warning if we try to send our string literal directly to st_errAbort, so we do this
+        char msg[8192];
+        sprintf(msg, "Found duplicate sequence header: %s\n", fasta_header);
+        st_errAbort(msg);
+    }
+    stHash_insert((stHash *)fastas, stString_copy(fasta_header), stString_copy(sequence));
+}
+
 static void test_maf_norm_to_maf(CuTest *testCase) {
     /*
      * Run taf_norm with the evolver mammals to output a maf and check command succeeds.
@@ -98,6 +109,48 @@ static void test_maf_norm_to_maf(CuTest *testCase) {
     int i = st_system("./bin/maf_to_taf -i %s | ./bin/taf_add_gap_bases ./tests/seqs/* | ./bin/taf_norm -k > %s",
               example_file, output_file);
     CuAssertIntEquals(testCase, 0, i); // return value should be zero
+
+    // Parse the sequence files
+    stHash *fastas = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, free, free);
+    char *seqs[5] = { "./tests/seqs/simCow.chr6", "./tests/seqs/simDog.chr6",
+                     "./tests/seqs/simHuman.chr6", "./tests/seqs/simMouse.chr6", "./tests/seqs/simRat.chr6" };
+    for(int64_t i=0; i<5; i++) {
+        st_logInfo("Parsing sequence file : %s\n", seqs[i]);
+        FILE *fh = fopen(seqs[i], "r");
+        fastaReadToFunction(fh, fastas, add_to_hash);
+        fclose(fh);
+    }
+
+    // Now load the maf and check that the bases match the sequences
+    FILE *file = fopen(example_file, "r");
+    Alignment *alignment;
+    while((alignment = maf_read_block(file)) != NULL) {
+        Alignment_Row *row = alignment->row;
+        while(row != NULL) {
+            // Get the sequence
+            char *string = stHash_search(fastas, row->sequence_name);
+            if(string != NULL) {
+                // Get the sequence of bases for each row
+                int64_t j = row->start;
+                for (int64_t i = 0; i < row->length; i++) {
+                    if (row->bases[i] != '-') {  // If not a gap
+                        if(row->strand) { // Case on positive strand
+                            CuAssertIntEquals(testCase, row->bases[i], string[j++]);
+                        }
+                        else { // Case on reverse strand
+                            CuAssertIntEquals(testCase, row->bases[i], stString_reverseComplementChar(string[row->sequence_length - 1 - j++]));
+                        }
+                    }
+                }
+            }
+            row = row->n_row;
+        }
+        alignment_destruct(alignment);
+    }
+
+    // Cleanup
+    stHash_destruct(fastas);
+    fclose(file);
 }
 
 static void test_maf_norm(CuTest *testCase) {
