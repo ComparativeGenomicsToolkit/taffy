@@ -101,7 +101,8 @@ void add_to_hash(void *fastas, const char *fasta_header, const char *sequence, i
 
 static void test_maf_norm_to_maf(CuTest *testCase) {
     /*
-     * Run taf_norm with the evolver mammals to output a maf and check command succeeds.
+     * Run taf_norm with the evolver mammals to output a maf and check command succeeds, then
+     * check bases in alignment correspond to actual sequence in input string files
      */
     // Example maf file
     char *example_file = "./tests/evolverMammals.maf";
@@ -142,6 +143,9 @@ static void test_maf_norm_to_maf(CuTest *testCase) {
                         }
                     }
                 }
+            }
+            else { // Check is an ancestor sequence
+                st_logDebug("Didn't find sequence for: %s\n", row->sequence_name);
             }
             row = row->n_row;
         }
