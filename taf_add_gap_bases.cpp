@@ -33,7 +33,7 @@ void add_to_hash(void *fastas, const char *fasta_header, const char *sequence, i
     if(stHash_search((stHash *)fastas, (void *)fasta_header) != NULL) {
         // c++ gives an angry warning if we try to send our string literal directly to st_errAbort, so we do this
         char msg[8192];
-        sprintf(msg, "Found duplicate sequence header: %s\n", fasta_header); 
+        snprintf(msg, 8192, "Found duplicate sequence header: %s\n", fasta_header);
         st_errAbort(msg);
     }
     stHash_insert((stHash *)fastas, stString_copy(fasta_header), stString_copy(sequence));
@@ -64,7 +64,7 @@ char *extract_genome_name(const char *sequence_name, stSet *hal_species) {
 
     // c++ gives an angry warning if we try to send our string literal directly to st_errAbort, so we do this
     char msg[8192];
-    sprintf(msg, "[taf] Error: Unable to find a . that splits %s so that the left side is a genome in the HAL\n", sequence_name);
+    snprintf(msg, 8192, "[taf] Error: Unable to find a . that splits %s so that the left side is a genome in the HAL\n", sequence_name);
     st_errAbort(msg);
     return NULL;
 }

@@ -48,6 +48,12 @@ Alignment *maf_read_block(FILE *fh) {
                 row->sequence_length = atol(stList_get(tokens, 5));
                 row->bases = stString_copy(stList_get(tokens, 6));
                 stList_destruct(tokens);
+                if(alignment->row_number == 1) {
+                    alignment->column_number = strlen(row->bases);
+                }
+                else {
+                    assert(alignment->column_number == strlen(row->bases));
+                }
             }
             return alignment;
         }

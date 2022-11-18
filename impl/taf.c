@@ -55,7 +55,7 @@ static Alignment *parse_coordinates_and_establish_block(Alignment *p_block, stLi
     // Now parse the tokens to edit the rows
     int64_t j;
     has_coordinates(tokens, &j); j++; // Get 1+ the coordinate of the ';' token
-    while(j < stList_length(tokens)) { // Iterate through the tokens
+    while(j < stList_length(tokens) && strcmp(stList_get(tokens, j), "#") != 0) { // Iterate through the tokens
         char *op_type = stList_get(tokens, j++); // This is the operation
         assert(strlen(op_type) == 1); // Must be a single character in length
         int64_t row_index = atol(stList_get(tokens, j++)); // Get the index of the affected row
@@ -157,6 +157,27 @@ static stList *get_first_line(LI *li) {
     return tokens;
 }
 
+static stList *parse_tags(stList *tokens) {
+    stList *tags = stList_construct3(0, free);
+    int64_t i=0;
+    while(i<stList_length(tokens)) {
+        if(strcmp(stList_get(tokens, i++), "#") == 0) {
+            break; // We have found the token representing the start of the tags
+        }
+    }
+    while(i<stList_length(tokens)) {
+        char *tag = stList_get(tokens, i++);
+        stList *tag_tokens = stString_splitByString(tag, ":");
+        if(stList_length(tag_tokens) != 2) {
+            st_errAbort("Tag not separated by ':' character: %s\n",  tag);
+        }
+        stList_append(tags, stString_copy(stList_get(tag_tokens, 0)));
+        stList_append(tags, stString_copy(stList_get(tag_tokens, 1)));
+        stList_destruct(tag_tokens);
+    }
+    return tags;
+}
+
 Alignment *taf_read_block(Alignment *p_block, bool run_length_encode_bases, LI *li) {
     stList *tokens = get_first_line(li); // Get the first non-empty line
 
@@ -169,7 +190,9 @@ Alignment *taf_read_block(Alignment *p_block, bool run_length_encode_bases, LI *
 
     // Now add in all subsequent columns until we get one with coordinates, which we push back
     stList *alignment_columns = stList_construct3(0, free);
+    block->tag_lists = stList_construct3(0, (void (*)(void *))stList_destruct);
     stList_append(alignment_columns, get_bases(block->row_number, tokens, run_length_encode_bases));
+    stList_append(block->tag_lists, parse_tags(tokens)); // Get any tags for the column
     stList_destruct(tokens); // Clean up the first row
     while(1) {
         char *line = LI_peek_at_next_line(li);
@@ -197,13 +220,20 @@ Alignment *taf_read_block(Alignment *p_block, bool run_length_encode_bases, LI *
         // Add the bases from the line as a column to the alignment
         stList_append(alignment_columns, get_bases(block->row_number, tokens, run_length_encode_bases));
 
+        // Parse the tags for the column
+        stList_append(block->tag_lists, parse_tags(tokens)); // Get any tags for the column
+
         free(LI_get_next_line(li)); // pull the line and clean up the memory for the line
         stList_destruct(tokens); // clean up the tokens
     }
 
+    // Set the column number
+    assert(stList_length(block->tag_lists) == stList_length(alignment_columns));
+    block->column_number = stList_length(alignment_columns);
+
     //Now parse the actual alignments into the rows
     Alignment_Row *row = block->row;
-    int64_t j = 0, k = stList_length(alignment_columns);
+    int64_t j = 0, k = block->column_number;
     char bases[k+1];
     bases[k] = '\0';
     while(row != NULL) {
@@ -323,6 +353,16 @@ void write_coordinates(Alignment_Row *p_row, Alignment_Row *row, int64_t repeat_
     }
 }
 
+static void write_tags(stList *tags, FILE *fh) {
+    assert(stList_length(tags) % 2 == 0); // list must be a sequence of alternative key:value pairs
+    if(stList_length(tags) > 0) {
+        fprintf(fh, " #");
+        for (int64_t i = 0; i < stList_length(tags); i += 2) {
+            fprintf(fh, " %s:%s", (char *) stList_get(tags, i), (char *) stList_get(tags, i + 1));
+        }
+    }
+}
+
 void taf_write_block(Alignment *p_alignment, Alignment *alignment, bool run_length_encode_bases,
                      int64_t repeat_coordinates_every_n_columns, FILE *fh) {
     Alignment_Row *row = alignment->row;
@@ -331,9 +371,15 @@ void taf_write_block(Alignment *p_alignment, Alignment *alignment, bool run_leng
         assert(column_no > 0);
         write_column(row, 0, fh, run_length_encode_bases);
         write_coordinates(p_alignment != NULL ? p_alignment->row : NULL, row, repeat_coordinates_every_n_columns, fh);
+        if(alignment->tag_lists != NULL) {
+            write_tags(stList_get(alignment->tag_lists, 0), fh);
+        }
         fprintf(fh, "\n");
         for(int64_t i=1; i<column_no; i++) {
             write_column(row, i, fh, run_length_encode_bases);
+            if(alignment->tag_lists != NULL) {
+                write_tags(stList_get(alignment->tag_lists, i), fh);
+            }
             fprintf(fh, "\n");
         }
     }

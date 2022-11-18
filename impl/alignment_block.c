@@ -22,6 +22,9 @@ void alignment_destruct(Alignment *alignment) {
         Alignment_Row_destruct(r);
     }
     free(alignment);
+    if(alignment->tag_lists != NULL) {
+        stList_destruct(alignment->tag_lists);
+    }
 }
 
 static stList *get_rows_in_a_list(Alignment_Row *row) {
@@ -86,7 +89,7 @@ void alignment_link_adjacent(Alignment *left_alignment, Alignment *right_alignme
 }
 
 int64_t alignment_length(Alignment *alignment) {
-    return alignment->row == NULL ? 0 : strlen(alignment->row->bases);
+    return alignment->column_number;
 }
 
 int64_t alignment_total_gap_length(Alignment *left_alignment) {
@@ -113,10 +116,11 @@ stList *parse_header(stList *tokens, char *header_prefix, char *delimiter) {
         char *tag = stList_get(tokens, i);
         stList *tag_tokens = stString_splitByString(tag, delimiter);
         if(stList_length(tag_tokens) != 2) {
-            st_errAbort("Header line tags not separated by ':' character: %s\n", tag);
+            st_errAbort("Header line tags not separated by '%s' character: %s\n", delimiter, tag);
         }
         stList_append(tags, stString_copy(stList_get(tag_tokens, 0)));
         stList_append(tags, stString_copy(stList_get(tag_tokens, 1)));
+        stList_destruct(tag_tokens);
     }
     return tags;
 }
@@ -313,10 +317,6 @@ Alignment *alignment_merge_adjacent(Alignment *left_alignment, Alignment *right_
         r_row = r_row->n_row;
     }
 
-    // Get the length of the left and right alignments
-    int64_t left_alignment_length = alignment_length(left_alignment);
-    int64_t right_alignment_length = alignment_length(right_alignment);
-
     // Add the new rows in the right alignment to the left alignment
     r_row = right_alignment->row; Alignment_Row **p_l_row = &(left_alignment->row);
     while(r_row != NULL) {
@@ -330,7 +330,7 @@ Alignment *alignment_merge_adjacent(Alignment *left_alignment, Alignment *right_
             l_row->length = 0; // is an empty alignment
             l_row->sequence_length = r_row->sequence_length;
             l_row->strand = r_row->strand;
-            l_row->bases = make_run(left_alignment_length, '-');
+            l_row->bases = make_run(left_alignment->column_number, '-');
 
             // Connect the left and right rows
             l_row->r_row = r_row;
@@ -358,7 +358,7 @@ Alignment *alignment_merge_adjacent(Alignment *left_alignment, Alignment *right_
 
     // Now finally extend the left alignment rows to include the right alignment rows
     Alignment_Row *l_row = left_alignment->row;
-    char *right_gap = make_run(right_alignment_length + interstitial_alignment_length, '-'); // any trailing bases needed
+    char *right_gap = make_run(right_alignment->column_number + interstitial_alignment_length, '-'); // any trailing bases needed
     while(l_row != NULL) {
         if(l_row->r_row == NULL) {
             // Is a deletion, so add in trailing gaps equal in length to the right alignment length plus any interstitial
@@ -394,6 +394,19 @@ Alignment *alignment_merge_adjacent(Alignment *left_alignment, Alignment *right_
         }
 
         l_row = l_row->n_row; // Move to the next left alignment row
+    }
+
+    // Fix the column_number attribute
+    left_alignment->column_number = left_alignment->column_number + right_alignment->column_number + interstitial_alignment_length;
+
+    // Fix the tags
+    if(left_alignment->tag_lists != NULL) {
+        assert(right_alignment->tag_lists != NULL);
+        for(int64_t i=0; i<interstitial_alignment_length; i++) { // Add empty tag lists for new columns
+            stList_append(left_alignment->tag_lists, stList_construct3(0, free));
+        }
+        stList_appendAll(left_alignment->tag_lists, right_alignment->tag_lists);
+        stList_setDestructor(right_alignment->tag_lists, NULL); // to stop the held lists from being freed
     }
 
     // Clean up

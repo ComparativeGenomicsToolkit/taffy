@@ -11,14 +11,17 @@ typedef struct _row Alignment_Row;
 
 typedef struct _alignment {
     int64_t row_number; // Convenient counter of number rows in the alignment
+    int64_t column_number; // Convenient counter of number of columns in this alignment
     Alignment_Row *row; // An alignment is just a sequence of rows
+    stList *tag_lists; // A list of lists, each sub-list represents the string of tags for the corresponding
+    // column - for each column the tags are stored as a sequence [key, value]xN - may be NULL if no tags for block
 } Alignment;
 
 struct _row { // Each row encodes the information about an aligned sequence
     char *sequence_name; // name of sequence
     int64_t start, length, sequence_length; // zero based, half open coordinates
     bool strand; // nonzero is "+" else "-"
-    char *bases; // [A-Za-z*+]* string of length "length"
+    char *bases; // [A-Za-z*+]* string of bases and gaps representing the alignment of the row
     char *left_gap_sequence; // Optional interstitial gap sequence, which is the unaligned substring between this
     // sequence and the end of the previous block - may be NULL if not specified or if zero length
     Alignment_Row *l_row;  // connection to a left row (may be NULL)
