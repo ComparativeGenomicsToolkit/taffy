@@ -30,19 +30,19 @@ Tokens are separated by white-space. The syntax is defined as follows:
     tag -> key':'value
     
     key -> alphanumerical string
-    value -> alphanumerical string'
+    value -> alphanumerical string
 
 (The header is therefore just a possibly empty sequence of key:value pairs)
 
     columns -> column '\n' columns
-               column 'n'
+               column 
     
     column -> bases coordinates_column tag_string 
            -> bases coordinates_column
            -> bases tag_string
            -> bases
 
-(Columns are encoded, one per line. Each column encodes an alignment of the
+(Columns are encoded one per line. Each column encodes an alignment of the
 bases in the column (see below) and then some optional coordinates and tags.)
 
     tag_string -> '#' tags
@@ -61,8 +61,8 @@ bases in the column (see below) and then some optional coordinates and tags.)
 
 (Aligned bases are either a run-length encoded
 representation or simply as a sequence of aligned characters. To specify
-which format to use we use the tag "run_length_encode_bases=1" in the header.
-If "run_length_encode_bases=0" or the tag is not specified the format is
+which format to use we use the tag "run_length_encode_bases:1" in the header.
+If "run_length_encode_bases:0" or the tag is not specified the format is
 to NOT use run length encoding.)
 
     coordinates_column -> ';' coordinates
@@ -82,7 +82,7 @@ The operations are affected in order, so, for example, inserting a row at positi
 for any operations that are specified after an insertion.
 The substitute operation can be used to change the coordinates for a sequence in a row, or it can be used to periodically repeat
 coordinates to prevent needing to scan back more than N rows to find the coordinates of a row.
-Using the 'g' gap operation can be used to increment the coordinate of a sequence by a specified amount and is useful to inserting
+Using the 'g' gap operation can be used to increment the coordinate of a sequence by a specified amount and is useful for inserting
 long substrings. Using the 'G' instead of 'g' allows one to instead specify the gap substring.)
 
     row -> integer >= 0
@@ -252,6 +252,7 @@ Which is a 6.97x reduction in block number.
 
 Things that are ongoing:
 
+* Python bindings
 * Make taf_add_gap_bases use indexed fastas to avoid loading everything into memory
 * Create an index format for random access to TAF files
 * Add a binary/compressed version
