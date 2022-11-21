@@ -1,4 +1,5 @@
 #include "line_iterator.h"
+#include "sonLib.h"
 
 struct _LI {
     FILE *fh;

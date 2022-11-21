@@ -5,6 +5,7 @@
 */
 
 #include "taf.h"
+#include "sonLib.h"
 #include <getopt.h>
 #include <time.h>
 
@@ -143,20 +144,16 @@ int main(int argc, char *argv[]) {
     LI *li = LI_construct(input);
 
     // Pass the header line to determine parameters and write the updated taf header
-    stList *tags = taf_read_header(li);
-    assert(stList_length(tags) % 2 == 0);
-    for(int64_t i=0; i<stList_length(tags); i+=2) {
-        char *key = stList_get(tags, i);
-        char *value = stList_get(tags, i+1);
-        if(strcmp(key, "run_length_encode_bases") == 0 && strcmp(value, "1") == 0) {
-            run_length_encode_bases = 1;
-            if(output_maf) {
-                stList_remove(tags, i); // Remove this tag from the maf output as not relevant
-                stList_remove(tags, i);
-            }
+    Tag *tag = taf_read_header(li);
+    Tag *t = tag_find(tag, "run_length_encode_bases");
+    if(t != NULL && strcmp(t->value, "1") == 0) {
+        run_length_encode_bases = 1;
+        if(output_maf) { // Remove this tag from the maf output as not relevant
+            tag = tag_remove(tag, "run_length_encode_bases");
         }
     }
-    output_maf ? maf_write_header(tags, output) : taf_write_header(tags, output);
+    output_maf ? maf_write_header(tag, output) : taf_write_header(tag, output);
+    tag_destruct(tag);
 
     Alignment *alignment, *p_alignment = NULL, *p_p_alignment = NULL;
     while((alignment = get_next_taf_block(li, run_length_encode_bases)) != NULL) {

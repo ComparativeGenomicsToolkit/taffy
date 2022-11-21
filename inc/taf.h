@@ -1,20 +1,31 @@
 #ifndef STTAF_H_
 #define STTAF_H_
 
-#include "sonLib.h"
+#include <inttypes.h>
+#include <stdio.h>
+#include <stdbool.h>
+
 #include "line_iterator.h"
 
 /*
  * Structures to represent blocks of an alignment
  */
+
+typedef struct _tag Tag;
+
+struct _tag {
+    char *key;
+    char *value;
+    Tag *n_tag; // Next tag in list
+};
+
 typedef struct _row Alignment_Row;
 
 typedef struct _alignment {
     int64_t row_number; // Convenient counter of number rows in the alignment
     int64_t column_number; // Convenient counter of number of columns in this alignment
     Alignment_Row *row; // An alignment is just a sequence of rows
-    stList *tag_lists; // A list of lists, each sub-list represents the string of tags for the corresponding
-    // column - for each column the tags are stored as a sequence [key, value]xN - may be NULL if no tags for block
+    Tag **column_tags; // The tags for each column, each stored as a sequence of tags
 } Alignment;
 
 struct _row { // Each row encodes the information about an aligned sequence
@@ -48,12 +59,6 @@ void Alignment_Row_destruct(Alignment_Row *row);
 bool alignment_row_is_predecessor(Alignment_Row *left_row, Alignment_Row *right_row);
 
 /*
- * Parse a header line that mist start with the header_prefix and then be composed of a series of key value tags,
- * each delimited by the delimiter word.
- */
-stList *parse_header(stList *tokens, char *header_prefix, char *delimiter);
-
-/*
  * Use the O(ND) alignment to diff the rows between two alignments and connect together their rows
  * so that we can determine which rows in the right_alignment are a continuation of rows in the
  * left_alignment. We use this for efficiently outputting TAF.
@@ -76,6 +81,33 @@ int64_t alignment_total_gap_length(Alignment *left_alignment);
 int64_t alignment_number_of_common_rows(Alignment *left_alignment, Alignment *right_alignment);
 
 /*
+ * Cleanup a sequence of tags
+ */
+void tag_destruct(Tag *tag);
+
+/*
+ * Find a tag with a given key
+ */
+Tag *tag_find(Tag *tag, char *key);
+
+/*
+ * Remove a tag, cleaning it up. Returns the modified sequence.
+ */
+Tag *tag_remove(Tag *first_tag, char *key);
+
+/*
+ * Make a tag
+ */
+Tag *tag_construct(char *key, char *value, Tag *n_tag);
+
+/*
+ * Parse a tag from a string.
+ *
+ * If p_tag is not null will set p_tag->n_tag = tag, where tag is the parsed tag.
+ */
+Tag *tag_parse(char *tag_string, char *delimiter, Tag *p_tag);
+
+/*
  * Merge together adjacent blocks into one alignment. Requires that the alignment
  * rows are linked together (e.g. with alignment_link_adjacent). Destroys the input
  * alignments in the process and returns a merged alignment. If there are interstitial
@@ -84,29 +116,15 @@ int64_t alignment_number_of_common_rows(Alignment *left_alignment, Alignment *ri
 Alignment *alignment_merge_adjacent(Alignment *left_alignment, Alignment *right_alignment);
 
 /*
- * Read a maf header line
- */
-stList *maf_read_header(FILE *fh);
-
-/*
  * Read a maf alignment block from the file stream. Return NULL if none available
  */
 Alignment *maf_read_block(FILE *fh);
-
-/*
- * Write a maf header line
- */
-void maf_write_header(stList *tags, FILE *fh);
 
 /*
  * Write a maf block
  */
 void maf_write_block(Alignment *alignment, FILE *fh);
 
-/*
- * Read a taf header line
- */
-stList *taf_read_header(LI *li);
 
 /*
  * Read a taf block - that is a column with column coordinates and all subsequent coordinate-less columns that
@@ -114,16 +132,32 @@ stList *taf_read_header(LI *li);
  */
 Alignment *taf_read_block(Alignment *p_block, bool run_length_encode_bases, LI *li);
 
-/*
- * Write a taf header line
- */
-void taf_write_header(stList *tags, FILE *fh);
 
 /*
  * Write a taf block.
  */
 void taf_write_block(Alignment *p_alignment, Alignment *alignment, bool run_length_encode_bases,
                      int64_t repeat_coordinates_every_n_columns, FILE *fh);
+
+/*
+ * Read a maf header line
+ */
+Tag *maf_read_header(FILE *fh);
+
+/*
+ * Write a maf header line
+ */
+void maf_write_header(Tag *tag, FILE *fh);
+
+/*
+ * Read a taf header line
+ */
+Tag *taf_read_header(LI *li);
+
+/*
+ * Write a taf header line
+ */
+void taf_write_header(Tag *tag, FILE *fh);
 
 #endif /* STTAF_H_ */
 

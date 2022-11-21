@@ -5,6 +5,7 @@
 */
 extern "C" {
 #include "taf.h"
+#include "sonLib.h"
 }
 #include "bioioC.h"
 #include <getopt.h>
@@ -254,16 +255,13 @@ int main(int argc, char *argv[]) {
     LI *li = LI_construct(input);
 
     // Pass the header line to determine parameters and write the updated taf header
-    stList *tags = taf_read_header(li);
-    assert(stList_length(tags) % 2 == 0);
-    for(int64_t i=0; i<stList_length(tags); i+=2) {
-        char *key = (char*)stList_get(tags, i);
-        char *value = (char*)stList_get(tags, i+1);
-        if(strcmp(key, "run_length_encode_bases") == 0 && strcmp(value, "1") == 0) {
-            run_length_encode_bases = 1;
-        }
+    Tag *tag = taf_read_header(li);
+    Tag *t = tag_find(tag, "run_length_encode_bases");
+    if(t != NULL && strcmp(t->value, "1") == 0) {
+        run_length_encode_bases = 1;
     }
-    taf_write_header(tags, output);
+    taf_write_header(tag, output);
+    tag_destruct(tag);
 
     Alignment *alignment, *p_alignment = NULL;
     while((alignment = taf_read_block(p_alignment, run_length_encode_bases, li)) != NULL) {

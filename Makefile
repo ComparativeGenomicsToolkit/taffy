@@ -8,7 +8,7 @@ libTests = tests/*.c
 stTafDependencies =  ${LIBDEPENDS}
 
 all: all_libs all_progs
-all_libs: dependencies ${LIBDIR}/stTaf.a
+all_libs: dependencies ${LIBDIR}/libstTaf.a
 
 all_progs: all_libs ${BINDIR}/stTafTests ${BINDIR}/maf_to_taf ${BINDIR}/taf_to_maf ${BINDIR}/taf_norm ${BINDIR}/taf_add_gap_bases
 
@@ -19,26 +19,27 @@ dependencies:
 	rm -rf submodules/sonLib/bin/*.dSYM
 	ln -f submodules/sonLib/bin/[a-zA-Z]* ${BINDIR}
 	ln -f submodules/sonLib/lib/*.a ${LIBDIR}
+	ln -f submodules/sonLib/lib/sonLib.a ${LIBDIR}/libsonLib.a
 
-${LIBDIR}/stTaf.a : ${libSources} ${libHeaders}  ${stTafDependencies}
+${LIBDIR}/libstTaf.a : ${libSources} ${libHeaders}  ${stTafDependencies}
 	${CC} ${CFLAGS} ${LDFLAGS} -c ${libSources}
-	${AR} rc stTaf.a *.o
-	mv stTaf.a ${LIBDIR}/
+	${AR} rc libstTaf.a *.o
+	mv libstTaf.a ${LIBDIR}/
 
-${BINDIR}/stTafTests : ${libTests} ${LIBDIR}/stTaf.a ${stTafDependencies}
-	${CC} ${CFLAGS} ${LDFLAGS} -o ${BINDIR}/stTafTests ${libTests} ${LIBDIR}/stTaf.a ${LDLIBS}
+${BINDIR}/stTafTests : ${libTests} ${LIBDIR}/libstTaf.a ${stTafDependencies}
+	${CC} ${CFLAGS} ${LDFLAGS} -o ${BINDIR}/stTafTests ${libTests} ${LIBDIR}/libstTaf.a ${LDLIBS}
 
-${BINDIR}/maf_to_taf : maf_to_taf.c ${LIBDIR}/stTaf.a ${stTafDependencies}
-	${CC} ${CFLAGS} -o ${BINDIR}/maf_to_taf maf_to_taf.c ${LIBDIR}/stTaf.a ${LDLIBS}
+${BINDIR}/maf_to_taf : maf_to_taf.c ${LIBDIR}/libstTaf.a ${stTafDependencies}
+	${CC} ${CFLAGS} -o ${BINDIR}/maf_to_taf maf_to_taf.c ${LIBDIR}/libstTaf.a ${LDLIBS}
 
-${BINDIR}/taf_to_maf : taf_to_maf.c ${LIBDIR}/stTaf.a ${stTafDependencies}
-	${CC} ${CFLAGS} -o ${BINDIR}/taf_to_maf taf_to_maf.c ${LIBDIR}/stTaf.a ${LDLIBS}
+${BINDIR}/taf_to_maf : taf_to_maf.c ${LIBDIR}/libstTaf.a ${stTafDependencies}
+	${CC} ${CFLAGS} -o ${BINDIR}/taf_to_maf taf_to_maf.c ${LIBDIR}/libstTaf.a ${LDLIBS}
 
-${BINDIR}/taf_norm : taf_norm.c ${LIBDIR}/stTaf.a ${stTafDependencies}
-	${CC} ${CFLAGS} -o ${BINDIR}/taf_norm taf_norm.c ${LIBDIR}/stTaf.a ${LDLIBS}
+${BINDIR}/taf_norm : taf_norm.c ${LIBDIR}/libstTaf.a ${stTafDependencies}
+	${CC} ${CFLAGS} -o ${BINDIR}/taf_norm taf_norm.c ${LIBDIR}/libstTaf.a ${LDLIBS}
 
-${BINDIR}/taf_add_gap_bases : taf_add_gap_bases.cpp ${LIBDIR}/stTaf.a ${stTafDependencies}
-	${CXX} ${CPPFLAGS} ${CXXFLAGS} -o ${BINDIR}/taf_add_gap_bases taf_add_gap_bases.cpp ${LIBDIR}/stTaf.a ${LDLIBS}
+${BINDIR}/taf_add_gap_bases : taf_add_gap_bases.cpp ${LIBDIR}/libstTaf.a ${stTafDependencies}
+	${CXX} ${CPPFLAGS} ${CXXFLAGS} -o ${BINDIR}/taf_add_gap_bases taf_add_gap_bases.cpp ${LIBDIR}/libstTaf.a ${LDLIBS}
 
 test : all
 	${BINDIR}/stTafTests

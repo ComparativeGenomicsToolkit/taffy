@@ -1,4 +1,5 @@
 #include "taf.h"
+#include "sonLib.h"
 
 /*
  * Returns non-zero if the tokens list contains the coordinate marker ':'
@@ -157,25 +158,16 @@ static stList *get_first_line(LI *li) {
     return tokens;
 }
 
-static stList *parse_tags(stList *tokens) {
-    stList *tags = stList_construct3(0, free);
+Tag *parse_tags(stList *tokens, int64_t starting_token, char *delimiter);
+
+static Tag *parse_tags_for_column(stList *tokens) {
     int64_t i=0;
     while(i<stList_length(tokens)) {
         if(strcmp(stList_get(tokens, i++), "#") == 0) {
             break; // We have found the token representing the start of the tags
         }
     }
-    while(i<stList_length(tokens)) {
-        char *tag = stList_get(tokens, i++);
-        stList *tag_tokens = stString_splitByString(tag, ":");
-        if(stList_length(tag_tokens) != 2) {
-            st_errAbort("Tag not separated by ':' character: %s\n",  tag);
-        }
-        stList_append(tags, stString_copy(stList_get(tag_tokens, 0)));
-        stList_append(tags, stString_copy(stList_get(tag_tokens, 1)));
-        stList_destruct(tag_tokens);
-    }
-    return tags;
+    return parse_tags(tokens, i, ":");
 }
 
 Alignment *taf_read_block(Alignment *p_block, bool run_length_encode_bases, LI *li) {
@@ -190,9 +182,9 @@ Alignment *taf_read_block(Alignment *p_block, bool run_length_encode_bases, LI *
 
     // Now add in all subsequent columns until we get one with coordinates, which we push back
     stList *alignment_columns = stList_construct3(0, free);
-    block->tag_lists = stList_construct3(0, (void (*)(void *))stList_destruct);
+    stList *tag_lists = stList_construct();
     stList_append(alignment_columns, get_bases(block->row_number, tokens, run_length_encode_bases));
-    stList_append(block->tag_lists, parse_tags(tokens)); // Get any tags for the column
+    stList_append(tag_lists, parse_tags_for_column(tokens)); // Get any tags for the column
     stList_destruct(tokens); // Clean up the first row
     while(1) {
         char *line = LI_peek_at_next_line(li);
@@ -221,15 +213,22 @@ Alignment *taf_read_block(Alignment *p_block, bool run_length_encode_bases, LI *
         stList_append(alignment_columns, get_bases(block->row_number, tokens, run_length_encode_bases));
 
         // Parse the tags for the column
-        stList_append(block->tag_lists, parse_tags(tokens)); // Get any tags for the column
+        stList_append(tag_lists, parse_tags_for_column(tokens)); // Get any tags for the column
 
         free(LI_get_next_line(li)); // pull the line and clean up the memory for the line
         stList_destruct(tokens); // clean up the tokens
     }
 
     // Set the column number
-    assert(stList_length(block->tag_lists) == stList_length(alignment_columns));
+    assert(stList_length(tag_lists) == stList_length(alignment_columns));
     block->column_number = stList_length(alignment_columns);
+
+    // Set the tag strings
+    block->column_tags = st_malloc(sizeof(Tag *) * block->column_number);
+    for(int64_t i=0; i<block->column_number; i++) {
+        block->column_tags[i] = stList_get(tag_lists, i);
+    }
+    stList_destruct(tag_lists);
 
     //Now parse the actual alignments into the rows
     Alignment_Row *row = block->row;
@@ -257,13 +256,15 @@ Alignment *taf_read_block(Alignment *p_block, bool run_length_encode_bases, LI *
     return block;
 }
 
-stList *taf_read_header(LI *li) {
+Tag *parse_header(stList *tokens, char *header_prefix, char *delimiter);
+
+Tag *taf_read_header(LI *li) {
     stList *tokens = get_first_line(li);
     assert(tokens != NULL); // There has to be a valid header line
-    stList *tags = parse_header(tokens, "#taf", ":");
+    Tag *tag = parse_header(tokens, "#taf", ":");
     stList_destruct(tokens);
 
-    return tags;
+    return tag;
 }
 
 void write_column(Alignment_Row *row, int64_t column, FILE *fh, bool run_length_encode_bases) {
@@ -353,15 +354,7 @@ void write_coordinates(Alignment_Row *p_row, Alignment_Row *row, int64_t repeat_
     }
 }
 
-static void write_tags(stList *tags, FILE *fh) {
-    assert(stList_length(tags) % 2 == 0); // list must be a sequence of alternative key:value pairs
-    if(stList_length(tags) > 0) {
-        fprintf(fh, " #");
-        for (int64_t i = 0; i < stList_length(tags); i += 2) {
-            fprintf(fh, " %s:%s", (char *) stList_get(tags, i), (char *) stList_get(tags, i + 1));
-        }
-    }
-}
+void write_header(Tag *tag, FILE *fh, char *header_prefix, char *delimiter, char *end);
 
 void taf_write_block(Alignment *p_alignment, Alignment *alignment, bool run_length_encode_bases,
                      int64_t repeat_coordinates_every_n_columns, FILE *fh) {
@@ -371,25 +364,20 @@ void taf_write_block(Alignment *p_alignment, Alignment *alignment, bool run_leng
         assert(column_no > 0);
         write_column(row, 0, fh, run_length_encode_bases);
         write_coordinates(p_alignment != NULL ? p_alignment->row : NULL, row, repeat_coordinates_every_n_columns, fh);
-        if(alignment->tag_lists != NULL) {
-            write_tags(stList_get(alignment->tag_lists, 0), fh);
+        if(alignment->column_tags != NULL && alignment->column_tags[0] != NULL) {
+            write_header(alignment->column_tags[0], fh, " #", ":", "");
         }
         fprintf(fh, "\n");
         for(int64_t i=1; i<column_no; i++) {
             write_column(row, i, fh, run_length_encode_bases);
-            if(alignment->tag_lists != NULL) {
-                write_tags(stList_get(alignment->tag_lists, i), fh);
+            if(alignment->column_tags != NULL && alignment->column_tags[i] != NULL) {
+                write_header(alignment->column_tags[i], fh, " #", ":", "");
             }
             fprintf(fh, "\n");
         }
     }
 }
 
-void taf_write_header(stList *tags, FILE *fh) {
-    assert(stList_length(tags) % 2 == 0); // list must be a sequence of alternative key:value pairs
-    fprintf(fh, "#taf");
-    for(int64_t i=0; i<stList_length(tags); i+=2) {
-        fprintf(fh, " %s:%s", (char *)stList_get(tags, i), (char *)stList_get(tags, i+1));
-    }
-    fprintf(fh, "\n");
+void taf_write_header(Tag *tag, FILE *fh) {
+    write_header(tag, fh, "#taf", ":", "\n");
 }

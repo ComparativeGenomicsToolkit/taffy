@@ -1,5 +1,6 @@
 #include "CuTest.h"
 #include "taf.h"
+#include "sonLib.h"
 #include "bioioC.h"
 
 static char *make_row_string(Alignment_Row *row) {

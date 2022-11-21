@@ -1,5 +1,6 @@
 #include "CuTest.h"
 #include "taf.h"
+#include "sonLib.h"
 
 static void test_maf(CuTest *testCase) {
     // Example maf file

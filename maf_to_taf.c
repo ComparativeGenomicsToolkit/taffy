@@ -5,6 +5,7 @@
 */
 
 #include "taf.h"
+#include "sonLib.h"
 #include <getopt.h>
 #include <time.h>
 
@@ -94,13 +95,12 @@ int main(int argc, char *argv[]) {
     FILE *output = outputFile == NULL ? stdout : fopen(outputFile, "w");
 
     // Read the maf header and write the taf header
-    stList *tags = maf_read_header(input);
+    Tag *tag = maf_read_header(input);
     if(run_length_encode_bases) {
-        stList_append(tags, stString_copy("run_length_encode_bases"));
-        stList_append(tags, stString_copy("1"));
+        tag = tag_construct("run_length_encode_bases", "1", tag);
     }
-    taf_write_header(tags, output);
-    stList_destruct(tags);
+    taf_write_header(tag, output);
+    tag_destruct(tag);
 
     // Now read in the maf blocks and write the alignment
     Alignment *alignment, *p_alignment = NULL;

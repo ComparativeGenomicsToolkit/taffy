@@ -1,7 +1,9 @@
 #ifndef STOND_H_
 #define STOND_H_
 
-#include "sonLib.h"
+#include <inttypes.h>
+#include <stdio.h>
+#include <stdbool.h>
 
 typedef struct _WFA WFA;
 
