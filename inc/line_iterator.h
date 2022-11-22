@@ -8,7 +8,10 @@
  * and "peek" at lines before choosing to get them.
  */
 
-typedef struct _LI LI;
+typedef struct _LI {
+    FILE *fh;
+    char *line;
+} LI;
 
 LI *LI_construct(FILE *fh);
 

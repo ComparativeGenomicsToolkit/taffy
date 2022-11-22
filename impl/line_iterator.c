@@ -1,11 +1,6 @@
 #include "line_iterator.h"
 #include "sonLib.h"
 
-struct _LI {
-    FILE *fh;
-    char *line;
-};
-
 LI *LI_construct(FILE *fh) {
     LI *li = st_calloc(1, sizeof(LI));
     li->fh = fh;

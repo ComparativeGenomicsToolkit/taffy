@@ -81,6 +81,11 @@ int64_t alignment_total_gap_length(Alignment *left_alignment);
 int64_t alignment_number_of_common_rows(Alignment *left_alignment, Alignment *right_alignment);
 
 /*
+ * Make a tag
+ */
+Tag *tag_construct(char *key, char *value, Tag *n_tag);
+
+/*
  * Cleanup a sequence of tags
  */
 void tag_destruct(Tag *tag);
@@ -94,11 +99,6 @@ Tag *tag_find(Tag *tag, char *key);
  * Remove a tag, cleaning it up. Returns the modified sequence.
  */
 Tag *tag_remove(Tag *first_tag, char *key);
-
-/*
- * Make a tag
- */
-Tag *tag_construct(char *key, char *value, Tag *n_tag);
 
 /*
  * Parse a tag from a string.
@@ -116,9 +116,19 @@ Tag *tag_parse(char *tag_string, char *delimiter, Tag *p_tag);
 Alignment *alignment_merge_adjacent(Alignment *left_alignment, Alignment *right_alignment);
 
 /*
+ * Read a maf header line
+ */
+Tag *maf_read_header(FILE *fh);
+
+/*
  * Read a maf alignment block from the file stream. Return NULL if none available
  */
 Alignment *maf_read_block(FILE *fh);
+
+/*
+ * Write a maf header line
+ */
+void maf_write_header(Tag *tag, FILE *fh);
 
 /*
  * Write a maf block
@@ -127,37 +137,26 @@ void maf_write_block(Alignment *alignment, FILE *fh);
 
 
 /*
+ * Read a taf header line
+ */
+Tag *taf_read_header(LI *li);
+
+/*
  * Read a taf block - that is a column with column coordinates and all subsequent coordinate-less columns that
  * are considered to be part of the block.
  */
 Alignment *taf_read_block(Alignment *p_block, bool run_length_encode_bases, LI *li);
 
+/*
+ * Write a taf header line
+ */
+void taf_write_header(Tag *tag, FILE *fh);
 
 /*
  * Write a taf block.
  */
 void taf_write_block(Alignment *p_alignment, Alignment *alignment, bool run_length_encode_bases,
                      int64_t repeat_coordinates_every_n_columns, FILE *fh);
-
-/*
- * Read a maf header line
- */
-Tag *maf_read_header(FILE *fh);
-
-/*
- * Write a maf header line
- */
-void maf_write_header(Tag *tag, FILE *fh);
-
-/*
- * Read a taf header line
- */
-Tag *taf_read_header(LI *li);
-
-/*
- * Write a taf header line
- */
-void taf_write_header(Tag *tag, FILE *fh);
 
 #endif /* STTAF_H_ */
 
