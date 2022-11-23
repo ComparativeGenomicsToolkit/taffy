@@ -53,12 +53,12 @@ static void test_taf(CuTest *testCase) {
 
         taf_write_block(p_alignment, alignment, run_length_encode_bases, 1000, out_file);
         if(p_alignment != NULL) {
-            alignment_destruct(p_alignment);
+            alignment_destruct(p_alignment, 1);
         }
         p_alignment = alignment;
     }
     if(p_alignment != NULL) {
-        alignment_destruct(p_alignment);
+        alignment_destruct(p_alignment, 1);
     }
     fclose(file);
     fclose(out_file);
@@ -97,14 +97,14 @@ static void test_taf(CuTest *testCase) {
             check_tags(testCase, alignment2->column_tags[i], stList_get(column_tags, column_index++));
         }
 
-        alignment_destruct(alignment);
+        alignment_destruct(alignment, 1);
         if(p_alignment2 != NULL) {
-            alignment_destruct(p_alignment2);
+            alignment_destruct(p_alignment2, 1);
         }
         p_alignment2 = alignment2;
     }
     if(p_alignment2 != NULL) {
-        alignment_destruct(p_alignment2);
+        alignment_destruct(p_alignment2, 1);
     }
     CuAssertTrue(testCase, taf_read_block(p_alignment2, run_length_encode_bases, li) == NULL);
     CuAssertIntEquals(testCase, stList_length(column_tags), column_index);

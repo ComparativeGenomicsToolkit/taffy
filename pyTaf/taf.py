@@ -1,28 +1,13 @@
 from _pyTaf_cffi import ffi, lib
 
 
-class Alignment:
-    def __init__(self, row_number=0, column_number=0, row=None, column_tags=None):
-        self.row_number = row_number
-        self.column_number = column_number
-        self.row = row
-        self.column_tags = column_tags  # Tags are optional, but specified as list of dictionaries, one for
-        # each column
-
-
-class Row:
-    def __init__(self, sequence_name, start, length, sequence_length,
-                 strand, bases, left_gap_sequence="", l_row=None, r_row=None, n_row=None):
-        self.sequence_name = sequence_name
-        self.start = start
-        self.length = length
-        self.sequence_length = sequence_length
-        self.strand = strand
-        self.bases = bases
-        self.left_gap_sequence = left_gap_sequence
-        self.l_row = l_row
-        self.r_row = r_row
-        self.n_row = n_row
+def _c_tags_to_dictionary(c_tag):
+    # Convert tags to a Python dictionary
+    tags = {}
+    while c_tag != ffi.NULL:
+        tags[_to_string(c_tag.key)] = _to_string(c_tag.value)
+        c_tag = c_tag.n_tag
+    return tags
 
 
 def _to_string(s):
@@ -30,90 +15,161 @@ def _to_string(s):
     return ffi.string(s).decode("utf-8")
 
 
+class Alignment:
+    """ Represents an alignment block. See taf.h """
+    def __init__(self, c_alignment=None, py_row=None):
+        self._c_alignment = c_alignment
+        self._py_row = py_row
+
+    def row_number(self):
+        """ Number of rows in the alignment block """
+        return self._c_alignment.row_number
+
+    def column_number(self):
+        """ Number of columns in the alignment block """
+        return self._c_alignment.column_number
+
+    def first_row(self):
+        """ The first row in the alignment block """
+        return self._py_row
+
+    def column_tags(self, column_index):
+        """ The tags for the given column index, represented as a dictionary of strings """
+        assert 0 <= column_index < self.column_number()  # Check column index is valid
+        return _c_tags_to_dictionary(self._c_alignment.column_tags[column_index]) \
+            if self._c_alignment.column_tags != ffi.NULL else {}
+
+    def __del__(self):
+        lib.alignment_destruct(self._c_alignment, 0)  # Cleans up the underlying C alignment structure
+
+
+class Row:
+    """ Represents a row of an alignment block. See taf.h """
+
+    def __init__(self, c_row=None, l_row=None, r_row=None, n_row=None):
+        self._c_row = c_row  # The underlying C row
+        self._l_row = l_row  # The prior (left) row in the previous alignment block
+        self._r_row = r_row  # The next (right) row in the next alignemnt clock
+        self._n_row = n_row  # The next row in the sequence of rows
+
+    def sequence_name(self):
+        """ The name of the sequence for the row """
+        return _to_string(self._c_row.sequence_name)
+
+    def start(self):
+        """ The start coordinate of the base in the row (if strand is False then will be with respect to
+        reverse complement sequence """
+        return self._c_row.start
+
+    def length(self):
+        """ The number of bases in the row of the alignment """
+        return self._c_row.length
+
+    def sequence_length(self):
+        """ The length of the underlying sequence """
+        return self._c_row.sequence_length
+
+    def strand(self):
+        """ The strand (boolean) of the sequence """
+        return self._c_row.strand
+
+    def bases(self):
+        """ The alignment of the row, consisting of the sequence and gap characters """
+        return _to_string(self._c_row.bases)
+
+    def left_gap_sequence(self):
+        """ The sequence of any unaligned bases in this row between this block and the previous
+        (left) alignment block """
+        return "" if self._c_row.left_gap_sequence == ffi.NULL else _to_string(self._c_row.self.left_gap_sequence)
+
+    def next_row(self):
+        """ Get the next row in the alignment block or None if last row """
+        return self._n_row
+
+    def left_row(self):
+        """ Get any left row in the prior alignment block """
+        return self._l_row
+
+    def right_row(self):
+        """ Get any right row in the next alignment block """
+        return self._r_row
+
+    def __del__(self):
+        lib.Alignment_Row_destruct(self._c_row)  # Cleans up the underlying C alignment structure
+
+
 class AlignmentParser:
     """ Taf or maf alignment parser.
-
-    Use with a context manager to ensure memory from C bindings is cleaned up """
+    """
 
     def __init__(self, file_handle, taf_not_maf=True, use_run_length_encoding=False):
+        """ Use taf_not_maf to switch between MAF or TAF parsing. Set use_run_length_encoding to determine how
+        to decode taf columns. If unknown can be set after construction by interrogating the header line after
+        construction """
         self.taf_not_maf = taf_not_maf
         self.use_run_length_encoding = use_run_length_encoding
-        self.p_alignment = ffi.NULL  # The previous python alignment returned
-        self.p_c_rows_to_python_rows = {}  # Hash from C rows to Python rows of the previous
+        self.p_c_alignment = ffi.NULL  # The previous C alignment returned
+        self.p_c_rows_to_py_rows = {}  # Hash from C rows to Python rows of the previous
         # alignment block, allowing linking of rows between blocks
-        self.c_file_handle = ffi.cast("FILE *", file_handle)
-        if taf_not_maf:
+        self.c_file_handle = ffi.cast("FILE *", file_handle)  # The C file handle
+        if taf_not_maf:  # If taf then we wrap the file handle in a C line iterator
             self.c_file_handle = lib.LI_construct(self.c_file_handle)
 
     def get_header(self):
-        tag = lib.taf_read_header(self.c_file_handle) if self.taf_not_maf else lib.maf_read_header(self.c_file_handle)
-        # Convert tags to a Python dictionary
-        tags = {}
-        t = tag
-        while t != ffi.NULL:
-            tags[_to_string(t.key)] = _to_string(t.value)
-            t = t.n_tag
-        lib.tag_destruct(tag) # Clean up tag
-        return tags
+        """ Get tags from the header line as a dictionary of key:value pairs. Must be called if a header is
+         present in the file before blocks are retrieved """
+        c_tag = lib.taf_read_header(self.c_file_handle) if self.taf_not_maf else lib.maf_read_header(self.c_file_handle)
+        p_tags = _c_tags_to_dictionary(c_tag)
+        lib.tag_destruct(c_tag)  # Clean up tag
+        return p_tags
 
     def __next__(self):
         # Read a taf/maf block
-        ca = lib.taf_read_block(self.p_alignment, 0, self.c_file_handle) if self.taf_not_maf \
-            else lib.maf_read_block(self.c_file_handle)
+        c_alignment = lib.taf_read_block(self.p_c_alignment, 0, self.c_file_handle) if self.taf_not_maf \
+                      else lib.maf_read_block(self.c_file_handle)
 
-        if ca == ffi.NULL:  # If it is null
-            if self.p_alignment != ffi.NULL:  # Clean up the prior alignment, if it exists
-                lib.alignment_destruct(self.p_alignment)
-                self.p_alignment = ffi.NULL
-            raise StopIteration
+        if c_alignment == ffi.NULL:  # If the c_alignment is null
+            raise StopIteration  # We're done
 
         # If maf use O(ND) algorithm to link to any prior alignment block
-        if (not self.taf_not_maf) and self.p_alignment != ffi.NULL:
-            lib.alignment_link_adjacent(self.p_alignment, ca, 1)
-
-        # Convert the new alignment into Python
-        pa = Alignment(row_number=ca.row_number,
-                       column_number=ca.column_number,
-                       row=None, column_tags=[{} for i in range(ca.column_number)])
+        if (not self.taf_not_maf) and self.p_c_alignment != ffi.NULL:
+            lib.alignment_link_adjacent(self.p_c_alignment, c_alignment, 1)
 
         # Now add in the rows
-        cr, ppr, c_rows_to_python_rows = ca.row, None, {}
-        while cr != ffi.NULL:
-            # Make the row object, linking it to any prior row
-            pr = Row(sequence_name=_to_string(cr.sequence_name),
-                     start=cr.start,
-                     length=cr.length,
-                     sequence_length=cr.sequence_length,
-                     strand=cr.strand,
-                     bases=_to_string(cr.bases),
-                     left_gap_sequence="" if cr.left_gap_sequence == ffi.NULL else _to_string(cr.left_gap_sequence),
-                     l_row=None if cr.l_row == ffi.NULL else self.p_c_rows_to_python_rows[cr.l_row])
-            c_rows_to_python_rows[cr] = pr
+        c_row, p_py_row, c_rows_to_py_rows = c_alignment.row, None, {}
+        while c_row != ffi.NULL:
+            # The previous py row
 
-            # Connect the row object to the chain of row objects
-            if ppr is None:
-                pa.row = pr
-            else:
-                ppr.n_row = pr
+            # Make the Python row object
+            if c_row.l_row == ffi.NULL:  # If there is no prior left row to connect to
+                py_row = Row(c_row=c_row)
+            else:  # Otherwise, there is a prior left row to connect to
+                l_py_row = self.p_c_rows_to_py_rows[c_row.l_row]
+                py_row = Row(c_row=c_row, l_row=l_py_row)
+                l_py_row._r_row = py_row
 
-            ppr = pr  # Update the previous python row object
-            cr = cr.n_row  # Move to the next row
+            # Add to the map of c rows to python rows
+            c_rows_to_py_rows[c_row] = py_row
 
-        # Clean up any prior alignment and set the new prior alignment
-        if self.p_alignment != ffi.NULL:
-            lib.alignment_destruct(self.p_alignment)
-        self.p_alignment = ca
-        self.p_c_rows_to_python_rows = c_rows_to_python_rows
+            # Connect the row object to the chain of row objects for the block
+            if p_py_row is not None:
+                p_py_row._n_row = py_row
 
-        return pa
+            p_py_row = py_row  # Update the previous python row object
+            c_row = c_row.n_row  # Move to the next row
+
+        # Now convert the new alignment into Python
+        py_alignment = Alignment(c_alignment=c_alignment, py_row=c_rows_to_py_rows[c_alignment.row])
+
+        # Set the new prior alignment / rows
+        self.p_c_alignment = c_alignment
+        self.p_c_rows_to_py_rows = c_rows_to_py_rows
+
+        return py_alignment
 
     def __iter__(self):
-        return self
+        return self  # Making this an iterable
 
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_value, exc_traceback):
+    def __del__(self):
         if self.taf_not_maf:
-            lib.LI_destruct(self.c_file_handle)
-
+            lib.LI_destruct(self.c_file_handle)  # Cleanup the allocated line iterator

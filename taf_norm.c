@@ -168,7 +168,7 @@ int main(int argc, char *argv[]) {
             } else {
                 output_maf ? maf_write_block(p_alignment, output) : taf_write_block(p_p_alignment, p_alignment, run_length_encode_bases, repeat_coordinates_every_n_columns, output); // Write the maf block
                 if(p_p_alignment != NULL) {
-                    alignment_destruct(p_p_alignment); // Clean up the left-most block
+                    alignment_destruct(p_p_alignment, 1); // Clean up the left-most block
                 }
                 p_p_alignment = p_alignment;
                 p_alignment = alignment;
@@ -180,9 +180,9 @@ int main(int argc, char *argv[]) {
     }
     if(p_alignment != NULL) {
         output_maf ? maf_write_block(p_alignment, output) : taf_write_block(p_p_alignment, p_alignment, run_length_encode_bases, -1, output); // Write the last taf block
-        alignment_destruct(p_alignment);
+        alignment_destruct(p_alignment, 1);
         if(p_p_alignment != NULL) {
-            alignment_destruct(p_p_alignment);
+            alignment_destruct(p_p_alignment, 1);
         }
     }
 

@@ -275,12 +275,12 @@ int main(int argc, char *argv[]) {
 
         // Clean up the previous alignment
         if(p_alignment != NULL) {
-            alignment_destruct(p_alignment);
+            alignment_destruct(p_alignment, 1);
         }
         p_alignment = alignment; // Update the previous alignment
     }
     if(p_alignment != NULL) { // Clean up the final alignment
-        alignment_destruct(p_alignment);
+        alignment_destruct(p_alignment, 1);
     }
 
     //////////////////////////////////////////////

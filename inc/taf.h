@@ -45,7 +45,7 @@ struct _row { // Each row encodes the information about an aligned sequence
 /*
  * Clean up the memory for an alignment
  */
-void alignment_destruct(Alignment *alignment);
+void alignment_destruct(Alignment *alignment, bool cleanup_rows);
 
 /*
  * Cleanup a row

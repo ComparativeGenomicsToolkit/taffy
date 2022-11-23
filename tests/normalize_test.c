@@ -76,7 +76,7 @@ static void test_normalize(CuTest *testCase) {
                 stList_destruct(row_strings);
             }
             else {
-                alignment_destruct(p_alignment);
+                alignment_destruct(p_alignment, 1);
                 p_alignment = alignment;
             }
         }
@@ -85,7 +85,7 @@ static void test_normalize(CuTest *testCase) {
         }
     }
     if(p_alignment != NULL) {
-        alignment_destruct(p_alignment);
+        alignment_destruct(p_alignment, 1);
     }
     fclose(file);
 }
@@ -150,7 +150,7 @@ static void test_maf_norm_to_maf(CuTest *testCase) {
             }
             row = row->n_row;
         }
-        alignment_destruct(alignment);
+        alignment_destruct(alignment, 1);
     }
 
     // Cleanup

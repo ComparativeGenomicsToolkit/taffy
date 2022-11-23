@@ -75,12 +75,14 @@ void Alignment_Row_destruct(Alignment_Row *row) {
     free(row);
 }
 
-void alignment_destruct(Alignment *alignment) {
+void alignment_destruct(Alignment *alignment, bool cleanup_rows) {
     Alignment_Row *row = alignment->row;
-    while(row != NULL) {
-        Alignment_Row *r = row;
-        row = row->n_row;
-        Alignment_Row_destruct(r);
+    if(cleanup_rows) {
+        while (row != NULL) {
+            Alignment_Row *r = row;
+            row = row->n_row;
+            Alignment_Row_destruct(r);
+        }
     }
     free(alignment);
     if(alignment->column_tags != NULL) {
@@ -498,7 +500,7 @@ Alignment *alignment_merge_adjacent(Alignment *left_alignment, Alignment *right_
     left_alignment->column_number = total_column_number;
 
     // Clean up
-    alignment_destruct(right_alignment);  // Delete the right alignment
+    alignment_destruct(right_alignment, 1);  // Delete the right alignment
     free(right_gap);
 
     return left_alignment;

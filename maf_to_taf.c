@@ -110,12 +110,12 @@ int main(int argc, char *argv[]) {
         }
         taf_write_block(p_alignment, alignment, run_length_encode_bases, repeat_coordinates_every_n_columns, output);
         if(p_alignment != NULL) {
-            alignment_destruct(p_alignment);
+            alignment_destruct(p_alignment, 1);
         }
         p_alignment = alignment;
     }
     if(p_alignment != NULL) {
-        alignment_destruct(p_alignment);
+        alignment_destruct(p_alignment, 1);
     }
 
     //////////////////////////////////////////////

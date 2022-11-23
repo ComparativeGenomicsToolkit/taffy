@@ -95,12 +95,12 @@ int main(int argc, char *argv[]) {
     while((alignment = taf_read_block(p_alignment, run_length_encode_bases, li)) != NULL) {
         maf_write_block(alignment, output);
         if(p_alignment != NULL) {
-            alignment_destruct(p_alignment);
+            alignment_destruct(p_alignment, 1);
         }
         p_alignment = alignment;
     }
     if(p_alignment != NULL) {
-        alignment_destruct(p_alignment);
+        alignment_destruct(p_alignment, 1);
     }
 
     //////////////////////////////////////////////
