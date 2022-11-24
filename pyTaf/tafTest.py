@@ -1,10 +1,13 @@
 import unittest
 import pathlib
-from taf import AlignmentParser
+from random import randint
+from taf import AlignmentParser, AlignmentWriter
+
 
 class TafTest(unittest.TestCase):
     def setUp(self):
         self.test_maf_file = (pathlib.Path().absolute() / "../tests/evolverMammals.maf").as_posix()
+        self.test_taf_file = (pathlib.Path().absolute() / "../tests/evolverMammals.taf").as_posix()
 
     def test_maf_parser(self):
         """ Manually test the first couple blocks from the maf file """
@@ -47,7 +50,7 @@ class TafTest(unittest.TestCase):
             # The second alignment block
             b = next(mp)
             self.assertEqual(b.row_number(), 9)  # Should be nine rows in block
-            self.assertEqual(b.column_number(), 1) # Is a single base long
+            self.assertEqual(b.column_number(), 1)  # Is a single base long
             for i in range(b.column_number()):
                 self.assertEqual(b.column_tags(i), {})
 
@@ -67,9 +70,60 @@ class TafTest(unittest.TestCase):
 
     def test_maf_to_taf(self):
         """ Read a maf file, write a taf file and then read it back and check
-        they are equal. Tests round trip read and write. """
+        they are equal. Tests round trip read and write. Writes in random tags to the taf to test tag writing """
+
+        def make_random_tags():  # Fn to make random tags
+            return {str(randint(0, 1000)): str(randint(0, 1000)) for i in range(randint(0, 10))}
+        column_tags = []  # List of tags per column
+
+        # First read from the maf file and write the taf file
         with open(self.test_maf_file) as f:
-            pass
+            mp = AlignmentParser(f, taf_not_maf=False)
+            maf_header_tags = mp.get_header()  # Get the maf header tags
+
+            with open(self.test_taf_file, "w") as f2:
+                tw = AlignmentWriter(f2, header_tags=maf_header_tags)
+                tw.write_header()  # Write the header
+
+                for a in mp:  # For each alignment block in input
+                    # Add random tags
+                    for i in range(a.column_number()):
+                        column_tags.append(make_random_tags())
+                        a.set_column_tags(i, column_tags[-1])
+
+                    tw.write_alignment(a)  # Write a corresponding output block
+
+        # Now read back the taf file and check it is equivalent to the maf
+        column_index = 0  # Used to track where in the list of columns we are
+        with open(self.test_taf_file) as f:
+            tp = AlignmentParser(f)
+
+            with open(self.test_maf_file) as f2:
+                mp = AlignmentParser(f2, taf_not_maf=False)
+                self.assertEqual(mp.get_header(), tp.get_header())  # Check headers are equivalent
+
+                for ma, ta in zip(mp, tp):  # For each of the two alignment blocks
+                    # Check alignment blocks have same stats
+                    self.assertEqual(ma.row_number(), ta.row_number())  # Should be nine rows in block
+                    self.assertEqual(ma.column_number(), ta.column_number())
+                    for i in range(ma.column_number()):
+                        self.assertEqual(column_tags[column_index], ta.column_tags(i))
+                        column_index += 1
+
+                    # Check the rows are equal
+                    mr, tr = ma.first_row(), ta.first_row()
+                    while mr:
+                        self.assertEqual(mr.sequence_name(), tr.sequence_name())
+                        self.assertEqual(mr.start(), tr.start())
+                        self.assertEqual(mr.length(), tr.length())
+                        self.assertEqual(mr.sequence_length(), tr.sequence_length())
+                        self.assertEqual(mr.strand(), tr.strand())
+                        self.assertEqual(mr.bases(), tr.bases())
+                        self.assertEqual(mr.left_gap_sequence(), tr.left_gap_sequence())
+                        mr = mr.next_row()
+                        tr = tr.next_row()
+                    self.assertTrue(not tr)
+
 
 if __name__ == '__main__':
     unittest.main()

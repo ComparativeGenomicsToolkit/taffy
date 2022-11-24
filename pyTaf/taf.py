@@ -1,18 +1,36 @@
 from _pyTaf_cffi import ffi, lib
 
 
+def _to_py_string(s):
+    """ Convert a cffi string into a Python string in Python3 """
+    return ffi.string(s).decode("utf-8")
+
+
+def _to_c_string(s):
+    """ Convert a Python string into a C string """
+    return bytes(s, "utf-8")
+
+
 def _c_tags_to_dictionary(c_tag):
-    # Convert tags to a Python dictionary
+    """ Convert tags to a Python dictionary """
     tags = {}
     while c_tag != ffi.NULL:
-        tags[_to_string(c_tag.key)] = _to_string(c_tag.value)
+        tags[_to_py_string(c_tag.key)] = _to_py_string(c_tag.value)
         c_tag = c_tag.n_tag
     return tags
 
 
-def _to_string(s):
-    """ Convert a cffi string into a Python string in Python3 """
-    return ffi.string(s).decode("utf-8")
+def _dictionary_to_c_tags(tags):
+    """ Convert a Python dictionary to c tags """
+    first_c_tag, p_c_tag = ffi.NULL, ffi.NULL
+    for key in tags:
+        c_tag = lib.tag_construct(_to_c_string(str(key)), _to_c_string(str(tags[key])), ffi.NULL)
+        if first_c_tag == ffi.NULL:
+            first_c_tag = c_tag
+        else:
+            p_c_tag.n_tag = c_tag
+        p_c_tag = c_tag
+    return first_c_tag
 
 
 class Alignment:
@@ -39,13 +57,18 @@ class Alignment:
         return _c_tags_to_dictionary(self._c_alignment.column_tags[column_index]) \
             if self._c_alignment.column_tags != ffi.NULL else {}
 
+    def set_column_tags(self, column_index, tags):
+        """ Set the tags for a given column index using a dictionary of tags """
+        assert 0 <= column_index < self.column_number()  # Check column index is valid
+        lib.tag_destruct(self._c_alignment.column_tags[column_index])  # Clean up the old tags
+        self._c_alignment.column_tags[column_index] = _dictionary_to_c_tags(tags)
+
     def __del__(self):
         lib.alignment_destruct(self._c_alignment, 0)  # Cleans up the underlying C alignment structure
 
 
 class Row:
     """ Represents a row of an alignment block. See taf.h """
-
     def __init__(self, c_row=None, l_row=None, r_row=None, n_row=None):
         self._c_row = c_row  # The underlying C row
         self._l_row = l_row  # The prior (left) row in the previous alignment block
@@ -54,7 +77,7 @@ class Row:
 
     def sequence_name(self):
         """ The name of the sequence for the row """
-        return _to_string(self._c_row.sequence_name)
+        return _to_py_string(self._c_row.sequence_name)
 
     def start(self):
         """ The start coordinate of the base in the row (if strand is False then will be with respect to
@@ -75,12 +98,12 @@ class Row:
 
     def bases(self):
         """ The alignment of the row, consisting of the sequence and gap characters """
-        return _to_string(self._c_row.bases)
+        return _to_py_string(self._c_row.bases)
 
     def left_gap_sequence(self):
         """ The sequence of any unaligned bases in this row between this block and the previous
         (left) alignment block """
-        return "" if self._c_row.left_gap_sequence == ffi.NULL else _to_string(self._c_row.self.left_gap_sequence)
+        return "" if self._c_row.left_gap_sequence == ffi.NULL else _to_py_string(self._c_row.self.left_gap_sequence)
 
     def next_row(self):
         """ Get the next row in the alignment block or None if last row """
@@ -101,7 +124,6 @@ class Row:
 class AlignmentParser:
     """ Taf or maf alignment parser.
     """
-
     def __init__(self, file_handle, taf_not_maf=True, use_run_length_encoding=False):
         """ Use taf_not_maf to switch between MAF or TAF parsing. Set use_run_length_encoding to determine how
         to decode taf columns. If unknown can be set after construction by interrogating the header line after
@@ -173,3 +195,38 @@ class AlignmentParser:
     def __del__(self):
         if self.taf_not_maf:
             lib.LI_destruct(self.c_file_handle)  # Cleanup the allocated line iterator
+
+
+class AlignmentWriter:
+    """ Taf or maf alignment writer.
+    """
+
+    def __init__(self, file_handle, taf_not_maf=True, header_tags=None, repeat_coordinates_every_n_columns=-1):
+        """ Use taf_not_maf to switch between MAF or TAF writing. Set use_run_length_encoding to determine how
+        to encode taf columns. """
+        self.taf_not_maf = taf_not_maf
+        self.header_tags = {} if header_tags is None else header_tags
+        self.p_py_alignment = None  # The previous alignment
+        self.c_file_handle = ffi.cast("FILE *", file_handle)  # The C file handle
+        self.repeat_coordinates_every_n_columns = repeat_coordinates_every_n_columns
+
+    def write_header(self):
+        """ Write the header line """
+        c_tag = _dictionary_to_c_tags(self.header_tags)
+        lib.taf_write_header(c_tag, self.c_file_handle) if self.taf_not_maf else \
+            lib.maf_write_header(c_tag, self.c_file_handle)
+        lib.tag_destruct(c_tag)
+
+    def write_alignment(self, alignment):
+        """ Writes the next alignment block """
+        if self.taf_not_maf:
+            lib.taf_write_block(self.p_py_alignment._c_alignment if self.p_py_alignment else ffi.NULL,
+                                alignment._c_alignment,
+                                "run_length_encode_bases" in self.header_tags and
+                                int(self.header_tags["run_length_encode_bases"]),
+                                self.repeat_coordinates_every_n_columns,
+                                self.c_file_handle)
+        else:
+            lib.maf_write_block(alignment._c_alignment,
+                                self.c_file_handle)
+        self.p_py_alignment = alignment

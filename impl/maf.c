@@ -51,6 +51,7 @@ Alignment *maf_read_block(FILE *fh) {
                 stList_destruct(tokens);
                 if(alignment->row_number == 1) {
                     alignment->column_number = strlen(row->bases);
+                    alignment->column_tags = st_calloc(alignment->column_number, sizeof(Tag *));
                 }
                 else {
                     assert(alignment->column_number == strlen(row->bases));

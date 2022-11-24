@@ -84,13 +84,12 @@ void alignment_destruct(Alignment *alignment, bool cleanup_rows) {
             Alignment_Row_destruct(r);
         }
     }
-    free(alignment);
-    if(alignment->column_tags != NULL) {
-        for(int64_t i=0; i<alignment->column_number; i++) {
-            tag_destruct(alignment->column_tags[i]);
-        }
-        free(alignment->column_tags);
+    assert(alignment->column_tags != NULL);  // Clean up column tags
+    for(int64_t i=0; i<alignment->column_number; i++) {
+        tag_destruct(alignment->column_tags[i]);
     }
+    free(alignment->column_tags);
+    free(alignment);
 }
 
 static stList *get_rows_in_a_list(Alignment_Row *row) {
