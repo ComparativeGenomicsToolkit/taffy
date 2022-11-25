@@ -124,16 +124,26 @@ class Row:
 class AlignmentParser:
     """ Taf or maf alignment parser.
     """
-    def __init__(self, file_handle, taf_not_maf=True, use_run_length_encoding=False):
-        """ Use taf_not_maf to switch between MAF or TAF parsing. Set use_run_length_encoding to determine how
+    def __init__(self, file, taf_not_maf=True, use_run_length_encoding=False, file_string_not_handle=True):
+        """ Use taf_not_maf to switch between MAF or TAF parsing.
+
+        Set use_run_length_encoding to determine how
         to decode taf columns. If unknown can be set after construction by interrogating the header line after
-        construction """
+        construction.
+
+        Use the file_string_not_handle to determine if file is a file_handle (if file_string_not_handle=False) or
+        a file name. Handing in the file name is much faster as it avoids using a Python file object. If using
+        with a file name remember to close the file, either the with keyword or with the close method.
+        """
         self.taf_not_maf = taf_not_maf
         self.use_run_length_encoding = use_run_length_encoding
         self.p_c_alignment = ffi.NULL  # The previous C alignment returned
         self.p_c_rows_to_py_rows = {}  # Hash from C rows to Python rows of the previous
         # alignment block, allowing linking of rows between blocks
-        self.c_file_handle = ffi.cast("FILE *", file_handle)  # The C file handle
+        self.c_file_handle = lib.fopen(_to_c_string(file), _to_c_string("r")) if file_string_not_handle \
+            else ffi.cast("FILE *", file)  # Either open the file or cast the python file handle to a C file handle
+        # note the Python file handle is *way* slower
+        self.file_string_not_handle = file_string_not_handle
         if taf_not_maf:  # If taf then we wrap the file handle in a C line iterator
             self.c_file_handle = lib.LI_construct(self.c_file_handle)
 
@@ -192,22 +202,42 @@ class AlignmentParser:
     def __iter__(self):
         return self  # Making this an iterable
 
-    def __del__(self):
-        if self.taf_not_maf:
-            lib.LI_destruct(self.c_file_handle)  # Cleanup the allocated line iterator
+    def close(self):
+        """ Close any associated underlying file """
+        if self.taf_not_maf:  # If taf, cleanup the allocated line iterator
+            i = self.c_file_handle
+            self.c_file_handle = self.c_file_handle.fh
+            lib.LI_destruct(i)
+        if self.file_string_not_handle:  # Close the underlying file handle
+            lib.fclose(self.c_file_handle)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, exc_traceback):
+        self.close()
 
 
 class AlignmentWriter:
     """ Taf or maf alignment writer.
     """
 
-    def __init__(self, file_handle, taf_not_maf=True, header_tags=None, repeat_coordinates_every_n_columns=-1):
+    def __init__(self, file, taf_not_maf=True, header_tags=None,
+                 repeat_coordinates_every_n_columns=-1,
+                 file_string_not_handle=True):
         """ Use taf_not_maf to switch between MAF or TAF writing. Set use_run_length_encoding to determine how
-        to encode taf columns. """
+        to encode taf columns.
+
+        Use the file_string_not_handle to determine if file is a file_handle (if file_string_not_handle=False) or
+        a file name. Handing in the file name is much faster as it avoids using a Python file object. If using
+        with a file name remember to close the file, either the with keyword or with the close method. """
         self.taf_not_maf = taf_not_maf
         self.header_tags = {} if header_tags is None else header_tags
         self.p_py_alignment = None  # The previous alignment
-        self.c_file_handle = ffi.cast("FILE *", file_handle)  # The C file handle
+        self.c_file_handle = lib.fopen(_to_c_string(file), _to_c_string("w")) if file_string_not_handle \
+            else ffi.cast("FILE *", file)  # Either open the file or cast the python file handle to a C file handle
+        # note the Python file handle is *way* slower
+        self.file_string_not_handle = file_string_not_handle
         self.repeat_coordinates_every_n_columns = repeat_coordinates_every_n_columns
 
     def write_header(self):
@@ -230,3 +260,14 @@ class AlignmentWriter:
             lib.maf_write_block(alignment._c_alignment,
                                 self.c_file_handle)
         self.p_py_alignment = alignment
+
+    def close(self):
+        """ Close any associated file """
+        if self.file_string_not_handle:  # Close the underlying file handle
+            lib.fclose(self.c_file_handle)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, exc_traceback):
+        self.close()

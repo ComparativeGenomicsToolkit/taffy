@@ -11,9 +11,7 @@ class TafTest(unittest.TestCase):
 
     def test_maf_parser(self):
         """ Manually test the first couple blocks from the maf file """
-        with open(self.test_maf_file) as f:
-            mp = AlignmentParser(f, taf_not_maf=False)
-
+        with AlignmentParser(self.test_maf_file, taf_not_maf=False) as mp:
             # Check the header is as expected
             header = mp.get_header()
             self.assertEqual(header, {"version": "1", "scoring": "N/A"})
@@ -71,18 +69,15 @@ class TafTest(unittest.TestCase):
     def test_maf_to_taf(self):
         """ Read a maf file, write a taf file and then read it back and check
         they are equal. Tests round trip read and write. Writes in random tags to the taf to test tag writing """
-
         def make_random_tags():  # Fn to make random tags
-            return {str(randint(0, 1000)): str(randint(0, 1000)) for i in range(randint(0, 10))}
+            return {str(randint(0, 1000)): str(randint(0, 1000)) for i in range(randint(0, 5))}
         column_tags = []  # List of tags per column
 
         # First read from the maf file and write the taf file
-        with open(self.test_maf_file) as f:
-            mp = AlignmentParser(f, taf_not_maf=False)
+        with AlignmentParser(self.test_maf_file, taf_not_maf=False) as mp:
             maf_header_tags = mp.get_header()  # Get the maf header tags
 
-            with open(self.test_taf_file, "w") as f2:
-                tw = AlignmentWriter(f2, header_tags=maf_header_tags)
+            with AlignmentWriter(self.test_taf_file, header_tags=maf_header_tags) as tw:
                 tw.write_header()  # Write the header
 
                 for a in mp:  # For each alignment block in input
@@ -95,11 +90,9 @@ class TafTest(unittest.TestCase):
 
         # Now read back the taf file and check it is equivalent to the maf
         column_index = 0  # Used to track where in the list of columns we are
-        with open(self.test_taf_file) as f:
-            tp = AlignmentParser(f)
+        with AlignmentParser(self.test_taf_file) as tp:
 
-            with open(self.test_maf_file) as f2:
-                mp = AlignmentParser(f2, taf_not_maf=False)
+            with AlignmentParser(self.test_maf_file, taf_not_maf=False) as mp:
                 self.assertEqual(mp.get_header(), tp.get_header())  # Check headers are equivalent
 
                 for ma, ta in zip(mp, tp):  # For each of the two alignment blocks

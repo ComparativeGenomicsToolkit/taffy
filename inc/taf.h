@@ -11,6 +11,8 @@
  * Structures to represent blocks of an alignment
  */
 
+FILE *maf_open_file(char *file_name);
+
 typedef struct _tag Tag;
 
 struct _tag {

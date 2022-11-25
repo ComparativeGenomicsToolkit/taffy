@@ -5,6 +5,10 @@ ffibuilder = FFI()
 # cdef() expects a single string declaring the C types, functions and
 # globals needed to use the shared object. It must be in valid C syntax.
 ffibuilder.cdef("""
+    FILE *fopen(const char *filename, const char *mode);
+    
+    int fclose(FILE *stream);
+
     typedef struct _LI {
         FILE *fh;
         char *line;
@@ -168,6 +172,8 @@ ffibuilder.cdef("""
 # so it is often just the "#include".
 ffibuilder.set_source("_pyTaf_cffi",
                       """
+                           #include <stdio.h>
+                           #include <stdlib.h>
                            #include "../inc/taf.h" // the C header of the library
                            #include "../inc/line_iterator.h" 
                       """,
