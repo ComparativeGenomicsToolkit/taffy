@@ -87,7 +87,7 @@ static Alignment *parse_coordinates_and_establish_block(Alignment *p_block, stLi
             r->l_row->r_row = NULL;
             // Now delete the row
             r->n_row = NULL;
-            Alignment_Row_destruct(r);
+            alignment_row_destruct(r);
         } else if(op_type[0] == 'g') { // Is making a gap without the sequence specified
             int64_t gap_length = atol(stList_get(tokens, j++)); // Get the index of the affected row
             (*row)->start += gap_length;

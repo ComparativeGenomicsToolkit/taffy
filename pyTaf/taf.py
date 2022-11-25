@@ -118,7 +118,7 @@ class Row:
         return self._r_row
 
     def __del__(self):
-        lib.Alignment_Row_destruct(self._c_row)  # Cleans up the underlying C alignment structure
+        lib.alignment_row_destruct(self._c_row)  # Cleans up the underlying C alignment structure
 
 
 class AlignmentParser:

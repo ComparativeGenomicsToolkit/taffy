@@ -11,8 +11,6 @@
  * Structures to represent blocks of an alignment
  */
 
-FILE *maf_open_file(char *file_name);
-
 typedef struct _tag Tag;
 
 struct _tag {
@@ -45,44 +43,6 @@ struct _row { // Each row encodes the information about an aligned sequence
 };
 
 /*
- * Clean up the memory for an alignment
- */
-void alignment_destruct(Alignment *alignment, bool cleanup_rows);
-
-/*
- * Cleanup a row
- */
-void Alignment_Row_destruct(Alignment_Row *row);
-
-/*
- * Returns non-zero if left_row represents a substring on the same contig and strand as right_row, but
- * immediately before
- */
-bool alignment_row_is_predecessor(Alignment_Row *left_row, Alignment_Row *right_row);
-
-/*
- * Use the O(ND) alignment to diff the rows between two alignments and connect together their rows
- * so that we can determine which rows in the right_alignment are a continuation of rows in the
- * left_alignment. We use this for efficiently outputting TAF.
- */
-void alignment_link_adjacent(Alignment *left_alignment, Alignment *right_alignment, bool allow_row_substitutions);
-
-/*
- * Gets the number of columns in the alignment
- */
-int64_t alignment_length(Alignment *alignment);
-
-/*
- * Gets the max length of an interstitial gap sequence between this block and the next one.
- */
-int64_t alignment_total_gap_length(Alignment *left_alignment);
-
-/*
- * Number of shared rows between two alignments
- */
-int64_t alignment_number_of_common_rows(Alignment *left_alignment, Alignment *right_alignment);
-
-/*
  * Make a tag
  */
 Tag *tag_construct(char *key, char *value, Tag *n_tag);
@@ -110,12 +70,50 @@ Tag *tag_remove(Tag *first_tag, char *key);
 Tag *tag_parse(char *tag_string, char *delimiter, Tag *p_tag);
 
 /*
+ * Clean up the memory for an alignment
+ */
+void alignment_destruct(Alignment *alignment, bool cleanup_rows);
+
+/*
+ * Use the O(ND) alignment to diff the rows between two alignments and connect together their rows
+ * so that we can determine which rows in the right_alignment are a continuation of rows in the
+ * left_alignment. We use this for efficiently outputting TAF.
+ */
+void alignment_link_adjacent(Alignment *left_alignment, Alignment *right_alignment, bool allow_row_substitutions);
+
+/*
+ * Gets the number of columns in the alignment
+ */
+int64_t alignment_length(Alignment *alignment);
+
+/*
+ * Gets the max length of an interstitial gap sequence between this block and the next one.
+ */
+int64_t alignment_total_gap_length(Alignment *left_alignment);
+
+/*
+ * Number of shared rows between two alignments
+ */
+int64_t alignment_number_of_common_rows(Alignment *left_alignment, Alignment *right_alignment);
+
+/*
  * Merge together adjacent blocks into one alignment. Requires that the alignment
  * rows are linked together (e.g. with alignment_link_adjacent). Destroys the input
  * alignments in the process and returns a merged alignment. If there are interstitial
  * sequences between the blocks, aligns these sequences together.
  */
 Alignment *alignment_merge_adjacent(Alignment *left_alignment, Alignment *right_alignment);
+
+/*
+ * Cleanup a row
+ */
+void alignment_row_destruct(Alignment_Row *row);
+
+/*
+ * Returns non-zero if left_row represents a substring on the same contig and strand as right_row, but
+ * immediately before
+ */
+bool alignment_row_is_predecessor(Alignment_Row *left_row, Alignment_Row *right_row);
 
 /*
  * Read a maf header line

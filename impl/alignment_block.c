@@ -62,7 +62,7 @@ Tag *tag_parse(char *tag_string, char *delimiter, Tag *p_tag) {
     return tag;
 }
 
-void Alignment_Row_destruct(Alignment_Row *row) {
+void alignment_row_destruct(Alignment_Row *row) {
     if(row->bases != NULL) {
         free(row->bases);
     }
@@ -81,7 +81,7 @@ void alignment_destruct(Alignment *alignment, bool cleanup_rows) {
         while (row != NULL) {
             Alignment_Row *r = row;
             row = row->n_row;
-            Alignment_Row_destruct(r);
+            alignment_row_destruct(r);
         }
     }
     assert(alignment->column_tags != NULL);  // Clean up column tags

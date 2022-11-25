@@ -4,10 +4,6 @@
 #include "taf.h"
 #include "sonLib.h"
 
-FILE *maf_open_file(char *file_name) {
-    return fopen(file_name, "r");
-}
-
 Alignment *maf_read_block(FILE *fh) {
     while(1) {
         char *line = stFile_getLineFromFile(fh);
