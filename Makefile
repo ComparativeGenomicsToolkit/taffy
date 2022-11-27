@@ -1,8 +1,8 @@
 rootPath = .
 include ${rootPath}/include.mk
 
-libSources = impl/*.c
-libHeaders = inc/*.h
+libSources = taffy/impl/*.c
+libHeaders = taffy/inc/*.h
 libTests = tests/*.c
 
 stTafDependencies =  ${LIBDEPENDS}
@@ -14,14 +14,14 @@ all_progs: all_libs ${BINDIR}/stTafTests ${BINDIR}/maf_to_taf ${BINDIR}/taf_to_m
 
 dependencies:
 	mkdir -p ${LIBDIR} ${BINDIR}
-	cd submodules/sonLib && PKG_CONFIG_PATH=${CWD}/lib/pkgconfig:${PKG_CONFIG_PATH} ${MAKE}
+	cd taffy/submodules/sonLib && PKG_CONFIG_PATH=${CWD}/lib/pkgconfig:${PKG_CONFIG_PATH} ${MAKE}
 	mkdir -p ${BINDIR} ${LIBDIR} ${INCLDIR}
-	rm -rf submodules/sonLib/bin/*.dSYM
-	ln -f submodules/sonLib/bin/[a-zA-Z]* ${BINDIR}
-	ln -f submodules/sonLib/lib/*.a ${LIBDIR}
-	ln -f submodules/sonLib/lib/sonLib.a ${LIBDIR}/libsonLib.a
+	rm -rf taffy/submodules/sonLib/bin/*.dSYM
+	ln -f taffy/submodules/sonLib/bin/[a-zA-Z]* ${BINDIR}
+	ln -f taffy/submodules/sonLib/lib/*.a ${LIBDIR}
+	ln -f taffy/submodules/sonLib/lib/sonLib.a ${LIBDIR}/libsonLib.a
 
-${LIBDIR}/libstTaf.a : ${libSources} ${libHeaders}  ${stTafDependencies}
+${LIBDIR}/libstTaf.a : ${libSources} ${libHeaders} ${stTafDependencies}
 	${CC} ${CFLAGS} ${LDFLAGS} -c ${libSources}
 	${AR} rc libstTaf.a *.o
 	mv libstTaf.a ${LIBDIR}/
@@ -45,7 +45,7 @@ test : all
 	${BINDIR}/stTafTests
 
 clean :
-	cd submodules/sonLib && ${MAKE} clean
+	cd taffy/submodules/sonLib && ${MAKE} clean
 	rm -rf *.o ${LIBDIR} ${BINDIR}
 
 static :

@@ -1,5 +1,4 @@
 from cffi import FFI
-import pathlib
 ffibuilder = FFI()
 
 # cdef() expects a single string declaring the C types, functions and
@@ -170,15 +169,35 @@ ffibuilder.cdef("""
 # produce, and some C source code as a string.  This C code needs
 # to make the declarated functions, types and globals available,
 # so it is often just the "#include".
-ffibuilder.set_source("_pyTaf_cffi",
+ffibuilder.set_source("taffy._taffy_cffi",
                       """
                            #include <stdio.h>
                            #include <stdlib.h>
-                           #include "../inc/taf.h" // the C header of the library
-                           #include "../inc/line_iterator.h" 
+                           #include "taf.h" // the C header of the library
+                           #include "line_iterator.h" 
                       """,
-                      libraries=["sonLib", "stTaf"],   # library name, for the linker
-                      library_dirs=[(pathlib.Path().absolute() / "../lib").as_posix()])
+                      include_dirs=["taffy/subModules/sonLib/externalTools/cutest",
+                                    "taffy/subModules/sonLib/C/inc",
+                                    "taffy/inc"],
+                      sources=["taffy/subModules/sonLib/C/impl/stSafeC.c",
+                               "taffy/subModules/sonLib/C/impl/sonLibCommon.c",
+                               "taffy/subModules/sonLib/C/impl/sonLibRandom.c",
+                               "taffy/subModules/sonLib/C/impl/sonLibExcept.c",
+                               "taffy/subModules/sonLib/C/impl/sonLibString.c",
+                               "taffy/subModules/sonLib/C/impl/hashTableC_itr.c",
+                               "taffy/subModules/sonLib/C/impl/hashTableC.c",
+                               "taffy/subModules/sonLib/C/impl/sonLibHash.c",
+                               "taffy/subModules/sonLib/C/impl/avl.c",
+                               "taffy/subModules/sonLib/C/impl/sonLibSortedSet.c",
+                               "taffy/subModules/sonLib/C/impl/sonLibSet.c",
+                               "taffy/subModules/sonLib/C/impl/sonLibList.c",
+                               "taffy/subModules/sonLib/C/impl/sonLibFile.c",
+                               "taffy/impl/line_iterator.c",
+                               "taffy/impl/alignment_block.c",
+                               "taffy/impl/maf.c",
+                               "taffy/impl/ond.c",
+                               "taffy/impl/taf.c"],
+                      )
 
 if __name__ == "__main__":
     ffibuilder.compile(verbose=True)

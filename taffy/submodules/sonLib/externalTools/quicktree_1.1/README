@@ -1,0 +1,45 @@
+
+About QuickTree
+===============
+
+QuickTree is an efficient implementation of the Neighbor-Joining
+algorithm, capable of reconstructing phylogenies from huge alignments in
+time less than the age of the universe.
+
+QuickTree 1.1
+=============
+
+Version 1.1 contains some speed-ups and small bug-fixes from version 1.0.
+
+
+Installing QuickTree
+====================
+
+QuickTree isi written in ANSI C and should complile and run on a number
+of different platforms. "make quicktree" from this directory should
+compile the program and place the executable in ./bin.
+
+
+Using QuickTree
+===============
+
+quicktree -h gives a list of options.
+
+QuickTree accepts both distance matrix and multiple-sequence-aligment
+inputs. The former should be in PHYLIP format. The latter should be in
+Stockholm format, which is the native alignment format for the Pfam
+database. Alignments in various formats can be converted to Stockholm
+format with the sreformat program, which is part of the HMMer package by
+Sean Eddy (hmmer.wustl.edu).
+
+The tress are written to stdout, in the Newick/Hew Hampshire format
+use by PHYLIP and many other programs.
+
+
+Contact
+=======
+
+Any problems, please contact klh@sanger.ac.uk
+
+Kevin Howe, 2002
+

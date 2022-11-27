@@ -1,0 +1,92 @@
+This is the readme for 'sonLib', a (very) compact C/Python library for sequence analysis in bioinformatics.
+
+For basic data-structures it simply contains: 
+
+array lists (automatically resizing) 
+hash
+sorted sets (backed by an AVL tree, currently)
+containers (for putting primitives into the above datastructures)
+better string functions
+
+For bioinformatic data-structures it contains for (or will contain):
+
+Fasta I/O functions
+MAF I/O functions
+Newick tree I/O functions
+
+C:
+
+Usage:
+
+The header files are in src/sonLib/inc/*.h The global include "sonLib.h", will
+include all the public functions in sonLib.
+
+Naming conventions:
+
+All functions/objects start with the prefix 'st', this minimises the chances of collisions with
+functions in other libraries.
+
+We use a specific variant for camel case for compound words, i.e. the first letter of every word is capitalised,
+except for the first letter of the first word, which is lower case unless it is the name
+of an object.
+
+Acronyms are treated like single words, i.e. we do not capitalise each letter after the first one, e.g. Maf not MAF
+
+The 'abbreviations' file is a list of agreed on abbreviations. Words should not be abbreviated unless there agreed on
+abbreviation is in this file. Most abbreviations should be three letters long.
+
+All object names are of the form stObject, where Object is the capitalised name of the object, e.g.
+stHash, stSortedSet, stList etc.
+
+Most function names are of the form 'stObject_operation', where Object is the 
+capitalised name of the object and operation is a camel-case string describing the functions operation
+on the object. Some basic functions, e.g. st_malloc, do not have an associated object and so are just
+st_operation. We encourage operation strings to be simply verbs, or when the function is acting on an attribute of the object, 'verb noun'. 
+In some cases where there is no ambiguity about the action associated with
+the noun we do not mind dropping the verb, e.g. stObject_length as opposed to stObject_getLength. 
+The following are function name examples from the library: stHash_insert, stHash_getKeys, 
+stSortedSet_size, stSortedSet_getFirst, stString_print, stString_copy.
+
+Documentation:
+
+Each function should have a comment immediately above its declaration explaining its function, e.g.
+
+/*
+ * Set the log level. Either ST_LOGGING_OFF, ST_LOGGING_INFO or ST_LOGGING_DEBUG.
+ * OFF (no logging), info (middle level), debug (copious logging)
+ */
+void st_setLogLevel(int32_t level);
+
+The declaration for most functions is in the header file, so document the header file not the actual
+implementation of the function. This allows the user to see the documentation and ignore the actual code! 
+Do not duplicate this effort by the actual function implementation if seperate from the declaration, 
+this is extra manual work, and can lead to errors. 
+
+Functions not declared in header files should be static to the src file, and should be documented in the src file.
+
+I encourage you to use javadoc style documentation for functions, but this is not yet a requirment.
+
+Testing:
+
+We use CuTest for unit-testing. 
+All functions declared in a header file to be used by others should have 
+an associated unit test. These tests are not lambda calculus, we're not proving the functions correctness,
+but the tests should address the obvious cases. 
+
+For an example of the tests see sonLibHashTest.c, to see how these functions are integrated into 
+the CuTests framework see allTests.c. Larger module level tests, or of actual programs should us the pyUnit
+framework, and wrap the code. You can see this in modules using sonLib.
+
+
+Build:
+
+We use c99 standard. ....
+
+
+Python:
+
+Module is all of the form sonLib/FOO.py
+
+Redis:
+  you need both redis server and hiredis:
+      https://github.com/redis/hiredis

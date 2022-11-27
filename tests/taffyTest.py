@@ -1,7 +1,7 @@
 import unittest
 import pathlib
 from random import randint
-from taf import AlignmentParser, AlignmentWriter
+from taffy.lib import AlignmentParser, AlignmentWriter
 
 
 class TafTest(unittest.TestCase):

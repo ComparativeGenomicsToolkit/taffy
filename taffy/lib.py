@@ -1,4 +1,4 @@
-from _pyTaf_cffi import ffi, lib
+from taffy._taffy_cffi import ffi, lib
 
 
 def _to_py_string(s):
