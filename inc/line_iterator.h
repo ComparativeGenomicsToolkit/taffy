@@ -1,14 +1,18 @@
 #ifndef STLINE_ITERATOR_H_
 #define STLINE_ITERATOR_H_
 
-#include "sonLib.h"
+#include <stdio.h>
+typedef struct BGZF BGZF;
 
 /*
  * Simple wrapper around a FILE handle that allows you to iterator over lines from a text file
  * and "peek" at lines before choosing to get them.
  */
 
-typedef struct _LI LI;
+typedef struct _LI {
+    BGZF *bgzf;
+    char *line;
+} LI;
 
 LI *LI_construct(FILE *fh);
 

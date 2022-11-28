@@ -67,8 +67,15 @@ dataSetsPath=/Users/benedictpaten/Dropbox/Documents/work/myPapers/genomeCactusPa
 
 inclDirs = inc submodules/sonLib/C/inc submodules/sonLib/externalTools/cutest
 
-CFLAGS += ${inclDirs:%=-I${rootPath}/%} -I${LIBDIR} -I${rootPath}/include
-CXXFLAGS += ${inclDirs:%=-I${rootPath}/%} -I${LIBDIR} -I${rootPath}/include
+# we build against htslib for bgzip support, relying on a system installation
+# rather than adding as another submodule
+HTSLIB_CFLAGS = $(shell pkg-config htslib --cflags)
+HTSLIB_LIBS = $(shell pkg-config htslib --libs --static)
+
+CFLAGS += ${inclDirs:%=-I${rootPath}/%} -I${LIBDIR} -I${rootPath}/include  ${HTSLIB_CFLAGS}
+CXXFLAGS += ${inclDirs:%=-I${rootPath}/%} -I${LIBDIR} -I${rootPath}/include ${HTSLIB_CFLAGS}
+
+LDLIBS += ${HTSLIB_LIBS}
 
 # libraries can't be added until they are build, so add as to LDLIBS until needed
 sonLibLibs = ${sonLibDir}/sonLib.a ${sonLibDir}/cuTest.a
