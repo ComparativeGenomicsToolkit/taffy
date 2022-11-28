@@ -1,6 +1,11 @@
+# Taffy
+
+This is a C, Python and CLI library for manipulating/reading/writing TAF (described below) and [MAF](https://genome.ucsc.edu/FAQ/FAQformat.html#format5) format multiple
+sequence alignments. It allows conversion between the formats.
+
 # The TAF File Format
 
-This is a specification for a "transposed alignment format", or maybe "terrific alignment format" (.taf). The idea
+This is the specification for "transposed alignment format", or maybe "terrific alignment format" (.taf). The idea
 is to describe a multiple sequence alignment as a series of columns, one per line, with bases in the
 columns optionally run-length encoded, and row coordinates given as needed after the bases in each column.
 Where coordinates are not given it is assumed the coordinates continue from the previous column.
@@ -151,7 +156,7 @@ The corresponding TAF file (265 bytes):
     CCCCC
     AGGGG
 
-# Installing Taf
+# Installing Taffy CLI/C Library
 
 Do build this repo clone the repo as follows and then make:
 
@@ -165,7 +170,7 @@ To test the installation do:
 This will run the unitests. You should see that all tests pass okay. You will 
 then want to add the taf/bin directory to your path. 
 
-# Taf Utilities
+# Taffy Utilities
 
 This repo contains various tools for working with taf files and converting to and 
 from maf. For example, to convert a maf file to a taf use:
@@ -193,10 +198,53 @@ The maf_to_taf converts MAF_FILE into taf, taf_add_gap_bases adds in missing
 unaligned sequences between maf blocks and taf_norm then merges together the blocks. The 
 -k option causes the output to be in maf format.
 
-# C Library
+# Using C Library
 
 There is also a simple C library for working with taf/maf files. See taf.h in the
 inc directory.
+
+# Installing Python Library
+
+Tl;dr: 
+
+```
+pip install taffy
+```
+
+Longer version: to avoid problems with conflicting versions of dependencies on your system, we strongly recommend installing
+the package inside a Python 3 [virtual environment](https://virtualenv.pypa.io/en/stable/). 
+To install the `virtualenv` command, if you don't have it already, run:
+
+```
+python3 -m pip install virtualenv
+```
+
+To set up a virtual environment in the directory `taffy_env`, run:
+
+```
+python3 -m virtualenv -p python3.9 taffy_env
+```
+
+Then, to enter the virtualenv, run:
+
+```
+source taffy_env/bin/activate
+```
+
+You can always exit out of the virtualenv by running `deactivate`.
+Finally, install taffy with pip:
+
+To install these notebooks in Python, clone the repo:
+```
+pip install taffy
+```
+
+To check that it worked try launching a python interpretor and importing
+taffy.lib.
+
+# Using Python Library
+
+See: [TODO]
 
 # Comparison Stats
 
