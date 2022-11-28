@@ -6,6 +6,7 @@
 LI *LI_construct(FILE *fh) {
     LI *li = st_calloc(1, sizeof(LI));
     li->bgzf = bgzf_dopen(fileno(fh), "r");
+    assert(li->bgzf != NULL);
     kstring_t ks = KS_INITIALIZE;
     bgzf_getline(li->bgzf, '\n', &ks);
     li->line = ks_release(&ks);

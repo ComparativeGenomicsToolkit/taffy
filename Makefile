@@ -10,7 +10,7 @@ stTafDependencies =  ${LIBDEPENDS}
 all: all_libs all_progs
 all_libs: dependencies ${LIBDIR}/stTaf.a
 
-all_progs: all_libs ${BINDIR}/stTafTests ${BINDIR}/maf_to_taf ${BINDIR}/taf_to_maf ${BINDIR}/taf_norm ${BINDIR}/taf_add_gap_bases
+all_progs: all_libs ${BINDIR}/stTafTests ${BINDIR}/maf_to_taf ${BINDIR}/taf_to_maf ${BINDIR}/taf_norm ${BINDIR}/taf_add_gap_bases ${BINDIR}/taf_index
 
 dependencies:
 	mkdir -p ${LIBDIR} ${BINDIR}
@@ -39,6 +39,9 @@ ${BINDIR}/taf_norm : taf_norm.c ${LIBDIR}/stTaf.a ${stTafDependencies}
 
 ${BINDIR}/taf_add_gap_bases : taf_add_gap_bases.cpp ${LIBDIR}/stTaf.a ${stTafDependencies}
 	${CXX} ${CPPFLAGS} ${CXXFLAGS} -o ${BINDIR}/taf_add_gap_bases taf_add_gap_bases.cpp ${LIBDIR}/stTaf.a ${LDLIBS}
+
+${BINDIR}/taf_index : taf_index_main.c ${LIBDIR}/stTaf.a ${stTafDependencies}
+	${CC} ${CFLAGS} ${CFLAGS} -o ${BINDIR}/taf_index taf_index_main.c ${LIBDIR}/stTaf.a ${LDLIBS}
 
 test : all
 	${BINDIR}/stTafTests
