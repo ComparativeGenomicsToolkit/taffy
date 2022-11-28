@@ -1,7 +1,9 @@
 # Taffy
 
-This is a C, Python and CLI library for manipulating/reading/writing TAF (described below) and [MAF](https://genome.ucsc.edu/FAQ/FAQformat.html#format5) format multiple
-sequence alignments. It allows conversion between the formats.
+This is a C, Python and CLI library for manipulating/reading/writing TAF (described below) and 
+[MAF](https://genome.ucsc.edu/FAQ/FAQformat.html#format5) format multiple
+sequence alignments. It allows conversion between the formats. The Python library is built
+on top of the C library and is therefore quite fast.
 
 # The TAF File Format
 
@@ -241,6 +243,35 @@ pip install taffy
 
 To check that it worked try launching a python interpretor and importing
 taffy.lib.
+
+# Installing Python Library From Source
+
+If you are building the C library from source you can also build the Python library as follows:
+
+```
+git clone https://github.com/benedictpaten/taf.git --recursive
+cd taf && make test
+```
+
+This will build and the test the C installation. Then create a virtualenv
+if you haven't already:
+
+```
+python3 -m pip install virtualenv
+source taffy_env/bin/activate
+```
+
+You can then build from source and test the distribution by running:
+
+```
+python3 -m pip install build
+python3 -m build
+python3 -m install .
+cd tests && python3 taffyTest.py
+```
+
+All these commands should succeed. Note, because of the current package structure
+trying to import the library from the root directory will fail.
 
 # Using Python Library
 
