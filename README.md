@@ -258,6 +258,7 @@ if you haven't already:
 
 ```
 python3 -m pip install virtualenv
+python3 -m virtualenv -p python3.9 taffy_env
 source taffy_env/bin/activate
 ```
 
