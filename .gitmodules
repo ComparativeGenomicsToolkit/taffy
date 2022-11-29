@@ -1,1 +1,4 @@
 
+[submodule "taffy/submodules/sonLib"]
+	path = taffy/submodules/sonLib
+	url = https://github.com/ComparativeGenomicsToolkit/sonLib

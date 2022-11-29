@@ -267,7 +267,7 @@ You can then build from source and test the distribution by running:
 ```
 python3 -m pip install build
 python3 -m build
-python3 -m install .
+pip install .
 cd tests && python3 taffyTest.py
 ```
 

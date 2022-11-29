@@ -6,5 +6,6 @@ setup(
     packages=["taffy", "taffy.inc", "taffy.impl", "taffy.subModules.sonLib.C.inc",
               "taffy.subModules.sonLib.C.impl", "taffy.subModules.sonLib.externalTools.cutest"],
     include_package_data=True,
+    package_data={"": ["*.c", "*.h"]},
     cffi_modules=["taffy/_taffy_build.py:ffibuilder"],
 )
