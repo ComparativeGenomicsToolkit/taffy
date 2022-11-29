@@ -1,7 +1,0 @@
-bin/sonLibTests
-lib/*
-bin/
-lib/
-*.pyc
-*.o
-*.a

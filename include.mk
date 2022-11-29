@@ -19,7 +19,7 @@ endif
 #Location of sonLib
 BINDIR = ${rootPath}/bin
 LIBDIR = ${rootPath}/lib
-INCLDIR = ${rootPath}/taffy/include
+INCLDIR = ${rootPath}/include
 
 #Modify this variable to set the location of sonLib
 sonLibRootDir ?= ${rootPath}/taffy/submodules/sonLib
