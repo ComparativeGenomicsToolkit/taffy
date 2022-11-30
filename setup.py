@@ -4,7 +4,7 @@ from setuptools import setup
 setup(
     name="taffy",
     packages=["taffy", "taffy.inc", "taffy.impl", "taffy.submodules.sonLib.C.inc",
-              "taffy.subModules.sonLib.C.impl", "taffy.submodules.sonLib.externalTools.cutest"],
+              "taffy.submodules.sonLib.C.impl", "taffy.submodules.sonLib.externalTools.cutest"],
     include_package_data=True,
     package_data={ "taffy.inc": ["*.h"],
                    "taffy.impl": ["*.c"],
