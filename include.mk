@@ -22,7 +22,7 @@ LIBDIR = ${rootPath}/lib
 INCLDIR = ${rootPath}/include
 
 #Modify this variable to set the location of sonLib
-sonLibRootDir ?= ${rootPath}/submodules/sonLib
+sonLibRootDir ?= ${rootPath}/taffy/submodules/sonLib
 sonLibDir=${sonLibRootDir}/lib
 
 include ${sonLibRootDir}/include.mk
@@ -65,7 +65,7 @@ CFLAGS+= -D__AVX2__ -DUSE_SIMDE -DSIMDE_ENABLE_NATIVE_ALIASES
 
 dataSetsPath=/Users/benedictpaten/Dropbox/Documents/work/myPapers/genomeCactusPaper/dataSets
 
-inclDirs = inc submodules/sonLib/C/inc submodules/sonLib/externalTools/cutest
+inclDirs = taffy/inc taffy/submodules/sonLib/C/inc taffy/submodules/sonLib/externalTools/cutest
 
 CFLAGS += ${inclDirs:%=-I${rootPath}/%} -I${LIBDIR} -I${rootPath}/include
 CXXFLAGS += ${inclDirs:%=-I${rootPath}/%} -I${LIBDIR} -I${rootPath}/include

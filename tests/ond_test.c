@@ -1,5 +1,6 @@
 #include "CuTest.h"
 #include "ond.h"
+#include "sonLib.h"
 
 //// Here is a an implementation of NeedlemanWunsch to compare the the O(ND) algorithm
 typedef struct _NeedlemanWunsch {
