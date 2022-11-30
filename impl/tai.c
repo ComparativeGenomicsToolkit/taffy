@@ -351,6 +351,7 @@ static unsigned int clip_alignment(Alignment *aln, Alignment *p_aln, int64_t sta
             char *bases = row->bases;
             row->bases = row->length > 0 ? stString_getSubString(bases, cut_point, strlen(row->bases) - cut_point) : "";
             free(bases);
+            assert(strlen(row->bases) >= row->length);            
             fprintf(stderr, "after left trim we have %s start %" PRIi64 " len %" PRIi64 " bases %s\n", row->sequence_name, row->start, row->length, row->bases);
 
         }
@@ -386,8 +387,9 @@ static unsigned int clip_alignment(Alignment *aln, Alignment *p_aln, int64_t sta
                 }
             }
             char *bases = row->bases;
-            row->bases = row->length > 0 ? stString_getSubString(bases, 0, cut_point) : "";
+            row->bases = row->length > 0 ? stString_getSubString(bases, 0, cut_point + 1) : "";
             free(bases);
+            assert(strlen(row->bases) >= row->length);
             fprintf(stderr, "after right trim we have %s start %" PRIi64 " len %" PRIi64 " bases %s\n", row->sequence_name, row->start, row->length, row->bases);
         }
         aln->column_number -= right_trim;                
@@ -427,7 +429,6 @@ Alignment *tai_next(TaiIt *tai_it, LI *li) {
     // start by clamping the alignment block to the region
     assert(strcmp(tai_it->alignment->row->sequence_name, tai_it->name) == 0);
     unsigned int ret = clip_alignment(tai_it->alignment, tai_it->p_alignment, tai_it->start, tai_it->end);
-    
 
     // save this alignment, it's what we're gonna return
     tai_it->p_alignment = tai_it->alignment;
