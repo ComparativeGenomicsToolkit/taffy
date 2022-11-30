@@ -31,3 +31,6 @@ char *LI_peek_at_next_line(LI *li) {
     return li->line;
 }
 
+int64_t LI_seek(LI *li, int64_t position) {
+    return bgzf_useek(li->bgzf, position, SEEK_SET);
+}

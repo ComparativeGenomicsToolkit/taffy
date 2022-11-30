@@ -10,10 +10,10 @@
 #include <time.h>
 
 void usage() {
-    fprintf(stderr, "taf_index [options]\n");
-    fprintf(stderr, "Index a TAF file, output goes in <file>.tai\n");
-    fprintf(stderr, "-i --inputFile : Input taf file to invert [REQUIRED]\n");
-    fprintf(stderr, "-b --blockSize : Write an index line for intervals of this many bp [default:1000000]\n");
+    fprintf(stderr, "taf_find [options]\n");
+    fprintf(stderr, "Query a TAF file, output is TAF\n");
+    fprintf(stderr, "-i --inputFile : Input taf file to invert. Must be indexed with taf index [REQUIRED]\n");
+    fprintf(stderr, "-r --region  : Region to query in CONTIG:START-END format (coordinates are 1-based half-open like samtools)\n");
     fprintf(stderr, "-l --logLevel : Set the log level\n");
     fprintf(stderr, "-h --help : Print this help message\n");
 }
@@ -26,7 +26,7 @@ int main(int argc, char *argv[]) {
      */
     char *logLevelString = NULL;
     char *taf_fn = NULL;
-    int64_t block_size = 1000000;
+    char *region = NULL;
 
     ///////////////////////////////////////////////////////////////////////////
     // Parse the inputs
@@ -35,12 +35,12 @@ int main(int argc, char *argv[]) {
     while (1) {
         static struct option long_options[] = { { "logLevel", required_argument, 0, 'l' },
                                                 { "inputFile", required_argument, 0, 'i' },
-                                                { "blockSize", required_argument, 0, 'b' },
+                                                { "region", required_argument, 0, 'r' },
                                                 { "help", no_argument, 0, 'h' },
                                                 { 0, 0, 0, 0 } };
 
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:b:h", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:r:h", long_options, &option_index);
         if (key == -1) {
             break;
         }
@@ -52,8 +52,8 @@ int main(int argc, char *argv[]) {
             case 'i':
                 taf_fn = optarg;
                 break;
-            case 'b':
-                block_size = atoi(optarg);
+            case 'r':
+                region = optarg;
                 break;
             case 'h':
                 usage();
@@ -80,11 +80,38 @@ int main(int argc, char *argv[]) {
         return 1;        
     }
     FILE *taf_fh = fopen(taf_fn, "r");
-    char *tai_fn = tai_path(taf_fn);    
-    FILE *tai_fh = fopen(tai_fn, "w");    
-    LI *li = LI_construct(taf_fh);
+    LI *li = LI_construct(taf_fh);    
+    char *tai_fn = tai_path(taf_fn);
+    FILE *tai_fh = fopen(tai_fn, "r");
+    if (tai_fh == NULL) {
+        fprintf(stderr, "Index %s not found. Please run taf index first\n", tai_fn);
+        return 1;
+    }
 
-    tai_index(li, tai_fh, block_size);
+    Tai* tai = tai_load(tai_fh);
+
+    TaiIt *tai_it = tai_iterator(tai, li, region);
+    Alignment *alignment = NULL;
+    Alignment *p_alignment = NULL;
+
+    while ((alignment = tai_next(tai_it, li)) != NULL) {
+        fprintf(stderr, "WRITE BLOCK\n");
+
+        taf_write_block(p_alignment, alignment, false, 1000, stdout);
+
+        if (p_alignment) {
+            alignment_destruct(p_alignment);
+        }
+        p_alignment = alignment;
+    }
+    if (p_alignment) {
+        alignment_destruct(p_alignment);
+    }
+        
+
+    if (tai_it) fprintf(stderr, "fam");
+    
+    tai_destruct(tai);
 
     //////////////////////////////////////////////
     // Cleanup
@@ -100,7 +127,7 @@ int main(int argc, char *argv[]) {
 
     LI_destruct(li);
     
-    st_logInfo("taf_index is done, %" PRIi64 " seconds have elapsed\n", time(NULL) - startTime);
+    st_logInfo("taf_find is done, %" PRIi64 " seconds have elapsed\n", time(NULL) - startTime);
 
     return 0;
 }

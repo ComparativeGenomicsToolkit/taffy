@@ -1,6 +1,7 @@
 #ifndef STLINE_ITERATOR_H_
 #define STLINE_ITERATOR_H_
 
+#include "sonLib.h"
 #include <stdio.h>
 typedef struct BGZF BGZF;
 
@@ -28,6 +29,12 @@ char *LI_get_next_line(LI *li);
  * be used to look ahead at the next line in the iteration sequence.
  */
 char *LI_peek_at_next_line(LI *li);
+
+
+/*
+ * Go to position in file
+ */
+int64_t LI_seek(LI *li, int64_t position);
 
 #endif /* STLINE_ITERATOR_H_ */
 
