@@ -1,5 +1,5 @@
 /*
- * taf_to_maf: Convert a taf alignment into a maf alignment
+ * taf_index: Make a .tai index from a TAF file (which can be bgzipped or uncompressed)
  *
  *  Released under the MIT license, see LICENSE.txt
 */
@@ -72,7 +72,7 @@ int main(int argc, char *argv[]) {
     st_logInfo("Input file string : %s\n", taf_fn);
 
     //////////////////////////////////////////////
-    // Read in the taf blocks and convert to sequence of maf blocks
+    // Make the .tai index
     //////////////////////////////////////////////
 
     if (taf_fn == NULL) {

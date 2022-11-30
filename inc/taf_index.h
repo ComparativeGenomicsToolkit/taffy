@@ -19,6 +19,14 @@ typedef struct _TaiIt TaiIt;
 char *tai_path(const char *taf_path);
 
 /*
+ * Parse a region into contig / start / length, where subrange is optional
+ * chr1:10-13 -> chr1 / 10 / 3
+ * chr1:10 -> chr1 / 10 / 1
+ * chr1 -> chr1 / 0 / LONG_MAX
+ */
+char *tai_parse_region(const char* region, int64_t *start, int64_t *length);
+
+/*
  * Make an index of a TAF in "idx_fh" 
  * The index is made on the "reference" first contig of each block
  * For each such contig, the index will have one line for each index_block_size
@@ -38,8 +46,10 @@ void tai_destruct(Tai* idx);
 
 /*
  * Query the taf index
+ * start is 0-based
+ * length can be -1 for everything
  */
-TaiIt *tai_iterator(Tai* idx, LI *li, const char *region);
+TaiIt *tai_iterator(Tai* idx, LI *li, bool run_length_encode_bases, const char *contig, int64_t start, int64_t length);
 
 /*
  * Iterate through a region as obtained via the iterator

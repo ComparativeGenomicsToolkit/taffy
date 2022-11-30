@@ -1,13 +1,56 @@
 #include "taf.h"
 #include "taf_index.h"
 #include "htslib/bgzf.h"
-#include "htslib/hts.h" // just for hts_parse_reg()
 #include <ctype.h>
 
 char *tai_path(const char *taf_path) {
     char *ret = (char*)st_calloc(strlen(taf_path) + 5, sizeof(char));
     sprintf(ret, "%s.tai", taf_path);
     return ret;    
+}
+
+char *tai_parse_region(const char *region, int64_t *start, int64_t *length) {
+    int64_t n = strlen(region);
+    char *colon = strrchr(region, ':');
+    int64_t contig_length = colon ? colon - region : n;
+    *start = 0;
+    *length = LONG_MAX;
+    if (colon) {
+        char *dash = strchr(colon + 1, '-');
+        int64_t start_length = dash ? dash - colon - 1: strlen(colon + 1);
+        if (start_length > 0) {
+            char *start_string = stString_getSubString(colon + 1, 0, start_length);
+            for (int64_t i = 0; i < strlen(start_string); ++i) {
+                if (!isdigit(start_string[i])) {
+                    contig_length = 0;
+                    break;
+                }
+            }
+            *start = contig_length > 0 ? atol(start_string) : -1;
+            free(start_string);
+            *length = 1;
+        } else {
+            return NULL;
+        }
+        int64_t end_length = n - (contig_length + start_length + 2);
+        if (end_length > 0) {
+            for (int64_t i = contig_length + 2 + start_length; i < n; ++i) {
+                if (!isdigit(region[i])) {
+                    contig_length = 0;
+                    break;
+                }
+            }
+            if (contig_length > 0) {
+                int64_t end = atol(colon + 2 + start_length);
+                if (end < *start) {
+                    contig_length = 0;
+                } else {
+                    *length = end - *start;
+                }
+            }
+        }
+    }
+    return contig_length > 0 ? stString_getSubString(region, 0, contig_length) : NULL;
 }
 
 // todo: it would be nice to be able to use something from the taf.h API for this!!
@@ -49,7 +92,7 @@ int tai_index(LI *li, FILE* idx_fh, int64_t index_block_size){
         if (!prev_ref || strcmp(cur_ref, prev_ref) != 0 ||
             cur_offset - prev_pos >= index_block_size) {
 
-            fprintf(idx_fh, "%s\t%ld\t%ld\t%ld\t", cur_ref, cur_offset, prev_file_offset, alignment->row->sequence_length);
+            fprintf(idx_fh, "%s\t%" PRIi64 "\t%" PRIi64 "\t%" PRIi64 "\t", cur_ref, cur_offset, prev_file_offset, alignment->row->sequence_length);
             write_tai_coorindates(alignment, idx_fh);
             fprintf(idx_fh, "\n");
         }
@@ -129,6 +172,7 @@ struct _TaiIt {
     int64_t end;
     Alignment *alignment;
     Alignment *p_alignment;
+    bool run_length_encode_bases;
 };
 
 /*
@@ -150,16 +194,18 @@ static void inject_full_coorindates(TaiRec *tr, LI *li) {
     li->line = st_calloc(1, sizeof(char) * (strlen(old_line) + strlen(tr->name) + strlen(tr->coords) + 256));
     strncpy(li->line, old_line, end_of_bases);
     free(old_line);
-    sprintf(li->line + end_of_bases, " ; i 0 %s %ld + %ld %s", tr->name, tr->seq_pos, tr->seq_len, tr->coords);
+    sprintf(li->line + end_of_bases, " ; i 0 %s %" PRIi64 " + %" PRIi64 " %s", tr->name, tr->seq_pos, tr->seq_len, tr->coords);
 }
 
-TaiIt *tai_iterator(Tai* tai, LI *li, const char *region) {
+TaiIt *tai_iterator(Tai* tai, LI *li, bool run_length_encode_bases, const char *contig, int64_t start, int64_t length) {
 
     TaiIt *tai_it = st_calloc(1, sizeof(TaiIt));
 
     // parse the region into the iterator
-    const char* ce = hts_parse_reg64(region, &tai_it->start, &tai_it->end);
-    tai_it->name = stString_getSubString(region, 0, ce - region);
+    tai_it->name = stString_copy(contig);
+    tai_it->start = start;
+    tai_it->end = length < 0 ? LONG_MAX : start + length;
+    tai_it->run_length_encode_bases = run_length_encode_bases;
 
     // look up the region in the taf index, which takes a dummy record
     TaiRec qr;
@@ -189,11 +235,11 @@ TaiIt *tai_iterator(Tai* tai, LI *li, const char *region) {
     LI_seek(li, tair_1->file_pos);
     LI_get_next_line(li);
 
-    fprintf(stderr, "query n=%s sp=%ld\n", qr.name, qr.seq_pos);
-    fprintf(stderr, "tair_1 n=%s sp=%ld fp=%ld tags=%s\n", tair_1->name, tair_1->seq_pos, tair_1->file_pos, tair_1->coords);
+    fprintf(stderr, "query n=%s sp=%" PRIi64 "\n", qr.name, qr.seq_pos);
+    fprintf(stderr, "tair_1 n=%s sp=%" PRIi64 " fp=%" PRIi64 " tags=%s\n", tair_1->name, tair_1->seq_pos, tair_1->file_pos, tair_1->coords);
 
     if (tair_2) {
-        fprintf(stderr, "tair_2 n=%s sp=%ld fp=%ld tags=%s\n", tair_2->name, tair_2->seq_pos, tair_2->file_pos, tair_2->coords);
+        fprintf(stderr, "tair_2 n=%s sp=%" PRIi64 " fp=%" PRIi64 " tags=%s\n", tair_2->name, tair_2->seq_pos, tair_2->file_pos, tair_2->coords);
     } else {
         fprintf(stderr, "tair_2 NULL\n");
     }
@@ -208,9 +254,9 @@ TaiIt *tai_iterator(Tai* tai, LI *li, const char *region) {
     Alignment *alignment = NULL;
     Alignment *p_alignment = NULL;
     Alignment *pp_alignment = NULL;
-    while((alignment = taf_read_block(p_alignment, false, li)) != NULL) {
+    while((alignment = taf_read_block(p_alignment, tai_it->run_length_encode_bases, li)) != NULL) {
         bool in_contig = strcmp(alignment->row->sequence_name, qr.name) == 0;
-        fprintf(stderr, "visit alignmenet %s %ld %ld\n", alignment->row->sequence_name, alignment->row->start,
+        fprintf(stderr, "visit alignmenet %s %" PRIi64 " %" PRIi64 "\n", alignment->row->sequence_name, alignment->row->start,
                 alignment->row->start + alignment->row->length);
         if (!in_contig ||
             alignment->row->start >= tai_it->end) {
@@ -246,7 +292,7 @@ TaiIt *tai_iterator(Tai* tai, LI *li, const char *region) {
     tai_it->p_alignment = p_alignment;
 
     if (tai_it->alignment) {
-        fprintf(stderr, "settle alignmenet %s %ld %ld\n", alignment->row->sequence_name, alignment->row->start,
+        fprintf(stderr, "settle alignmenet %s %" PRIi64 " %" PRIi64 "\n", alignment->row->sequence_name, alignment->row->start,
                 alignment->row->start + alignment->row->length);
     }
     
@@ -260,7 +306,7 @@ TaiIt *tai_iterator(Tai* tai, LI *li, const char *region) {
         return NULL;
     }    
 
-    fprintf(stderr, "query found at %ld is: %s\n\n", tair_1->file_pos, li->line);
+    fprintf(stderr, "query found at %" PRIi64 " is: %s\n\n", tair_1->file_pos, li->line);
 
     return tai_it;
 }
@@ -279,7 +325,7 @@ static unsigned int clip_alignment(Alignment *aln, Alignment *p_aln, int64_t sta
     int64_t left_trim = start - aln->row->start;
     if (left_trim > 0) {
         ret = ret | 2;
-        fprintf(stderr, "found left trim %ld of block start=%ld len=%ld vs query start %ld end %ld\n",
+        fprintf(stderr, "found left trim %" PRIi64 " of block start=%" PRIi64 " len=%" PRIi64 " vs query start %" PRIi64 " end %" PRIi64 "\n",
                 left_trim, aln->row->start, aln->row->length, start, end);
         // we assume that the current alignment overlaps our range
         assert(aln->column_number > left_trim);
@@ -294,7 +340,7 @@ static unsigned int clip_alignment(Alignment *aln, Alignment *p_aln, int64_t sta
         // then we trim out every row, making sure that we adjust the start/length fields only
         // by non-gap bases we removed
         for (Alignment_Row *row = aln->row; row != NULL; row = row->n_row) {
-            fprintf(stderr, "before left trim cp %ld we have %s start %ld len %ld bases %s\n", cut_point,
+            fprintf(stderr, "before left trim cp %" PRIi64 " we have %s start %" PRIi64 " len %" PRIi64 " bases %s\n", cut_point,
                     row->sequence_name, row->start, row->length, row->bases);            
             for (int64_t col = 0; col < cut_point; ++col) {
                 if (row->bases[col] != '-') {
@@ -305,7 +351,7 @@ static unsigned int clip_alignment(Alignment *aln, Alignment *p_aln, int64_t sta
             char *bases = row->bases;
             row->bases = row->length > 0 ? stString_getSubString(bases, cut_point, strlen(row->bases) - cut_point) : "";
             free(bases);
-            fprintf(stderr, "after left trim we have %s start %ld len %ld bases %s\n", row->sequence_name, row->start, row->length, row->bases);
+            fprintf(stderr, "after left trim we have %s start %" PRIi64 " len %" PRIi64 " bases %s\n", row->sequence_name, row->start, row->length, row->bases);
 
         }
         aln->column_number -= left_trim;
@@ -315,7 +361,7 @@ static unsigned int clip_alignment(Alignment *aln, Alignment *p_aln, int64_t sta
     int64_t right_trim = (aln->row->start + aln->row->length) - end;
     if (right_trim > 0) {
         ret = ret | 1;
-        fprintf(stderr, "found right trim %ld of block start=%ld len=%ld vs query start %ld end %ld\n",
+        fprintf(stderr, "found right trim %" PRIi64 " of block start=%" PRIi64 " len=%" PRIi64 " vs query start %" PRIi64 " end %" PRIi64 "\n",
                 right_trim, aln->row->start, aln->row->length, start, end);
 
         assert(aln->column_number > right_trim);
@@ -323,7 +369,7 @@ static unsigned int clip_alignment(Alignment *aln, Alignment *p_aln, int64_t sta
         // we need to find the cut point by counting off right_trim non-gap bases from the end of the reference row
         int64_t cut_point = strlen(aln->row->bases) - 1;
         for (int64_t cut_count = 0; cut_count < right_trim && cut_point >= 0; --cut_point) {
-            fprintf(stderr, "cut count %ld cut point %ld\n", cut_count, cut_point);
+            fprintf(stderr, "cut count %" PRIi64 " cut point %" PRIi64 "\n", cut_count, cut_point);
             if (aln->row->bases[cut_point] != '-') {
                 ++cut_count;
             }
@@ -331,7 +377,7 @@ static unsigned int clip_alignment(Alignment *aln, Alignment *p_aln, int64_t sta
         // then we trim out every row, making sure that we adjust the start/length fields only
         // by non-gap bases we removed
         for (Alignment_Row *row = aln->row; row != NULL; row = row->n_row) {
-            fprintf(stderr, "before right trim cp %ld we have %s start %ld len %ld bases %s\n", cut_point,
+            fprintf(stderr, "before right trim cp %" PRIi64 " we have %s start %" PRIi64 " len %" PRIi64 " bases %s\n", cut_point,
                     row->sequence_name, row->start, row->length, row->bases);
             int64_t rowlen = strlen(row->bases);
             for (int64_t col = rowlen - 1; col > cut_point; --col) {
@@ -342,7 +388,7 @@ static unsigned int clip_alignment(Alignment *aln, Alignment *p_aln, int64_t sta
             char *bases = row->bases;
             row->bases = row->length > 0 ? stString_getSubString(bases, 0, cut_point) : "";
             free(bases);
-            fprintf(stderr, "after right trim we have %s start %ld len %ld bases %s\n", row->sequence_name, row->start, row->length, row->bases);
+            fprintf(stderr, "after right trim we have %s start %" PRIi64 " len %" PRIi64 " bases %s\n", row->sequence_name, row->start, row->length, row->bases);
         }
         aln->column_number -= right_trim;                
     }
@@ -390,7 +436,7 @@ Alignment *tai_next(TaiIt *tai_it, LI *li) {
     if (ret & 1) {
         tai_it->alignment = NULL;
     } else {
-        tai_it->alignment = taf_read_block(tai_it->p_alignment, false, li);
+        tai_it->alignment = taf_read_block(tai_it->p_alignment, tai_it->run_length_encode_bases, li);
         if (tai_it->alignment != NULL &&
             (strcmp(tai_it->alignment->row->sequence_name, tai_it->name) != 0 ||
              tai_it->alignment->row->start >= tai_it->end)) {
