@@ -251,13 +251,12 @@ TaiIt *tai_iterator(Tai* tai, LI *li, bool run_length_encode_bases, const char *
     // now we have to scan forward until we overlap actually the region
     // TODO: this will surely need speeding up with binary search for giant files...
     //       but i think that's best done once tests are set up based on the simpler version
+    tai_it->alignment = NULL;
+    tai_it->p_alignment = NULL;
     Alignment *alignment = NULL;
     Alignment *p_alignment = NULL;
-    Alignment *pp_alignment = NULL;
     while((alignment = taf_read_block(p_alignment, tai_it->run_length_encode_bases, li)) != NULL) {
         bool in_contig = strcmp(alignment->row->sequence_name, qr.name) == 0;
-        fprintf(stderr, "visit alignmenet %s %" PRIi64 " %" PRIi64 "\n", alignment->row->sequence_name, alignment->row->start,
-                alignment->row->start + alignment->row->length);
         if (!in_contig ||
             alignment->row->start >= tai_it->end) {
             // we've gone past our query region: there's no hope
@@ -265,31 +264,32 @@ TaiIt *tai_iterator(Tai* tai, LI *li, bool run_length_encode_bases, const char *
             if (p_alignment) {
                 alignment_destruct(p_alignment);
             }
-            if (pp_alignment) {
-                alignment_destruct(pp_alignment);
-            }
             alignment = NULL;
             p_alignment = NULL;
-            pp_alignment = NULL;
             break;
         } else {
-            if (pp_alignment != NULL) {
-                alignment_destruct(pp_alignment);
+            if (p_alignment != NULL) {
+                alignment_destruct(p_alignment);
             }
-            pp_alignment = p_alignment;
             p_alignment = alignment;
             if (in_contig && alignment->row->start < tai_it->end &&
                 (alignment->row->start + alignment->row->length) > tai_it->start) {
+                // important: need to cut off p_alignment to get our absolute coordinates
+                for (Alignment_Row *row = alignment->row; row != NULL; row = row->n_row) {
+                    row->l_row = NULL;
+                }
                 // we've found an intersection at "alignment"
+                tai_it->alignment = alignment;
+                p_alignment = NULL;
                 break;
+                
             }
         }
     }
-    if (pp_alignment != NULL) {
-        alignment_destruct(pp_alignment);
+    if (p_alignment != NULL) {
+        alignment_destruct(p_alignment);
+        p_alignment = NULL;
     }
-    tai_it->alignment = alignment;
-    tai_it->p_alignment = p_alignment;
 
     if (tai_it->alignment) {
         fprintf(stderr, "settle alignmenet %s %" PRIi64 " %" PRIi64 "\n", alignment->row->sequence_name, alignment->row->start,
@@ -395,13 +395,6 @@ static unsigned int clip_alignment(Alignment *aln, Alignment *p_aln, int64_t sta
         aln->column_number -= right_trim;                
     }
 
-    // break the links from the p_alignment to delete rows
-    for (Alignment_Row *row = p_aln->row; row != NULL; row = row->n_row) {
-        if (row->r_row && row->r_row->length == 0) {
-            row->r_row = NULL;
-        }
-    }
-    
     // need to get rid of empty rows as they api doesn't handle them
     Alignment_Row *prev = NULL;
     Alignment_Row *next = NULL;
