@@ -332,7 +332,6 @@ Which is a 6.97x reduction in block number.
 
 Things that are ongoing:
 
-* Python bindings
 * Make taf_add_gap_bases use indexed fastas to avoid loading everything into memory
 * Create an index format for random access to TAF files
 * Add a binary/compressed version
