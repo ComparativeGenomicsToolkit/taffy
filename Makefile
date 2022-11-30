@@ -40,11 +40,11 @@ ${BINDIR}/taf_norm : taf_norm.c ${LIBDIR}/stTaf.a ${stTafDependencies}
 ${BINDIR}/taf_add_gap_bases : taf_add_gap_bases.cpp ${LIBDIR}/stTaf.a ${stTafDependencies}
 	${CXX} ${CPPFLAGS} ${CXXFLAGS} -o ${BINDIR}/taf_add_gap_bases taf_add_gap_bases.cpp ${LIBDIR}/stTaf.a ${LDLIBS}
 
-${BINDIR}/taf_index : taf_index_main.c ${LIBDIR}/stTaf.a ${stTafDependencies}
-	${CC} ${CFLAGS} ${CFLAGS} -o ${BINDIR}/taf_index taf_index_main.c ${LIBDIR}/stTaf.a ${LDLIBS}
+${BINDIR}/taf_index : taf_index.c ${LIBDIR}/stTaf.a ${stTafDependencies}
+	${CC} ${CFLAGS} ${CFLAGS} -o ${BINDIR}/taf_index taf_index.c ${LIBDIR}/stTaf.a ${LDLIBS}
 
-${BINDIR}/taf_find : taf_find_main.c ${LIBDIR}/stTaf.a ${stTafDependencies}
-	${CC} ${CFLAGS} ${CFLAGS} -o ${BINDIR}/taf_find taf_find_main.c ${LIBDIR}/stTaf.a ${LDLIBS}
+${BINDIR}/taf_find : taf_find.c ${LIBDIR}/stTaf.a ${stTafDependencies}
+	${CC} ${CFLAGS} ${CFLAGS} -o ${BINDIR}/taf_find taf_find.c ${LIBDIR}/stTaf.a ${LDLIBS}
 
 test : all
 	${BINDIR}/stTafTests

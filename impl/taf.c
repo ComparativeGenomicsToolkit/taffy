@@ -140,7 +140,6 @@ static stList *get_first_line(LI *li) {
         if (line == NULL) { // At end of file
             return NULL;
         }
-        fprintf(stderr, "\n tokenize ->%s<-\n", line);
         // Tokenize the line
         tokens = stString_split(line);
         free(line);
