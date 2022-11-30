@@ -3,9 +3,13 @@ from setuptools import setup
 
 setup(
     name="taffy",
-    packages=["taffy", "taffy.inc", "taffy.impl", "taffy.subModules.sonLib.C.inc",
-              "taffy.subModules.sonLib.C.impl", "taffy.subModules.sonLib.externalTools.cutest"],
+    packages=["taffy", "taffy.inc", "taffy.impl", "taffy.submodules.sonLib.C.inc",
+              "taffy.subModules.sonLib.C.impl", "taffy.submodules.sonLib.externalTools.cutest"],
     include_package_data=True,
-    package_data={"": ["*.c", "*.h"]},
+    package_data={ "taffy.inc": ["*.h"],
+                   "taffy.impl": ["*.c"],
+                   "taffy.submodules.sonLib.C.inc": ["*.h"],
+                   "taffy.submodules.sonLib.C.impl": ["*.c", "*.h"],
+                   "taffy.submodules.sonLib.externalTools.cutest": ["*.h"] },
     cffi_modules=["taffy/_taffy_build.py:ffibuilder"],
 )
