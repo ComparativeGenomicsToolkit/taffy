@@ -96,7 +96,17 @@ int main(int argc, char *argv[]) {
 
     while ((alignment = tai_next(tai_it, li)) != NULL) {
         fprintf(stderr, "WRITE BLOCK\n");
-
+        if (p_alignment) {
+            for (Alignment_Row *row = p_alignment->row; row; row = row->n_row) {
+                fprintf(stderr, "p_row %s %ld %ld %ld\n", row->sequence_name, row->start, row->length, (int64_t)row->r_row);
+            }
+        }
+        if (alignment) {
+            for (Alignment_Row *row = alignment->row; row; row = row->n_row) {
+                fprintf(stderr, "row %s %ld %ld %ld\n", row->sequence_name, row->start, row->length, (int64_t)row->l_row);
+            }
+        }            
+        
         taf_write_block(p_alignment, alignment, false, 1000, stdout);
 
         if (p_alignment) {

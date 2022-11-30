@@ -17,7 +17,10 @@ static void write_tai_coorindates(Alignment *alignment, FILE* fh) {
     for (Alignment_Row *row = alignment->row; row; row = row->n_row, ++i) {
         // the first row is already present in our index as a "reference" column
         if (i > 0) {
-            fprintf(fh, " i %" PRIi64 " %s %" PRIi64 " %c %" PRIi64 "",
+            if (i > 1) {
+                fprintf(fh, " ");
+            }
+            fprintf(fh, "i %" PRIi64 " %s %" PRIi64 " %c %" PRIi64 "",
                     i, row->sequence_name, row->start, row->strand ? '+' : '-', row->sequence_length);
         }
     }
@@ -137,7 +140,6 @@ struct _TaiIt {
  *       if/when we move to a binary-search mode that relies on scanning to full
  *       coordinates anyway, it will no longer be necessary
  */
-/*
 static void inject_full_coorindates(TaiRec *tr, LI *li) {
     assert(li->line);
     size_t end_of_bases = 0;
@@ -146,61 +148,10 @@ static void inject_full_coorindates(TaiRec *tr, LI *li) {
     }
     char *old_line = li->line;
     li->line = st_calloc(1, sizeof(char) * (strlen(old_line) + strlen(tr->name) + strlen(tr->coords) + 256));
-    strcpy(li->line, old_line);
+    strncpy(li->line, old_line, end_of_bases);
     free(old_line);
-    sprintf(li->line + strlen(li->line), " ; i 0 %s %ld + %ld %s", tr->name, tr->seq_pos, tr->seq_len, tr->coords);    
+    sprintf(li->line + end_of_bases, " ; i 0 %s %ld + %ld %s", tr->name, tr->seq_pos, tr->seq_len, tr->coords);
 }
-*/
-/*
- * Get a 1-column alignment from the taf record.  
- */
-static Alignment *tai_rec_to_aln(TaiRec *tr, LI *li) {
-    Alignment *aln = st_calloc(1, sizeof(Alignment));
-    stList *tokens = stString_split(li->line);
-    aln->row_number = strlen(stList_get(tokens, 0));
-    aln->column_number = 1;
-    aln->row = st_calloc(1, sizeof(Alignment_Row));
-    aln->row->sequence_name = stString_copy(tr->name);
-    aln->row->start = tr->seq_pos;
-    aln->row->length = 1;
-    aln->row->sequence_length = tr->seq_len;
-    aln->row->strand = true;
-    aln->row->bases = stString_getSubString(stList_get(tokens, 0), 0, 1);
-    aln->row->left_gap_sequence = NULL;
-    aln->row->l_row = NULL;
-    aln->row->r_row = NULL;
-    aln->row->bases_since_coordinates_reported = INT_MAX;
-
-    stList *tag_tokens = stString_split(tr->coords);
-    assert(stList_length(tag_tokens) % 6 == 0);
-    int64_t tag_count = stList_length(tag_tokens) / 6;
-    assert(tag_count + 1 == aln->row_number);
-    Alignment_Row *prev_row = aln->row;
-    for (int64_t i = 0; i < tag_count; ++i) {
-        Alignment_Row *row = st_calloc(1, sizeof(Alignment_Row));
-        prev_row->n_row = row;        
-        row->sequence_name = stString_copy(stList_get(tag_tokens, i * 6 + 2));
-        row->start = atol(stList_get(tag_tokens, i * 6 + 3));
-        row->length = 1;
-        row->sequence_length = atol(stList_get(tag_tokens, i * 6 + 5));
-        const char *strand = stList_get(tag_tokens, i * 6 + 4);
-        assert(strcmp(strand, "+") == 0 || strcmp(strand, "-") == 0);
-        row->strand = strand[0] == '+';
-        row->bases = stString_getSubString(stList_get(tokens, 0), i, 1);
-        row->left_gap_sequence = NULL;
-        row->l_row = NULL;
-        row->r_row = NULL;
-        row->bases_since_coordinates_reported = INT_MAX;
-        prev_row = row;
-    }
-    aln->tag_lists = NULL;
-    
-    stList_destruct(tokens);
-    stList_destruct(tag_tokens);
-
-    return aln;
-}
-
 
 TaiIt *tai_iterator(Tai* tai, LI *li, const char *region) {
 
@@ -247,29 +198,58 @@ TaiIt *tai_iterator(Tai* tai, LI *li, const char *region) {
         fprintf(stderr, "tair_2 NULL\n");
     }
 
-    // set up a dummy alignment, starting at our block position in the taf
-    tai_it->p_alignment = NULL;
-    //tai_it->alignment = NULL;
-    tai_it->alignment = tai_rec_to_aln(tair_1, li);
-    LI_get_next_line(li);
-    //inject_full_coorindates(tair_1, li);
-
+    // force taf to start a new alignment at our current file position by making
+    // a full coordinates line and reading it
+    inject_full_coorindates(tair_1, li);    
+    
     // now we have to scan forward until we overlap actually the region
     // TODO: this will surely need speeding up with binary search for giant files...
     //       but i think that's best done once tests are set up based on the simpler version
-    while (tai_it->alignment &&
-           strcmp(tai_it->alignment->row->sequence_name, qr.name) == 0 &&
-           (tai_it->alignment->row->start + tai_it->alignment->row->length) <= qr.seq_pos) {
-        fprintf(stderr, "scanning forward on %ld\n", (int64_t)tai_it->alignment);
-        Alignment *aln = taf_read_block(tai_it->alignment, false, li);
-
-        if (tai_it->p_alignment) {
-            alignment_destruct(tai_it->p_alignment);
+    Alignment *alignment = NULL;
+    Alignment *p_alignment = NULL;
+    Alignment *pp_alignment = NULL;
+    while((alignment = taf_read_block(p_alignment, false, li)) != NULL) {
+        bool in_contig = strcmp(alignment->row->sequence_name, qr.name) == 0;
+        fprintf(stderr, "visit alignmenet %s %ld %ld\n", alignment->row->sequence_name, alignment->row->start,
+                alignment->row->start + alignment->row->length);
+        if (!in_contig ||
+            alignment->row->start >= tai_it->end) {
+            // we've gone past our query region: there's no hope
+            alignment_destruct(alignment);
+            if (p_alignment) {
+                alignment_destruct(p_alignment);
+            }
+            if (pp_alignment) {
+                alignment_destruct(pp_alignment);
+            }
+            alignment = NULL;
+            p_alignment = NULL;
+            pp_alignment = NULL;
+            break;
+        } else {
+            if (pp_alignment != NULL) {
+                alignment_destruct(pp_alignment);
+            }
+            pp_alignment = p_alignment;
+            p_alignment = alignment;
+            if (in_contig && alignment->row->start < tai_it->end &&
+                (alignment->row->start + alignment->row->length) > tai_it->start) {
+                // we've found an intersection at "alignment"
+                break;
+            }
         }
-        tai_it->p_alignment = tai_it->alignment;
-        tai_it->alignment = aln;
     }
+    if (pp_alignment != NULL) {
+        alignment_destruct(pp_alignment);
+    }
+    tai_it->alignment = alignment;
+    tai_it->p_alignment = p_alignment;
 
+    if (tai_it->alignment) {
+        fprintf(stderr, "settle alignmenet %s %ld %ld\n", alignment->row->sequence_name, alignment->row->start,
+                alignment->row->start + alignment->row->length);
+    }
+    
     // we scanned past our region, which could happen if your taf doesn't contain the whole
     // sequence -- jsut return nothing
     if (tai_it->alignment == NULL) {
@@ -292,7 +272,7 @@ TaiIt *tai_iterator(Tai* tai, LI *li, const char *region) {
  *         2: left side cut
  *         3: left and right side cut
  */ 
-static unsigned int clip_alignment(Alignment *aln, int64_t start, int64_t end) {
+static unsigned int clip_alignment(Alignment *aln, Alignment *p_aln, int64_t start, int64_t end) {
 
     unsigned int ret = 0;
     // clip the left side
@@ -314,6 +294,8 @@ static unsigned int clip_alignment(Alignment *aln, int64_t start, int64_t end) {
         // then we trim out every row, making sure that we adjust the start/length fields only
         // by non-gap bases we removed
         for (Alignment_Row *row = aln->row; row != NULL; row = row->n_row) {
+            fprintf(stderr, "before left trim cp %ld we have %s start %ld len %ld bases %s\n", cut_point,
+                    row->sequence_name, row->start, row->length, row->bases);            
             for (int64_t col = 0; col < cut_point; ++col) {
                 if (row->bases[col] != '-') {
                     ++row->start;
@@ -321,7 +303,7 @@ static unsigned int clip_alignment(Alignment *aln, int64_t start, int64_t end) {
                 }
             }
             char *bases = row->bases;
-            row->bases = row->length > 0 ? stString_getSubString(bases, cut_point, row->length) : "";
+            row->bases = row->length > 0 ? stString_getSubString(bases, cut_point, strlen(row->bases) - cut_point) : "";
             free(bases);
             fprintf(stderr, "after left trim we have %s start %ld len %ld bases %s\n", row->sequence_name, row->start, row->length, row->bases);
 
@@ -358,13 +340,20 @@ static unsigned int clip_alignment(Alignment *aln, int64_t start, int64_t end) {
                 }
             }
             char *bases = row->bases;
-            row->bases = row->length > 0 ? stString_getSubString(bases, 0, row->length) : "";
+            row->bases = row->length > 0 ? stString_getSubString(bases, 0, cut_point) : "";
             free(bases);
             fprintf(stderr, "after right trim we have %s start %ld len %ld bases %s\n", row->sequence_name, row->start, row->length, row->bases);
         }
         aln->column_number -= right_trim;                
     }
 
+    // break the links from the p_alignment to delete rows
+    for (Alignment_Row *row = p_aln->row; row != NULL; row = row->n_row) {
+        if (row->r_row && row->r_row->length == 0) {
+            row->r_row = NULL;
+        }
+    }
+    
     // need to get rid of empty rows as they api doesn't handle them
     Alignment_Row *prev = NULL;
     Alignment_Row *next = NULL;
@@ -391,14 +380,14 @@ Alignment *tai_next(TaiIt *tai_it, LI *li) {
 
     // start by clamping the alignment block to the region
     assert(strcmp(tai_it->alignment->row->sequence_name, tai_it->name) == 0);
-    unsigned int ret = clip_alignment(tai_it->alignment, tai_it->start, tai_it->end);
+    unsigned int ret = clip_alignment(tai_it->alignment, tai_it->p_alignment, tai_it->start, tai_it->end);
     
 
     // save this alignment, it's what we're gonna return
     tai_it->p_alignment = tai_it->alignment;
 
     // scan forward
-    if (ret & 2) {
+    if (ret & 1) {
         tai_it->alignment = NULL;
     } else {
         tai_it->alignment = taf_read_block(tai_it->p_alignment, false, li);
