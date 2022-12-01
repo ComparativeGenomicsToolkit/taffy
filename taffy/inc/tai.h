@@ -32,7 +32,7 @@ char *tai_parse_region(const char* region, int64_t *start, int64_t *length);
  * For each such contig, the index will have one line for each index_block_size
  * region of it found in the TAF. 
  */
-int tai_index(LI *li, FILE* idx_fh, int64_t index_block_size);
+int tai_create(LI *li, FILE* idx_fh, int64_t index_block_size);
 
 /*
  * Load the index from disk

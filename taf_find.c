@@ -110,17 +110,14 @@ int main(int argc, char *argv[]) {
     }
 
     // Pass the header line to determine parameters and write the updated taf header
-    stList *tags = taf_read_header(li);
-    assert(stList_length(tags) % 2 == 0);
-    bool run_length_encode_bases = false;
-    for(int64_t i=0; i<stList_length(tags); i+=2) {
-        char *key = (char*)stList_get(tags, i);
-        char *value = (char*)stList_get(tags, i+1);
-        if(strcmp(key, "run_length_encode_bases") == 0 && strcmp(value, "1") == 0) {
-            run_length_encode_bases = 1;
-        }
+    bool run_length_encode_bases = 0;
+    Tag *tag = taf_read_header(li);
+    Tag *t = tag_find(tag, "run_length_encode_bases");
+    if(t != NULL && strcmp(t->value, "1") == 0) {
+        run_length_encode_bases = 1;
     }
-    taf_write_header(tags, out_fh);
+    taf_write_header(tag, out_fh);
+    tag_destruct(tag);
     
     if (region) {
         int64_t region_start;
@@ -154,12 +151,12 @@ int main(int argc, char *argv[]) {
             taf_write_block(p_alignment, alignment, run_length_encode_bases, repeat_coordinates_every_n_columns, out_fh);
             
             if (p_alignment) {
-                alignment_destruct(p_alignment);
+                alignment_destruct(p_alignment, true);
             }
             p_alignment = alignment;
         }
         if (p_alignment) {
-            alignment_destruct(p_alignment);
+            alignment_destruct(p_alignment, true);
         }
 
         tai_destruct(tai);
@@ -175,12 +172,12 @@ int main(int argc, char *argv[]) {
         while((alignment = taf_read_block(p_alignment, run_length_encode_bases, li)) != NULL) {
             taf_write_block(p_alignment, alignment, run_length_encode_bases, repeat_coordinates_every_n_columns, out_fh);
             if (p_alignment) {
-                alignment_destruct(p_alignment);
+                alignment_destruct(p_alignment, true);
             }
             p_alignment = alignment;
         }
         if (p_alignment) {
-            alignment_destruct(p_alignment);
+            alignment_destruct(p_alignment, true);
         }            
     }
         

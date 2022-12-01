@@ -90,7 +90,7 @@ int main(int argc, char *argv[]) {
     FILE *tai_fh = fopen(tai_fn, "w");    
     LI *li = LI_construct(taf_fh);
 
-    tai_index(li, tai_fh, block_size);
+    tai_create(li, tai_fh, block_size);
 
     //////////////////////////////////////////////
     // Cleanup

@@ -2,6 +2,8 @@
 #define STLINE_ITERATOR_H_
 
 #include <stdio.h>
+#include <stdint.h>
+
 typedef struct BGZF BGZF;
 
 /*

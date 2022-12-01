@@ -174,16 +174,13 @@ int tai_index(LI *li, FILE* idx_fh, int64_t index_block_size){
     int64_t prev_pos = 0;
     
     // read the TAF header
-    stList *tags = taf_read_header(li);
-    assert(stList_length(tags) % 2 == 0);
     bool run_length_encode_bases = 0;
-    for(int64_t i=0; i<stList_length(tags); i+=2) {
-        char *key = (char*)stList_get(tags, i);
-        char *value = (char*)stList_get(tags, i+1);
-        if(strcmp(key, "run_length_encode_bases") == 0 && strcmp(value, "1") == 0) {
-            run_length_encode_bases = 1;
-        }
+    Tag *tag = taf_read_header(li);
+    Tag *t = tag_find(tag, "run_length_encode_bases");
+    if(t != NULL && strcmp(t->value, "1") == 0) {
+        run_length_encode_bases = 1;
     }
+    tag_destruct(tag);
 
     // scan the taf line by line
     for (char *line = LI_get_next_line(li); line != NULL; line = LI_get_next_line(li)) {
@@ -318,16 +315,16 @@ TaiIt *tai_iterator(Tai* tai, LI *li, bool run_length_encode_bases, const char *
     while((alignment = taf_read_block(p_alignment, tai_it->run_length_encode_bases, li)) != NULL) {
         if (tair_2 && file_pos >= tair_2->file_pos) {
             // we've gone past our query region: there's no hope
-            alignment_destruct(alignment);
+            alignment_destruct(alignment, true);
             if (p_alignment) {
-                alignment_destruct(p_alignment);
+                alignment_destruct(p_alignment, true);
             }
             alignment = NULL;
             p_alignment = NULL;
             break;
         } else {
             if (p_alignment != NULL) {
-                alignment_destruct(p_alignment);
+                alignment_destruct(p_alignment, true);
             }
             p_alignment = alignment;
             if (strcmp(alignment->row->sequence_name, qr.name) == 0 &&
@@ -347,7 +344,7 @@ TaiIt *tai_iterator(Tai* tai, LI *li, bool run_length_encode_bases, const char *
         file_pos = LI_tell(li);
     }
     if (p_alignment != NULL) {
-        alignment_destruct(p_alignment);
+        alignment_destruct(p_alignment, true);
         p_alignment = NULL;
     }
 
@@ -355,7 +352,7 @@ TaiIt *tai_iterator(Tai* tai, LI *li, bool run_length_encode_bases, const char *
     // sequence -- jsut return nothing
     if (tai_it->alignment == NULL) {
         if (tai_it->p_alignment) {
-            alignment_destruct(tai_it->p_alignment);
+            alignment_destruct(tai_it->p_alignment, true);
         }
         tai_iterator_destruct(tai_it);
         return NULL;
@@ -462,7 +459,7 @@ static unsigned int clip_alignment(Alignment *aln, Alignment *p_aln, int64_t sta
             assert(strlen(row->bases) == 0);
             assert(prev != NULL);
             prev->n_row = next;
-            Alignment_Row_destruct(row);
+            alignment_row_destruct(row);
             --aln->row_number;
         } else {
             prev = row;
@@ -493,7 +490,7 @@ Alignment *tai_next(TaiIt *tai_it, LI *li) {
         if (tai_it->alignment != NULL &&
             (strcmp(tai_it->alignment->row->sequence_name, tai_it->name) != 0 ||
              tai_it->alignment->row->start >= tai_it->end)) {
-            alignment_destruct(tai_it->alignment);
+            alignment_destruct(tai_it->alignment, true);
             tai_it->alignment = NULL;
         }
     }

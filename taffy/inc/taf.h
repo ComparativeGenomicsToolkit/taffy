@@ -4,7 +4,7 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdbool.h>
-
+#include "sonLib.h"
 #include "line_iterator.h"
 
 /*
