@@ -63,6 +63,17 @@ class Alignment:
         lib.tag_destruct(self._c_alignment.column_tags[column_index])  # Clean up the old tags
         self._c_alignment.column_tags[column_index] = _dictionary_to_c_tags(tags)
 
+    def get_column(self, column_index):
+        """ Get a column of the alignment as a string. Use negative coordinates to get columns
+         from the end of the block """
+        column_index = column_index if column_index >= 0 else (self.column_number() + column_index)  # Correct if
+        # requesting a column from the end of the alignment
+        assert 0 <= column_index < self.column_number()
+        column = lib.alignment_get_column(self._c_alignment, column_index)  # Get the column
+        column_string = _to_py_string(column)  # Convert to Python string
+        lib.free(column)  # Free C string
+        return column_string
+
     def __del__(self):
         lib.alignment_destruct(self._c_alignment, 0)  # Cleans up the underlying C alignment structure
 
