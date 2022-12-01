@@ -256,7 +256,7 @@ int main(int argc, char *argv[]) {
 
     // Pass the header line to determine parameters and write the updated taf header
     Tag *tag = taf_read_header(li);
-    Tag *t = tag_find(tag, "run_length_encode_bases");
+    Tag *t = tag_find(tag, (char*)"run_length_encode_bases");
     if(t != NULL && strcmp(t->value, "1") == 0) {
         run_length_encode_bases = 1;
     }

@@ -169,7 +169,7 @@ static void change_s_coordinates_to_i(char *line) {
     stList_destruct(tokens);
 }
 
-int tai_index(LI *li, FILE* idx_fh, int64_t index_block_size){
+int tai_create(LI *li, FILE* idx_fh, int64_t index_block_size){
     char *prev_ref = NULL;
     int64_t prev_pos = 0;
     
