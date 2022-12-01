@@ -48,7 +48,7 @@ ${BINDIR}/taf_find : taf_find.c ${LIBDIR}/stTaf.a ${stTafDependencies}
 
 test : all
 	${BINDIR}/stTafTests
-	python tests/tai/tai_test.py
+	python3 tests/tai/tai_test.py
 
 clean :
 	cd submodules/sonLib && ${MAKE} clean

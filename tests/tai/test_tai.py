@@ -51,6 +51,7 @@ def create_index(taf_path, block_size):
     assert os.path.isfile(taf_path + '.tai')
     
 def test_tai(regions_path, taf_path, bgzip, block_size):
+    sys.stderr.write(" * running indexing/extraction tests on {} with bzgip={} and blocksize={}".format(taf_path, bgzip, block_size))
     if bgzip:
         gz_path = taf_path + '.gz'
         subprocess.check_call('bgzip -c {} > {}'.format(taf_path, gz_path), shell=True)
@@ -66,12 +67,15 @@ def test_tai(regions_path, taf_path, bgzip, block_size):
     if bgzip:
         subprocess.check_call(['rm', '-f', taf_path])
     subprocess.check_call(['rm', '-f', taf_path + '.tai'])
+    sys.stderr.write("\t\t\tOK\n")    
     
-
+sys.stderr.write("Running tai tests...\n")
 maf_path = './tests/evolverMammals.maf'
 taf_path = './tests/tai/evolverMammals.taf'
+sys.stderr.write(" * creating evolver taf {}\n".format(taf_path))
 subprocess.check_call(['./bin/maf_to_taf', '-i', maf_path, '-o', taf_path])
 taf_rle_path = './tests/tai/evolverMammals.rle.taf'
+sys.stderr.write(" * creating run length encoded evolver taf {}\n".format(taf_rle_path))
 subprocess.check_call(['./bin/maf_to_taf', '-i', maf_path, '-o', taf_rle_path, '-r'])
 regions_path = './tests/tai/evolverMammals_subregions.bed'
 

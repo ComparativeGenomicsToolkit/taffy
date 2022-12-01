@@ -151,18 +151,6 @@ int main(int argc, char *argv[]) {
         Alignment *p_alignment = NULL;
 
         while ((alignment = tai_next(tai_it, li)) != NULL) {
-            fprintf(stderr, "WRITE BLOCK\n");
-            if (p_alignment) {
-                for (Alignment_Row *row = p_alignment->row; row; row = row->n_row) {
-                    fprintf(stderr, "p_row %s %" PRIi64 " %" PRIi64 " %" PRIi64 "\n", row->sequence_name, row->start, row->length, (int64_t)row->r_row);
-                }
-            }
-            if (alignment) {
-                for (Alignment_Row *row = alignment->row; row; row = row->n_row) {
-                    fprintf(stderr, "row %s %" PRIi64 " %" PRIi64 " %" PRIi64 "\n", row->sequence_name, row->start, row->length, (int64_t)row->l_row);
-                }
-            }            
-            
             taf_write_block(p_alignment, alignment, run_length_encode_bases, repeat_coordinates_every_n_columns, out_fh);
             
             if (p_alignment) {

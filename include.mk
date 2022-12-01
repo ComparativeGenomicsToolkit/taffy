@@ -70,7 +70,7 @@ inclDirs = inc submodules/sonLib/C/inc submodules/sonLib/externalTools/cutest
 # we build against htslib for bgzip support, relying on a system installation
 # rather than adding as another submodule
 HTSLIB_CFLAGS = $(shell pkg-config htslib --cflags)
-HTSLIB_LIBS = $(shell pkg-config htslib --libs --static)
+HTSLIB_LIBS = $(shell pkg-config htslib --libs)
 
 CFLAGS += ${inclDirs:%=-I${rootPath}/%} -I${LIBDIR} -I${rootPath}/include  ${HTSLIB_CFLAGS}
 CXXFLAGS += ${inclDirs:%=-I${rootPath}/%} -I${LIBDIR} -I${rootPath}/include ${HTSLIB_CFLAGS}
