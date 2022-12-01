@@ -78,6 +78,6 @@ regions_path = './tests/tai/evolverMammals_subregions.bed'
 test_tai(regions_path, taf_path, False, 111)
 test_tai(regions_path, taf_path, True, 200)
 test_tai(regions_path, taf_rle_path, False, 111)
-#test_tai(regions_path, taf_rle_path, True, 200)
+test_tai(regions_path, taf_rle_path, True, 200)
 
 subprocess.check_call(['rm', '-f', taf_path, taf_rle_path])

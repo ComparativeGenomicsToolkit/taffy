@@ -189,6 +189,7 @@ int tai_index(LI *li, FILE* idx_fh, int64_t index_block_size){
     for (char *line = LI_get_next_line(li); line != NULL; line = LI_get_next_line(li)) {
         stList* tokens = stString_split(line);
         int64_t pos;
+        assert(sizeof(int64_t) == sizeof(off_t));
         bool strand;
         char *ref = parse_coordinates_line(tokens, &pos, &strand, run_length_encode_bases);
         if (ref != NULL) {
@@ -205,14 +206,24 @@ int tai_index(LI *li, FILE* idx_fh, int64_t index_block_size){
 
                 // test
 /*
-                BGZF *bgzf = bgzf_open("tests/tai/evolverMammals.rle.taf.gz", "rb");
-                bgzf_useek(bgzf, LI_tell(li), SEEK_SET);
-                assert(bgzf_utell(bgzf) == LI_tell(li));
+                BGZF *bgzf = bgzf_open("../work/references/hg38.fa.gz", "r");
+                int ret0 = bgzf_index_build_init(bgzf);                
                 kstring_t ks = KS_INITIALIZE;
                 bgzf_getline(bgzf, '\n', &ks);
-                fprintf(stderr, " test back is %ld %s\n\n\n", LI_tell(li), ks_release(&ks));
+                fprintf(stderr, "first line back at %ld is %s\n", bgzf_utell(bgzf), ks_release(&ks));
+                assert(ret0 == 0);
+                int64_t seekpos = LI_tell(li);
+                for (int64_t i = seekpos; i < seekpos + 100000; i += 1000) {
+                    fprintf(stderr, "seeking test file %ld to %ld\n", (int64_t)bgzf, i);
+                    int ret = bgzf_useek(bgzf, i, SEEK_SET);
+                    assert(ret == 0);
+                }
+                assert(bgzf_utell(bgzf) == LI_tell(li));
+                kstring_t ks1 = KS_INITIALIZE;
+                bgzf_getline(bgzf, '\n', &ks1);
+                fprintf(stderr, " test back is %ld %s\n\n\n", LI_tell(li), ks_release(&ks1));
                 bgzf_close(bgzf);
-*/                
+*/              
             }
             prev_ref = ref;
             prev_pos = pos;
