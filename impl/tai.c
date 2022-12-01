@@ -246,7 +246,9 @@ TaiIt *tai_iterator(Tai* tai, LI *li, bool run_length_encode_bases, const char *
 
     // force taf to start a new alignment at our current file position by making
     // a full coordinates line and reading it
-    inject_full_coorindates(tair_1, li);    
+    inject_full_coorindates(tair_1, li);
+
+    fprintf(stderr, "taf line after injection %s\n", li->line);
     
     // now we have to scan forward until we overlap actually the region
     // TODO: this will surely need speeding up with binary search for giant files...
@@ -306,7 +308,7 @@ TaiIt *tai_iterator(Tai* tai, LI *li, bool run_length_encode_bases, const char *
         return NULL;
     }    
 
-    fprintf(stderr, "query found at %" PRIi64 " is: %s\n\n", tair_1->file_pos, li->line);
+    fprintf(stderr, "query found at filepos %" PRIi64 " seqpos %" PRIi64 " is: %s\n\n", tair_1->file_pos, tair_1->seq_pos, li->line);
 
     return tai_it;
 }
