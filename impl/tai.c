@@ -348,9 +348,13 @@ static unsigned int clip_alignment(Alignment *aln, Alignment *p_aln, int64_t sta
                     --row->length;
                 }
             }
-            char *bases = row->bases;
-            row->bases = row->length > 0 ? stString_getSubString(bases, cut_point, strlen(row->bases) - cut_point) : "";
-            free(bases);
+            if (row->length == 0) {
+                row->bases[0] = '\0';
+            } else {
+                char *bases = row->bases;
+                row->bases = stString_getSubString(bases, cut_point, strlen(row->bases) - cut_point);
+                free(bases);
+            }
             assert(strlen(row->bases) >= row->length);            
             fprintf(stderr, "after left trim we have %s start %" PRIi64 " len %" PRIi64 " bases %s\n", row->sequence_name, row->start, row->length, row->bases);
 
@@ -386,21 +390,36 @@ static unsigned int clip_alignment(Alignment *aln, Alignment *p_aln, int64_t sta
                     --row->length;
                 }
             }
-            char *bases = row->bases;
-            row->bases = row->length > 0 ? stString_getSubString(bases, 0, cut_point + 1) : "";
-            free(bases);
+            if (row->length == 0) {
+                row->bases[0] = '\0';
+            } else {
+                char *bases = row->bases;
+                row->bases = stString_getSubString(bases, 0, cut_point + 1);
+                free(bases);
+            }
             assert(strlen(row->bases) >= row->length);
             fprintf(stderr, "after right trim we have %s start %" PRIi64 " len %" PRIi64 " bases %s\n", row->sequence_name, row->start, row->length, row->bases);
         }
         aln->column_number -= right_trim;                
     }
 
-    // need to get rid of empty rows as they api doesn't handle them
+    // now we make sure any deleted rows are unlinked from prev alignment.
+    if (p_aln) {
+        for (Alignment_Row *row = p_aln->row; row != NULL; row = row->n_row) {
+            if (row->r_row && row->r_row->length == 0) {
+                assert(strlen(row->r_row->bases) == 0);
+                row->r_row = NULL;
+            }
+        }
+    }
+    
+    // then get rid of empty rows as they api doesn't handle them
     Alignment_Row *prev = NULL;
     Alignment_Row *next = NULL;
     for (Alignment_Row *row = aln->row; row != NULL; row = next) {
         next = row->n_row;
         if (row->length == 0) {
+            assert(strlen(row->bases) == 0);
             assert(prev != NULL);
             prev->n_row = next;
             Alignment_Row_destruct(row);
