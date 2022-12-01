@@ -1,6 +1,7 @@
 #include "taf.h"
 #include "tai.h"
 #include "htslib/bgzf.h"
+#include "htslib/kstring.h"
 #include <ctype.h>
 
 char *tai_path(const char *taf_path) {
@@ -53,65 +54,172 @@ char *tai_parse_region(const char *region, int64_t *start, int64_t *length) {
     return contig_length > 0 ? stString_getSubString(region, 0, contig_length) : NULL;
 }
 
-// todo: it would be nice to be able to use something from the taf.h API for this!!
-// but it's currently inside write_coordinates()
-static void write_tai_coorindates(Alignment *alignment, FILE* fh) {
-    int64_t i = 0;
-    for (Alignment_Row *row = alignment->row; row; row = row->n_row, ++i) {
-        // the first row is already present in our index as a "reference" column
-        if (i > 0) {
-            if (i > 1) {
-                fprintf(fh, " ");
+// gets the "reference" (first row) coordinate information
+// but only returns everything if there's a coordinate for every row in the column
+// this can happen when everything is an "i" like on the first line
+// or when everything is an "s" like on a repeat-coordinates-every-n-columns line
+static char *parse_coordinates_line(stList *tokens, int64_t *start, bool *strand,
+                                    bool run_length_encode_bases) {
+    int64_t j = -1;
+    if (!has_coordinates(tokens, &j)) {
+        return NULL;
+    }
+
+    int64_t num_bases = 0;
+    // todo: really should go through api for this one
+    if (run_length_encode_bases) {
+        assert(j > 1);
+        for (int64_t i = 0; i < j; ++i) {
+            char *token = (char*)stList_get(tokens, i);
+            if (isdigit(token[0])) {
+                num_bases += atol(token);
             }
-            fprintf(fh, "i %" PRIi64 " %s %" PRIi64 " %c %" PRIi64 "",
-                    i, row->sequence_name, row->start, row->strand ? '+' : '-', row->sequence_length);
+        }
+    } else {
+        assert(j == 1);
+        num_bases = strlen(stList_get(tokens, 0));
+    }
+    int64_t num_coordinates = 0;
+    char *seq = NULL;
+    int64_t sequence_length;
+    bool dummy;
+    int64_t n = stList_length(tokens);
+
+    ++j;
+    while (j < n) {
+        // copied from taf.c
+        char *op_type = stList_get(tokens, j++); // This is the operation
+        assert(strlen(op_type) == 1); // Must be a single character in length
+        int64_t row_index = atol(stList_get(tokens, j++)); // Get the index of the affected row
+        if(op_type[0] == 'i' || op_type[0] == 's') { // We have coordinates!
+            num_coordinates++;
+            if (row_index == 0) {
+                seq = parse_coordinates(&j, tokens, start, strand, &sequence_length);
+            } else {
+                // we parse but don't use
+                parse_coordinates(&j, tokens, &sequence_length, &dummy, &sequence_length);
+            }
+        } else {
+            seq = NULL;
+            break;
         }
     }
+
+    if (num_coordinates == num_bases) {
+        assert(seq != NULL);
+        return seq;
+    }
+
+    *start = -1;
+    return NULL;
+}
+
+// this is rather hacky: because our index points to
+// taf lines where all coordinates are listed as "s", but we
+// want to start new block parsers on these lines, we have to
+// convert the s's to i's to pretend we're starting new files
+static void change_s_coordinates_to_i(char *line) {
+    stList* tokens = stString_split(line);
+
+    int64_t j = -1;
+    bool hc = has_coordinates(tokens, &j);
+    int64_t dummy_int;
+    bool dummy_bool;
+    bool found_s = false;
+
+    if (hc) {
+        int64_t n = stList_length(tokens);
+        ++j;
+        while (j < n) {
+            char *op_type = stList_get(tokens, j++); // This is the operation
+            assert(strlen(op_type) == 1); // Must be a single character in length
+            if(op_type[0] == 'i' || op_type[0] == 's') { // We have coordinates!
+                found_s = op_type[0] == 's';
+                op_type[0] = 'i';
+                j++; // the row index;
+                // only parse to increment j (would rather use api than just add 4)
+                parse_coordinates(&j, tokens, &dummy_int, &dummy_bool, &dummy_int);
+            } else {
+                hc = false;
+                break;
+            }
+        }
+    }
+
+    if (hc) {
+        if (found_s) {
+            // overwrite our line
+            int64_t line_len = strlen(line);
+            int64_t k = 0;
+            int64_t n = stList_length(tokens);
+            for (j = 0; j < n; ++j) {
+                char *token = (char*)stList_get(tokens, j);
+                int64_t token_len = strlen(token);
+                char *spacer = j == 0 ? "" : " ";
+                assert(k + token_len + strlen(spacer) <= line_len);
+                sprintf(line + k, "%s%s", spacer, token);
+                k += strlen(token) + strlen(spacer);
+            }
+        }
+    } else {
+        fprintf(stderr, "Error loading coordinates from indexed taf line: %s\n", line);
+        exit(1);
+    }
+
+    stList_destruct(tokens);
 }
 
 int tai_index(LI *li, FILE* idx_fh, int64_t index_block_size){
-    Alignment *alignment, *p_alignment = NULL;
     char *prev_ref = NULL;
     int64_t prev_pos = 0;
-    int64_t prev_file_offset = bgzf_utell(li->bgzf);
     
     // read the TAF header
-    stList *tags = taf_read_header(li);    
+    stList *tags = taf_read_header(li);
     assert(stList_length(tags) % 2 == 0);
-
-    while((alignment = taf_read_block(p_alignment, false, li)) != NULL) {
-
-        char *cur_ref = alignment->row->sequence_name;
-        int64_t cur_offset = alignment->row->start;
-
-        // shouldn't need to handle negative strand on reference, right?
-        assert(alignment->row->strand != 0);
-
-        // we need to update our index if we're on a new reference contig
-        // or we're on the same contig but >= index_block_size bases away
-        if (!prev_ref || strcmp(cur_ref, prev_ref) != 0 ||
-            cur_offset - prev_pos >= index_block_size) {
-
-            fprintf(idx_fh, "%s\t%" PRIi64 "\t%" PRIi64 "\t%" PRIi64 "\t", cur_ref, cur_offset, prev_file_offset, alignment->row->sequence_length);
-            write_tai_coorindates(alignment, idx_fh);
-            fprintf(idx_fh, "\n");
+    bool run_length_encode_bases = 0;
+    for(int64_t i=0; i<stList_length(tags); i+=2) {
+        char *key = (char*)stList_get(tags, i);
+        char *value = (char*)stList_get(tags, i+1);
+        if(strcmp(key, "run_length_encode_bases") == 0 && strcmp(value, "1") == 0) {
+            run_length_encode_bases = 1;
         }
-
-        prev_ref = alignment->row->sequence_name;
-        prev_pos = alignment->row->start;
-        prev_file_offset = bgzf_utell(li->bgzf);
-        if(p_alignment != NULL) {
-            alignment_destruct(p_alignment);
-        }
-        p_alignment = alignment;
-
-    }
-    if(p_alignment != NULL) {
-        alignment_destruct(p_alignment);
     }
 
-    stList_destruct(tags);
-    
+    // scan the taf line by line
+    for (char *line = LI_get_next_line(li); line != NULL; line = LI_get_next_line(li)) {
+        stList* tokens = stString_split(line);
+        int64_t pos;
+        bool strand;
+        char *ref = parse_coordinates_line(tokens, &pos, &strand, run_length_encode_bases);
+        if (ref != NULL) {
+            // shouldn't need to handle negative strand on reference, right?
+            assert(strand == true);
+
+            // we need to update our index if we're on a new reference contig
+            // or we're on the same contig but >= index_block_size bases away
+            if (!prev_ref || strcmp(ref, prev_ref) != 0 ||
+                pos - prev_pos >= index_block_size) {
+                // we write contig - position - file_offset and that's it
+                fprintf(idx_fh, "%s\t%" PRIi64 "\t%" PRIi64 "\n", ref, pos, LI_tell(li));
+                fprintf(stderr, " writing index %s %ld %ld from line %s\n", ref, pos, LI_tell(li), line);
+
+                // test
+/*
+                BGZF *bgzf = bgzf_open("tests/tai/evolverMammals.rle.taf.gz", "rb");
+                bgzf_useek(bgzf, LI_tell(li), SEEK_SET);
+                assert(bgzf_utell(bgzf) == LI_tell(li));
+                kstring_t ks = KS_INITIALIZE;
+                bgzf_getline(bgzf, '\n', &ks);
+                fprintf(stderr, " test back is %ld %s\n\n\n", LI_tell(li), ks_release(&ks));
+                bgzf_close(bgzf);
+*/                
+            }
+            prev_ref = ref;
+            prev_pos = pos;
+        }
+        stList_destruct(tokens);
+        free(line);
+    }
     return 0;
 }
 
@@ -120,8 +228,6 @@ typedef struct _TaiRec {
     char *name;
     int64_t seq_pos;
     int64_t file_pos;
-    int64_t seq_len;
-    char *coords;    
 } TaiRec;
 
 static int taf_record_cmp(const void *v1, const void *v2) {
@@ -144,16 +250,14 @@ Tai *tai_load(FILE* idx_fh) {
     char *line;
     while ((line = LI_get_next_line(li)) != NULL) {
         stList* tokens = stString_splitByString(line, "\t");
-        if (stList_length(tokens) != 5) {
-            fprintf(stderr, "Skipping tai line that does not have 4 columns: %s\n", line);
+        if (stList_length(tokens) != 3) {
+            fprintf(stderr, "Skipping tai line that does not have 3 columns: %s\n", line);
             continue;
         }
         TaiRec* tr = (TaiRec*)st_calloc(1, sizeof(TaiRec));
         tr->name = stString_copy(stList_get(tokens, 0));
         tr->seq_pos = atol(stList_get(tokens, 1));
         tr->file_pos = atol(stList_get(tokens, 2));
-        tr->seq_len = atol(stList_get(tokens, 3));
-        tr->coords = stString_copy(stList_get(tokens, 4));
         stSortedSet_insert(taf_index, tr);
         stList_destruct(tokens);
     }
@@ -175,28 +279,6 @@ struct _TaiIt {
     bool run_length_encode_bases;
 };
 
-/*
- * Overwrite (!) LI's line buffer with a version that has full coordinate 
- * specification as obtained from the TaiRec.
- *
- * TODO: this is rather dirty, but simpler (and faster) than the alternative
- *       of scanning to the nearest full coordinate specification.  But...
- *       if/when we move to a binary-search mode that relies on scanning to full
- *       coordinates anyway, it will no longer be necessary
- */
-static void inject_full_coorindates(TaiRec *tr, LI *li) {
-    assert(li->line);
-    size_t end_of_bases = 0;
-    while (li->line[end_of_bases] != '\0' && !isspace(li->line[end_of_bases])) {
-        ++end_of_bases;
-    }
-    char *old_line = li->line;
-    li->line = st_calloc(1, sizeof(char) * (strlen(old_line) + strlen(tr->name) + strlen(tr->coords) + 256));
-    strncpy(li->line, old_line, end_of_bases);
-    free(old_line);
-    sprintf(li->line + end_of_bases, " ; i 0 %s %" PRIi64 " + %" PRIi64 " %s", tr->name, tr->seq_pos, tr->seq_len, tr->coords);
-}
-
 TaiIt *tai_iterator(Tai* tai, LI *li, bool run_length_encode_bases, const char *contig, int64_t start, int64_t length) {
 
     TaiIt *tai_it = st_calloc(1, sizeof(TaiIt));
@@ -213,8 +295,7 @@ TaiIt *tai_iterator(Tai* tai, LI *li, bool run_length_encode_bases, const char *
     qr.seq_pos = tai_it->start;
 
     TaiRec *tair_1 = stSortedSet_searchLessThanOrEqual(tai, &qr);
-    if (tair_1 == NULL ||
-        strcmp(tair_1->name, qr.name) != 0) {
+    if (tair_1 == NULL) {
         tai_iterator_destruct(tai_it);
         // there's no chance of finding the region as its contig isn't
         // in the index or its start position is too low
@@ -228,27 +309,25 @@ TaiIt *tai_iterator(Tai* tai, LI *li, bool run_length_encode_bases, const char *
 
     // now we know that the start of our region is somewhere in [tair_1, tair_2)
     // (with the possibility of tair_2 not existing)
-        
-    // we know that the start of our region is somewhere between TaiRec and the next one
 
     // move to the first record in our file
     LI_seek(li, tair_1->file_pos);
     LI_get_next_line(li);
 
     fprintf(stderr, "query n=%s sp=%" PRIi64 "\n", qr.name, qr.seq_pos);
-    fprintf(stderr, "tair_1 n=%s sp=%" PRIi64 " fp=%" PRIi64 " tags=%s\n", tair_1->name, tair_1->seq_pos, tair_1->file_pos, tair_1->coords);
+    fprintf(stderr, "tair_1 n=%s sp=%" PRIi64 " fp=%" PRIi64 "\n", tair_1->name, tair_1->seq_pos, tair_1->file_pos);
 
     if (tair_2) {
-        fprintf(stderr, "tair_2 n=%s sp=%" PRIi64 " fp=%" PRIi64 " tags=%s\n", tair_2->name, tair_2->seq_pos, tair_2->file_pos, tair_2->coords);
+        fprintf(stderr, "tair_2 n=%s sp=%" PRIi64 " fp=%" PRIi64 "\n", tair_2->name, tair_2->seq_pos, tair_2->file_pos);
     } else {
         fprintf(stderr, "tair_2 NULL\n");
     }
 
     // force taf to start a new alignment at our current file position by making
-    // a full coordinates line and reading it
-    inject_full_coorindates(tair_1, li);
-
-    fprintf(stderr, "taf line after injection %s\n", li->line);
+    // sure all coordinates are expressed as insertions
+    fprintf(stderr, "taf line before s-to-i %s\n", li->line);
+    change_s_coordinates_to_i(li->line);
+    fprintf(stderr, "taf line after s-to-i %s\n", li->line);
     
     // now we have to scan forward until we overlap actually the region
     // TODO: this will surely need speeding up with binary search for giant files...
@@ -257,11 +336,12 @@ TaiIt *tai_iterator(Tai* tai, LI *li, bool run_length_encode_bases, const char *
     tai_it->p_alignment = NULL;
     Alignment *alignment = NULL;
     Alignment *p_alignment = NULL;
+    int64_t file_pos = LI_tell(li);
     while((alignment = taf_read_block(p_alignment, tai_it->run_length_encode_bases, li)) != NULL) {
-        bool in_contig = strcmp(alignment->row->sequence_name, qr.name) == 0;
-        if (!in_contig ||
-            alignment->row->start >= tai_it->end) {
+        fprintf(stderr, "FILE POS %ld\n", file_pos);
+        if (tair_2 && file_pos >= tair_2->file_pos) {
             // we've gone past our query region: there's no hope
+            fprintf(stderr, "WOAH NELLY\n");
             alignment_destruct(alignment);
             if (p_alignment) {
                 alignment_destruct(p_alignment);
@@ -274,7 +354,8 @@ TaiIt *tai_iterator(Tai* tai, LI *li, bool run_length_encode_bases, const char *
                 alignment_destruct(p_alignment);
             }
             p_alignment = alignment;
-            if (in_contig && alignment->row->start < tai_it->end &&
+            if (strcmp(alignment->row->sequence_name, qr.name) == 0 &&
+                alignment->row->start < tai_it->end &&
                 (alignment->row->start + alignment->row->length) > tai_it->start) {
                 // important: need to cut off p_alignment to get our absolute coordinates
                 for (Alignment_Row *row = alignment->row; row != NULL; row = row->n_row) {
@@ -287,6 +368,7 @@ TaiIt *tai_iterator(Tai* tai, LI *li, bool run_length_encode_bases, const char *
                 
             }
         }
+        file_pos = LI_tell(li);
     }
     if (p_alignment != NULL) {
         alignment_destruct(p_alignment);

@@ -125,5 +125,24 @@ void taf_write_header(stList *tags, FILE *fh);
 void taf_write_block(Alignment *p_alignment, Alignment *alignment, bool run_length_encode_bases,
                      int64_t repeat_coordinates_every_n_columns, FILE *fh);
 
+
+// the following are low-level functions used in indexing.  they could
+// potentially be better put in an "internal" header
+
+/**
+ * Check if a tokenized TAF line has coordinates (ie search for ;)
+ * If coordinates found, the position of the simicolon in the list is set in j
+ */
+bool has_coordinates(stList *tokens, int64_t *j);
+
+/**
+ * Parse the coordinates coming after an "i" or "s" field on a TAF line
+ * Returns the sequence name (newly allocated) and sets the strand and
+ * position and length in the parameters. *j is the position of the "i" 
+ * or "s" in the tokenized line, and will be incremented for each field read
+ */
+char *parse_coordinates(int64_t *j, stList *tokens, int64_t *start, bool *strand,
+                        int64_t *sequence_length);
+
 #endif /* STTAF_H_ */
 

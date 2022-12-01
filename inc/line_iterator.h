@@ -13,6 +13,8 @@ typedef struct BGZF BGZF;
 typedef struct _LI {
     BGZF *bgzf;
     char *line;
+    int64_t prev_pos; // position before reading the current buffer
+    int64_t pos;      // position after reading the curent buffer    
 } LI;
 
 LI *LI_construct(FILE *fh);
@@ -34,7 +36,12 @@ char *LI_peek_at_next_line(LI *li);
 /*
  * Go to position in file
  */
-int64_t LI_seek(LI *li, int64_t position);
+void LI_seek(LI *li, int64_t position);
+
+/*
+ * Tell the position in the file (ie where current line buf was read from)
+ */
+int64_t LI_tell(LI *li);
 
 #endif /* STLINE_ITERATOR_H_ */
 

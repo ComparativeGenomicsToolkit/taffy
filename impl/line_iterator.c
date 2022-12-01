@@ -8,6 +8,8 @@ LI *LI_construct(FILE *fh) {
     li->bgzf = bgzf_dopen(fileno(fh), "r");
     assert(li->bgzf != NULL);
     kstring_t ks = KS_INITIALIZE;
+    li->prev_pos = bgzf_utell(li->bgzf);
+    li->pos = li->prev_pos;
     bgzf_getline(li->bgzf, '\n', &ks);
     li->line = ks_release(&ks);
     return li;
@@ -22,6 +24,8 @@ void LI_destruct(LI *li) {
 char *LI_get_next_line(LI *li) {
     char *l = li->line;
     kstring_t ks = KS_INITIALIZE;
+    li->prev_pos = li->pos;
+    li->pos = bgzf_utell(li->bgzf);
     bgzf_getline(li->bgzf, '\n', &ks);
     li->line = ks_release(&ks);
     return l;
@@ -31,6 +35,13 @@ char *LI_peek_at_next_line(LI *li) {
     return li->line;
 }
 
-int64_t LI_seek(LI *li, int64_t position) {
-    return bgzf_useek(li->bgzf, position, SEEK_SET);
+void LI_seek(LI *li, int64_t position) {
+    li->prev_pos = position;
+    li->pos = position;
+    int ret = bgzf_useek(li->bgzf, position, SEEK_SET);
+    assert(ret == 0);
+}
+
+int64_t LI_tell(LI *li) {
+    return li->prev_pos;
 }

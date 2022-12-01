@@ -3,7 +3,7 @@
 /*
  * Returns non-zero if the tokens list contains the coordinate marker ':'
  */
-static bool has_coordinates(stList *tokens, int64_t *j) {
+bool has_coordinates(stList *tokens, int64_t *j) {
     for(*j=0; *j<stList_length(tokens); (*j)++) {
         if(strcmp(stList_get(tokens, *j), ";") == 0) {
             return 1;
@@ -15,12 +15,14 @@ static bool has_coordinates(stList *tokens, int64_t *j) {
 /*
  * Parse the sequence_name, start, strand and sequence_length fields for a row
  */
-void parse_coordinates(Alignment_Row *row, int64_t *j, stList *tokens) {
-   row->sequence_name = stString_copy(stList_get(tokens, (*j)++));
-   row->start = atol(stList_get(tokens, (*j)++));
-   assert(strcmp(stList_get(tokens, (*j)), "+") == 0 || strcmp(stList_get(tokens, (*j)), "-") == 0);
-   row->strand = strcmp(stList_get(tokens, (*j)++), "+") == 0;
-   row->sequence_length = atol(stList_get(tokens, (*j)++));
+char *parse_coordinates(int64_t *j, stList *tokens, int64_t *start, bool *strand,
+                        int64_t *sequence_length) {  
+    char *sequence_name = stString_copy(stList_get(tokens, (*j)++));
+    *start = atol(stList_get(tokens, (*j)++));
+    assert(strcmp(stList_get(tokens, (*j)), "+") == 0 || strcmp(stList_get(tokens, (*j)), "-") == 0);
+    *strand = strcmp(stList_get(tokens, (*j)++), "+") == 0;
+    *sequence_length = atol(stList_get(tokens, (*j)++));
+    return sequence_name;
 }
 
 /*
@@ -72,10 +74,10 @@ static Alignment *parse_coordinates_and_establish_block(Alignment *p_block, stLi
             new_row->n_row = *row;
             *row = new_row;
             // Fill it out
-            parse_coordinates(new_row, &j, tokens);
+            new_row->sequence_name = parse_coordinates(&j, tokens, &new_row->start, &new_row->strand, &new_row->sequence_length);
         } else if(op_type[0] == 's') { // Is substituting a row
             free((*row)->sequence_name); // clean up
-            parse_coordinates(*row, &j, tokens);
+            (*row)->sequence_name = parse_coordinates(&j, tokens, &(*row)->start, &(*row)->strand, &(*row)->sequence_length);            
         } else if(op_type[0] == 'd') { // Is deleting a row
             // Remove the row from the list of rows
             alignment->row_number--;
