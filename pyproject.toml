@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0", "cffi>=1.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "taffy"
+version = "0.0.1"
+authors = [
+  { name="Benedict Paten", email="bpaten@ucsc.edu" },
+  { name="Glenn Hickey", email="glenn.hickey@gmail.com" },
+]
+description = "For manipulating taf and maf format alignments"
+readme = "README.md"
+requires-python = ">=3.7"
+dependencies = [
+    "cffi>=1.0.0",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/ComparativeGenomicsToolkit/taf"
+"Bug Tracker" = "https://github.com/ComparativeGenomicsToolkit/taf/issues"

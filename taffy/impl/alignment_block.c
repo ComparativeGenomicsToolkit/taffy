@@ -1,7 +1,68 @@
 #include "taf.h"
 #include "ond.h"
+#include "sonLib.h"
 
-void Alignment_Row_destruct(Alignment_Row *row) {
+void tag_destruct(Tag *tag) {
+    while(tag != NULL) {
+        Tag *p_tag = tag;
+        tag = tag->n_tag;
+        free(p_tag);
+    }
+}
+
+Tag *tag_find(Tag *tag, char *key) {
+    while(tag != NULL) {
+        if(strcmp(tag->key, key) == 0) {
+            return tag;
+        }
+        tag = tag->n_tag;
+    }
+    return NULL;
+}
+
+Tag *tag_remove(Tag *first_tag, char *key) {
+    if(strcmp(first_tag->key, key) == 0) { // If first tag is one to remove
+        return first_tag->n_tag;
+    }
+    // Tag to remove is not the first link
+    Tag *tag = first_tag;
+    while(tag->n_tag != NULL) {
+        if(strcmp(tag->n_tag->key, key) == 0) {
+            Tag *t = tag->n_tag;
+            tag->n_tag = tag->n_tag->n_tag; // Remove the link
+            free(t);
+            break;
+        }
+        tag = tag->n_tag;
+    }
+    return first_tag;
+}
+
+Tag *tag_construct(char *key, char *value, Tag *n_tag) {
+    Tag *tag = st_calloc(1, sizeof(Tag));
+    tag->key = stString_copy(key);
+    tag->value = stString_copy(value);
+    tag->n_tag = n_tag;
+    return tag;
+}
+
+Tag *tag_parse(char *tag_string, char *delimiter, Tag *p_tag) {
+    stList *tag_tokens = stString_splitByString(tag_string, delimiter);
+    if (stList_length(tag_tokens) != 2) {
+        st_errAbort("Tag not separated by '%s' character: %s\n", delimiter, tag_string);
+    }
+    Tag *tag = st_calloc(1, sizeof(Tag));
+    if(p_tag != NULL) { // If the p_tag is not null, set its n_tag to point at tag
+        p_tag->n_tag = tag;
+    }
+    tag->key = stList_get(tag_tokens, 0);
+    tag->value = stList_get(tag_tokens, 1);
+    stList_setDestructor(tag_tokens, NULL);
+    stList_destruct(tag_tokens);
+    return tag;
+}
+
+void alignment_row_destruct(Alignment_Row *row) {
     if(row->bases != NULL) {
         free(row->bases);
     }
@@ -14,17 +75,21 @@ void Alignment_Row_destruct(Alignment_Row *row) {
     free(row);
 }
 
-void alignment_destruct(Alignment *alignment) {
+void alignment_destruct(Alignment *alignment, bool cleanup_rows) {
     Alignment_Row *row = alignment->row;
-    while(row != NULL) {
-        Alignment_Row *r = row;
-        row = row->n_row;
-        Alignment_Row_destruct(r);
+    if(cleanup_rows) {
+        while (row != NULL) {
+            Alignment_Row *r = row;
+            row = row->n_row;
+            alignment_row_destruct(r);
+        }
     }
+    assert(alignment->column_tags != NULL);  // Clean up column tags
+    for(int64_t i=0; i<alignment->column_number; i++) {
+        tag_destruct(alignment->column_tags[i]);
+    }
+    free(alignment->column_tags);
     free(alignment);
-    if(alignment->tag_lists != NULL) {
-        stList_destruct(alignment->tag_lists);
-    }
 }
 
 static stList *get_rows_in_a_list(Alignment_Row *row) {
@@ -107,22 +172,35 @@ int64_t alignment_total_gap_length(Alignment *left_alignment) {
     return total_interstitial_gap_length;
 }
 
-stList *parse_header(stList *tokens, char *header_prefix, char *delimiter) {
-    stList *tags = stList_construct3(0, free);
+/*
+ * Returns a sequence of tags from the tokens, starting at starting_token
+ */
+Tag *parse_tags(stList *tokens, int64_t starting_token, char *delimiter) {
+    Tag *first_tag = NULL, *tag = NULL;
+    if(starting_token < stList_length(tokens)) { // parse first tag pair
+        tag = tag_parse(stList_get(tokens, starting_token), delimiter, NULL);
+        first_tag = tag;
+    }
+    for(int64_t i=starting_token+1; i<stList_length(tokens); i++) {
+        tag = tag_parse(stList_get(tokens, i), delimiter, tag);
+    }
+    return first_tag;
+}
+
+Tag *parse_header(stList *tokens, char *header_prefix, char *delimiter) {
     if(stList_length(tokens) == 0 || strcmp((char *)stList_get(tokens, 0), header_prefix) != 0) {
         st_errAbort("Header line does not start with %s\n", header_prefix);
     }
-    for(int64_t i=1; i<stList_length(tokens); i++) {
-        char *tag = stList_get(tokens, i);
-        stList *tag_tokens = stString_splitByString(tag, delimiter);
-        if(stList_length(tag_tokens) != 2) {
-            st_errAbort("Header line tags not separated by '%s' character: %s\n", delimiter, tag);
-        }
-        stList_append(tags, stString_copy(stList_get(tag_tokens, 0)));
-        stList_append(tags, stString_copy(stList_get(tag_tokens, 1)));
-        stList_destruct(tag_tokens);
+    return parse_tags(tokens, 1, delimiter);
+}
+
+void write_header(Tag *tag, FILE *fh, char *header_prefix, char *delimiter, char *end) {
+    fprintf(fh, "%s", header_prefix);
+    while(tag != NULL) {
+        fprintf(fh, " %s%s%s", tag->key, delimiter, tag->value);
+        tag = tag->n_tag;
     }
-    return tags;
+    fprintf(fh, "%s", end);
 }
 
 int64_t alignment_number_of_common_rows(Alignment *left_alignment, Alignment *right_alignment) {
@@ -396,21 +474,32 @@ Alignment *alignment_merge_adjacent(Alignment *left_alignment, Alignment *right_
         l_row = l_row->n_row; // Move to the next left alignment row
     }
 
-    // Fix the column_number attribute
-    left_alignment->column_number = left_alignment->column_number + right_alignment->column_number + interstitial_alignment_length;
+    // Calculate the number of columns in the merged alignment
+    int64_t total_column_number = left_alignment->column_number + right_alignment->column_number + interstitial_alignment_length;
 
     // Fix the tags
-    if(left_alignment->tag_lists != NULL) {
-        assert(right_alignment->tag_lists != NULL);
-        for(int64_t i=0; i<interstitial_alignment_length; i++) { // Add empty tag lists for new columns
-            stList_append(left_alignment->tag_lists, stList_construct3(0, free));
+    if(left_alignment->column_tags != NULL) {
+        assert(right_alignment->column_tags != NULL);
+        Tag **combined_column_tags = st_malloc(sizeof(Tag *) * total_column_number); // Allocate an expanded set of columns
+        int64_t j=0;
+        for(int64_t i=0; i<left_alignment->column_number; i++) { // Add the left alignment's column's tags
+            combined_column_tags[j++] = left_alignment->column_tags[i];
         }
-        stList_appendAll(left_alignment->tag_lists, right_alignment->tag_lists);
-        stList_setDestructor(right_alignment->tag_lists, NULL); // to stop the held lists from being freed
+        for(int64_t i=0; i<interstitial_alignment_length; i++) { // Add empty tag lists for new columns
+            combined_column_tags[j++] = NULL;
+        }
+        for(int64_t i=0; i<right_alignment->column_number; i++) { // Add the right alignment's column's tags
+            combined_column_tags[j++] = right_alignment->column_tags[i];
+        }
+        free(left_alignment->column_tags); // Cleanup, but not the tag strings which we copied
+        left_alignment->column_tags = combined_column_tags;
     }
 
+    // Fix column number
+    left_alignment->column_number = total_column_number;
+
     // Clean up
-    alignment_destruct(right_alignment);  // Delete the right alignment
+    alignment_destruct(right_alignment, 1);  // Delete the right alignment
     free(right_gap);
 
     return left_alignment;

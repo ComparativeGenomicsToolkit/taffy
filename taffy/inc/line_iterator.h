@@ -1,7 +1,6 @@
 #ifndef STLINE_ITERATOR_H_
 #define STLINE_ITERATOR_H_
 
-#include "sonLib.h"
 #include <stdio.h>
 typedef struct BGZF BGZF;
 

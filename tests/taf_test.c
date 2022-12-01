@@ -1,13 +1,28 @@
 #include "CuTest.h"
 #include "taf.h"
+#include "sonLib.h"
 
-static stList *get_random_tags() {
+static char *get_random_tags() {
     stList *tags = stList_construct3(0, free);
     while(st_random() > 0.5) {
-        stList_append(tags, stString_print("%f", st_random()));
-        stList_append(tags, stString_print("%f", st_random()));
+        stList_append(tags, stString_print("%f:%f", st_random(), st_random()));
     }
-    return tags;
+    char *tag_string = stString_join2(" ", tags);
+    stList_destruct(tags);
+    return tag_string;
+}
+
+Tag *parse_tags(stList *tokens, int64_t starting_token, char *delimiter);
+
+void check_tags(CuTest *testCase, Tag *t, Tag *j) {
+    while(t != NULL) {
+        CuAssertTrue(testCase, j != NULL);
+        CuAssertStrEquals(testCase, t->key, j->key);
+        CuAssertStrEquals(testCase, t->value, j->value);
+        t = t->n_tag;
+        j = j->n_tag;
+    }
+    CuAssertTrue(testCase, j == NULL);
 }
 
 static void test_taf(CuTest *testCase) {
@@ -15,7 +30,7 @@ static void test_taf(CuTest *testCase) {
     char *example_file = "./tests/evolverMammals.maf"; // "./tests/chr2_KI270776v1_alt.maf.1"; // "./tests/chr2_KI270893v1_alt.maf"; //"./tests/chr2_KI270776v1_alt.maf";
     char *temp_copy = "./tests/evolverMammals.taf"; //"./tests/chr2_KI270776v1_alt.taf.1"; // "./tests/chr2_KI270893v1_alt.taf"; //"./tests/chr2_KI270776v1_alt.taf";
     bool run_length_encode_bases = 0;
-    stList *column_tags = stList_construct3(0, (void (*)(void *))stList_destruct);
+    stList *column_tags = stList_construct3(0, (void (*)(void *))tag_destruct);
 
     // Write out the taf file
     FILE *file = fopen(example_file, "r");
@@ -27,21 +42,23 @@ static void test_taf(CuTest *testCase) {
         }
 
         // Make random tags for each column
-        alignment->tag_lists = stList_construct();
+        alignment->column_tags = st_malloc(sizeof(Tag *) * alignment->column_number);
         for(int64_t i=0; i<alignment->column_number; i++) {
-            stList *tags = get_random_tags();
-            stList_append(alignment->tag_lists, tags);
-            stList_append(column_tags, tags);
+            char *tag_string = get_random_tags();
+            stList *tokens = stString_split(tag_string);
+            alignment->column_tags[i] = parse_tags(tokens, 0, ":");
+            stList_append(column_tags, parse_tags(tokens, 0, ":"));
+            stList_destruct(tokens);
         }
 
         taf_write_block(p_alignment, alignment, run_length_encode_bases, 1000, out_file);
         if(p_alignment != NULL) {
-            alignment_destruct(p_alignment);
+            alignment_destruct(p_alignment, 1);
         }
         p_alignment = alignment;
     }
     if(p_alignment != NULL) {
-        alignment_destruct(p_alignment);
+        alignment_destruct(p_alignment, 1);
     }
     fclose(file);
     fclose(out_file);
@@ -77,23 +94,17 @@ static void test_taf(CuTest *testCase) {
 
         // Check the tags are the same
         for(int64_t i=0; i<alignment2->column_number; i++) {
-            stList *tags = stList_get(alignment2->tag_lists, i);
-            stList *tags2 = stList_get(column_tags, column_index++);
-            // Check they are the same
-            CuAssertIntEquals(testCase, stList_length(tags), stList_length(tags2));
-            for(int64_t j=0; j<stList_length(tags); j++) {
-                CuAssertStrEquals(testCase, stList_get(tags, j), stList_get(tags2, j));
-            }
+            check_tags(testCase, alignment2->column_tags[i], stList_get(column_tags, column_index++));
         }
 
-        alignment_destruct(alignment);
+        alignment_destruct(alignment, 1);
         if(p_alignment2 != NULL) {
-            alignment_destruct(p_alignment2);
+            alignment_destruct(p_alignment2, 1);
         }
         p_alignment2 = alignment2;
     }
     if(p_alignment2 != NULL) {
-        alignment_destruct(p_alignment2);
+        alignment_destruct(p_alignment2, 1);
     }
     CuAssertTrue(testCase, taf_read_block(p_alignment2, run_length_encode_bases, li) == NULL);
     CuAssertIntEquals(testCase, stList_length(column_tags), column_index);

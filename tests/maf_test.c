@@ -1,5 +1,6 @@
 #include "CuTest.h"
 #include "taf.h"
+#include "sonLib.h"
 
 static void test_maf(CuTest *testCase) {
     // Example maf file
@@ -13,7 +14,7 @@ static void test_maf(CuTest *testCase) {
     while((alignment = maf_read_block(file)) != NULL) {
         //maf_write_block(alignment, stdout);
         maf_write_block(alignment, out_file);
-        alignment_destruct(alignment);
+        alignment_destruct(alignment, 1);
     }
     fclose(file);
     fclose(out_file);
@@ -40,8 +41,8 @@ static void test_maf(CuTest *testCase) {
         }
         CuAssertTrue(testCase, row2 == NULL);
 
-        alignment_destruct(alignment);
-        alignment_destruct(alignment2);
+        alignment_destruct(alignment, 1);
+        alignment_destruct(alignment2, 1);
     }
     CuAssertTrue(testCase, maf_read_block(file_copy) == NULL);
 

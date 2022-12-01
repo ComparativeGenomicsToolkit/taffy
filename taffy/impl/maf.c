@@ -2,6 +2,7 @@
 // Created by Benedict Paten on 8/25/22.
 
 #include "taf.h"
+#include "sonLib.h"
 
 Alignment *maf_read_block(FILE *fh) {
     while(1) {
@@ -50,6 +51,7 @@ Alignment *maf_read_block(FILE *fh) {
                 stList_destruct(tokens);
                 if(alignment->row_number == 1) {
                     alignment->column_number = strlen(row->bases);
+                    alignment->column_tags = st_calloc(alignment->column_number, sizeof(Tag *));
                 }
                 else {
                     assert(alignment->column_number == strlen(row->bases));
@@ -64,14 +66,16 @@ Alignment *maf_read_block(FILE *fh) {
     }
 }
 
-stList *maf_read_header(FILE *fh) {
+Tag *parse_header(stList *tokens, char *header_prefix, char *delimiter);
+
+Tag *maf_read_header(FILE *fh) {
     char *line = stFile_getLineFromFile(fh);
     stList *tokens = stString_split(line);
     free(line);
-    stList *tags = parse_header(tokens, "##maf", "=");
+    Tag *tag = parse_header(tokens, "##maf", "=");
     stList_destruct(tokens);
 
-    return tags;
+    return tag;
 }
 
 void maf_write_block(Alignment *alignment, FILE *fh) {
@@ -85,13 +89,10 @@ void maf_write_block(Alignment *alignment, FILE *fh) {
     fprintf(fh, "\n"); // Add a blank line at the end of the block
 }
 
-void maf_write_header(stList *tags, FILE *fh) {
-    assert(stList_length(tags) % 2 == 0); // list must be a sequence of alternative key:value pairs
-    fprintf(fh, "##maf");
-    for(int64_t i=0; i<stList_length(tags); i+=2) {
-        fprintf(fh, " %s=%s", (char *)stList_get(tags, i), (char *)stList_get(tags, i+1));
-    }
-    fprintf(fh, "\n\n"); // Add an extra new line to space between the header and the a lines
+void write_header(Tag *tag, FILE *fh, char *header_prefix, char *delimiter, char *end);
+
+void maf_write_header(Tag *tag, FILE *fh) {
+    write_header(tag, fh, "##maf", "=", "\n\n");
 }
 
 

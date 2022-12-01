@@ -1,20 +1,31 @@
 #ifndef STTAF_H_
 #define STTAF_H_
 
-#include "sonLib.h"
+#include <inttypes.h>
+#include <stdio.h>
+#include <stdbool.h>
+
 #include "line_iterator.h"
 
 /*
  * Structures to represent blocks of an alignment
  */
+
+typedef struct _tag Tag;
+
+struct _tag {
+    char *key;
+    char *value;
+    Tag *n_tag; // Next tag in list
+};
+
 typedef struct _row Alignment_Row;
 
 typedef struct _alignment {
     int64_t row_number; // Convenient counter of number rows in the alignment
     int64_t column_number; // Convenient counter of number of columns in this alignment
     Alignment_Row *row; // An alignment is just a sequence of rows
-    stList *tag_lists; // A list of lists, each sub-list represents the string of tags for the corresponding
-    // column - for each column the tags are stored as a sequence [key, value]xN - may be NULL if no tags for block
+    Tag **column_tags; // The tags for each column, each stored as a sequence of tags
 } Alignment;
 
 struct _row { // Each row encodes the information about an aligned sequence
@@ -32,26 +43,36 @@ struct _row { // Each row encodes the information about an aligned sequence
 };
 
 /*
+ * Make a tag
+ */
+Tag *tag_construct(char *key, char *value, Tag *n_tag);
+
+/*
+ * Cleanup a sequence of tags
+ */
+void tag_destruct(Tag *tag);
+
+/*
+ * Find a tag with a given key
+ */
+Tag *tag_find(Tag *tag, char *key);
+
+/*
+ * Remove a tag, cleaning it up. Returns the modified sequence.
+ */
+Tag *tag_remove(Tag *first_tag, char *key);
+
+/*
+ * Parse a tag from a string.
+ *
+ * If p_tag is not null will set p_tag->n_tag = tag, where tag is the parsed tag.
+ */
+Tag *tag_parse(char *tag_string, char *delimiter, Tag *p_tag);
+
+/*
  * Clean up the memory for an alignment
  */
-void alignment_destruct(Alignment *alignment);
-
-/*
- * Cleanup a row
- */
-void Alignment_Row_destruct(Alignment_Row *row);
-
-/*
- * Returns non-zero if left_row represents a substring on the same contig and strand as right_row, but
- * immediately before
- */
-bool alignment_row_is_predecessor(Alignment_Row *left_row, Alignment_Row *right_row);
-
-/*
- * Parse a header line that mist start with the header_prefix and then be composed of a series of key value tags,
- * each delimited by the delimiter word.
- */
-stList *parse_header(stList *tokens, char *header_prefix, char *delimiter);
+void alignment_destruct(Alignment *alignment, bool cleanup_rows);
 
 /*
  * Use the O(ND) alignment to diff the rows between two alignments and connect together their rows
@@ -84,9 +105,20 @@ int64_t alignment_number_of_common_rows(Alignment *left_alignment, Alignment *ri
 Alignment *alignment_merge_adjacent(Alignment *left_alignment, Alignment *right_alignment);
 
 /*
+ * Cleanup a row
+ */
+void alignment_row_destruct(Alignment_Row *row);
+
+/*
+ * Returns non-zero if left_row represents a substring on the same contig and strand as right_row, but
+ * immediately before
+ */
+bool alignment_row_is_predecessor(Alignment_Row *left_row, Alignment_Row *right_row);
+
+/*
  * Read a maf header line
  */
-stList *maf_read_header(FILE *fh);
+Tag *maf_read_header(FILE *fh);
 
 /*
  * Read a maf alignment block from the file stream. Return NULL if none available
@@ -96,17 +128,18 @@ Alignment *maf_read_block(FILE *fh);
 /*
  * Write a maf header line
  */
-void maf_write_header(stList *tags, FILE *fh);
+void maf_write_header(Tag *tag, FILE *fh);
 
 /*
  * Write a maf block
  */
 void maf_write_block(Alignment *alignment, FILE *fh);
 
+
 /*
  * Read a taf header line
  */
-stList *taf_read_header(LI *li);
+Tag *taf_read_header(LI *li);
 
 /*
  * Read a taf block - that is a column with column coordinates and all subsequent coordinate-less columns that
@@ -117,7 +150,7 @@ Alignment *taf_read_block(Alignment *p_block, bool run_length_encode_bases, LI *
 /*
  * Write a taf header line
  */
-void taf_write_header(stList *tags, FILE *fh);
+void taf_write_header(Tag *tag, FILE *fh);
 
 /*
  * Write a taf block.

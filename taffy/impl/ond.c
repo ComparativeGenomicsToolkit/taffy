@@ -5,6 +5,7 @@
  */
 
 #include "ond.h"
+#include "sonLib.h"
 
 typedef struct _WF {
     /*
