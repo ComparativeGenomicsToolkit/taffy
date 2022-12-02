@@ -99,9 +99,12 @@ static char *parse_coordinates_line(stList *tokens, int64_t *start, bool *strand
                 // we parse but don't use
                 parse_coordinates(&j, tokens, &sequence_length, &dummy, &sequence_length);
             }
+        } else if (op_type[0] == 'd') {
+        } else if (op_type[0] == 'g') {
+            j++;
         } else {
-            seq = NULL;
-            break;
+            assert(op_type[0] == 'G');
+            j++;
         }
     }
 
@@ -129,36 +132,49 @@ static void change_s_coordinates_to_i(char *line) {
 
     if (hc) {
         int64_t n = stList_length(tokens);
+        bool *mask = st_calloc(n, sizeof(bool));        
         ++j;
         while (j < n) {
             char *op_type = stList_get(tokens, j++); // This is the operation
+            j++; // the row index;
             assert(strlen(op_type) == 1); // Must be a single character in length
             if(op_type[0] == 'i' || op_type[0] == 's') { // We have coordinates!
                 found_s = op_type[0] == 's';
                 op_type[0] = 'i';
-                j++; // the row index;
                 // only parse to increment j (would rather use api than just add 4)
                 parse_coordinates(&j, tokens, &dummy_int, &dummy_bool, &dummy_int);
+            } else if (op_type[0] == 'd') {
+                mask[j-2] = true;
+                mask[j-1] = true;
+            } else if (op_type[0] == 'g') {
+                mask[j-2] = true;
+                mask[j-1] = true;
+                mask[j] = true;
+                j++;
             } else {
-                hc = false;
-                break;
+                assert(op_type[0] == 'G');
+                mask[j-2] = true;
+                mask[j-1] = true;
+                mask[j] = true;
+                j++;
             }
         }
-    }
-
-    if (hc) {
+        
         if (found_s) {
             // overwrite our line
             int64_t line_len = strlen(line);
             int64_t k = 0;
             int64_t n = stList_length(tokens);
+            assert(mask[0] == false);
             for (j = 0; j < n; ++j) {
                 char *token = (char*)stList_get(tokens, j);
-                int64_t token_len = strlen(token);
-                char *spacer = j == 0 ? "" : " ";
-                assert(k + token_len + strlen(spacer) <= line_len);
-                sprintf(line + k, "%s%s", spacer, token);
-                k += strlen(token) + strlen(spacer);
+                if (mask[j] == false) {
+                    int64_t token_len = strlen(token);
+                    char *spacer = j == 0 ? "" : " ";
+                    assert(k + token_len + strlen(spacer) <= line_len);
+                    sprintf(line + k, "%s%s", spacer, token);
+                    k += strlen(token) + strlen(spacer);
+                }
             }
         }
     } else {
@@ -199,9 +215,9 @@ int tai_create(LI *li, FILE* idx_fh, int64_t index_block_size){
                 pos - prev_pos >= index_block_size) {
                 // we write contig - position - file_offset and that's it
                 fprintf(idx_fh, "%s\t%" PRIi64 "\t%" PRIi64 "\n", ref, pos, LI_tell(li));
+                prev_ref = ref;
+                prev_pos = pos;                
             }
-            prev_ref = ref;
-            prev_pos = pos;
         }
         stList_destruct(tokens);
         free(line);
