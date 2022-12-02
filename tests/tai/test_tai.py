@@ -72,11 +72,13 @@ def test_tai(regions_path, taf_path, bgzip, block_size):
 sys.stderr.write("Running tai tests...\n")
 maf_path = './tests/evolverMammals.maf'
 taf_path = './tests/tai/evolverMammals.taf'
-sys.stderr.write(" * creating evolver taf {}\n".format(taf_path))
+sys.stderr.write(" * creating evolver taf {}".format(taf_path))
 subprocess.check_call(['./bin/maf_to_taf', '-i', maf_path, '-o', taf_path])
+sys.stderr.write("\t\t\tOK\n")
 taf_rle_path = './tests/tai/evolverMammals.rle.taf'
-sys.stderr.write(" * creating run length encoded evolver taf {}\n".format(taf_rle_path))
+sys.stderr.write(" * creating run length encoded evolver taf {}".format(taf_rle_path))
 subprocess.check_call(['./bin/maf_to_taf', '-i', maf_path, '-o', taf_rle_path, '-r'])
+sys.stderr.write("\t\t\tOK\n")    
 regions_path = './tests/tai/evolverMammals_subregions.bed'
 
 test_tai(regions_path, taf_path, False, 111)

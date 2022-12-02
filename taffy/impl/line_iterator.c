@@ -1,17 +1,28 @@
 #include "line_iterator.h"
 #include "sonLib.h"
+
+#ifdef USE_HTSLIB
 #include "htslib/bgzf.h"
 #include "htslib/kstring.h"
+#endif
+
+struct _LI {
+#ifdef USE_HTSLIB
+    BGZF *bgzf;
+#else
+    FILE *fh;
+#endif
+    char *line;
+    int64_t prev_pos; // position before reading the current buffer
+    int64_t pos;      // position after reading the curent buffer    
+};
 
 LI *LI_construct(FILE *fh) {
     LI *li = st_calloc(1, sizeof(LI));
+#ifdef USE_HTSLIB
     li->bgzf = bgzf_dopen(fileno(fh), "r");
     assert(li->bgzf != NULL);
-    if (li->bgzf->is_compressed) {
-        if (bgzf_compression(li->bgzf) != 2) {
-            fprintf(stderr, "Input file must be compressed with bgzip, not gzip\n");
-            exit(1);
-        }
+    if (bgzf_compression(li->bgzf) == 2) {
         if (bgzf_index_build_init(li->bgzf) != 0) {
             assert(false);
         }
@@ -21,22 +32,44 @@ LI *LI_construct(FILE *fh) {
     li->pos = li->prev_pos;
     bgzf_getline(li->bgzf, '\n', &ks);
     li->line = ks_release(&ks);
+#else
+    li->fh = fh;
+    li->prev_pos = ftell(li->fh);
+    li->pos = li->prev_pos;
+    li->line = stFile_getLineFromFile(fh);
+#endif
     return li;
 }
 
 void LI_destruct(LI *li) {
-    free(li->line);
-    // todo: review, as the file is currently getting closed by client
+#ifdef USE_HTSLIB
     bgzf_close(li->bgzf);
+#endif
+    free(li);
+}
+
+bool LI_indexable(LI *li) {
+    assert(li != NULL);
+#ifdef USE_HTSLIB
+    int bc = bgzf_compression(li->bgzf);
+    return bc == 0 || bc == 2;
+#else
+    return true;
+#endif
 }
 
 char *LI_get_next_line(LI *li) {
     char *l = li->line;
-    kstring_t ks = KS_INITIALIZE;
     li->prev_pos = li->pos;
+#ifdef USE_HTSLIB
+    kstring_t ks = KS_INITIALIZE;
     li->pos = bgzf_tell(li->bgzf);
     bgzf_getline(li->bgzf, '\n', &ks);
     li->line = ks_release(&ks);
+#else
+    li->pos = ftell(li->fh);
+    li->line = stFile_getLineFromFile(li->fh);
+#endif
     return l;
 }
 
@@ -47,7 +80,11 @@ char *LI_peek_at_next_line(LI *li) {
 void LI_seek(LI *li, int64_t position) {
     li->prev_pos = position;
     li->pos = position;
+#ifdef USE_HTSLIB
     int ret = bgzf_seek(li->bgzf, position, SEEK_SET);
+#else
+    int ret = fseek(li->fh, position, SEEK_SET);
+#endif
     assert(ret == 0);
 }
 

@@ -102,6 +102,10 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     LI *li = LI_construct(taf_fh);
+    if (!LI_indexable(li)) {
+        fprintf(stderr, "Input TAF file must be either uncompressed or bgzipped: gzip not supported: %s\n", taf_fn);
+        return 1;
+    }
 
     FILE *out_fh = out_fn == NULL ? stdout : fopen(out_fn, "w");
     if (out_fh == NULL) {

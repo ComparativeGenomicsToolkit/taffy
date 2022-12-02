@@ -89,6 +89,10 @@ int main(int argc, char *argv[]) {
     st_logInfo("Output index file : %s\n", tai_fn);
     FILE *tai_fh = fopen(tai_fn, "w");    
     LI *li = LI_construct(taf_fh);
+    if (!LI_indexable(li)) {
+        fprintf(stderr, "Input TAF file must be either uncompressed or bgzipped: gzip not supported: %s\n", taf_fn);
+        return 1;
+    }
 
     tai_create(li, tai_fh, block_size);
 

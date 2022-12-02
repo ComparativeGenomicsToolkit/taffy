@@ -3,6 +3,7 @@
 
 #include <stdio.h>
 #include <stdint.h>
+#include "sonLib.h"
 
 typedef struct BGZF BGZF;
 
@@ -11,16 +12,17 @@ typedef struct BGZF BGZF;
  * and "peek" at lines before choosing to get them.
  */
 
-typedef struct _LI {
-    BGZF *bgzf;
-    char *line;
-    int64_t prev_pos; // position before reading the current buffer
-    int64_t pos;      // position after reading the curent buffer    
-} LI;
+typedef struct _LI LI;
 
 LI *LI_construct(FILE *fh);
 
 void LI_destruct(LI *li);
+
+/*
+ * Check if the underlying file is indexable
+ * Will be true for bgzipped and uncompressed, false for gzipped
+ */
+bool LI_indexable(LI *li);
 
 /*
  * Get the next line from the file or NULL if at EOF.

@@ -67,10 +67,13 @@ dataSetsPath=/Users/benedictpaten/Dropbox/Documents/work/myPapers/genomeCactusPa
 
 inclDirs = taffy/inc taffy/submodules/sonLib/C/inc taffy/submodules/sonLib/externalTools/cutest
 
-# we build against htslib for bgzip support, relying on a system installation
-# rather than adding as another submodule
-HTSLIB_CFLAGS = $(shell pkg-config htslib --cflags)
-HTSLIB_LIBS = $(shell pkg-config htslib --libs)
+# htslib will be used only if it can be found via pkg-config
+# without it, taf won't support bgzipped input (but is otherwise the same)
+HAVE_HTSLIB = $(shell pkg-config --exists htslib; echo $$?)
+ifeq (${HAVE_HTSLIB},0)
+	HTSLIB_CFLAGS = $(shell pkg-config htslib --cflags) -DUSE_HTSLIB
+	HTSLIB_LIBS = $(shell pkg-config htslib --libs)
+endif
 
 CFLAGS += ${inclDirs:%=-I${rootPath}/%} -I${LIBDIR} -I${rootPath}/include  ${HTSLIB_CFLAGS}
 CXXFLAGS += ${inclDirs:%=-I${rootPath}/%} -I${LIBDIR} -I${rootPath}/include ${HTSLIB_CFLAGS}

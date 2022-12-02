@@ -357,7 +357,7 @@ TaiIt *tai_iterator(Tai* tai, LI *li, bool run_length_encode_bases, const char *
 
     // force taf to start a new alignment at our current file position by making
     // sure all coordinates are expressed as insertions
-    change_s_coordinates_to_i(li->line);
+    change_s_coordinates_to_i(LI_peek_at_next_line(li));
     
     // now we have to scan forward until we overlap actually the region
     // TODO: this will surely need speeding up with binary search for giant files...
