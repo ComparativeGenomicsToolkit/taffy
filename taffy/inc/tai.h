@@ -11,7 +11,7 @@
 
 #include "line_iterator.h"
 
-typedef stSortedSet Tai;
+typedef struct _Tai Tai;
 typedef struct _TaiIt TaiIt;
 
 /* Return taf_path + .tai 

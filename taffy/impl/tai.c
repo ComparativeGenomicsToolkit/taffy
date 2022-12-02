@@ -188,6 +188,7 @@ static void change_s_coordinates_to_i(char *line) {
 int tai_create(LI *li, FILE* idx_fh, int64_t index_block_size){
     char *prev_ref = NULL;
     int64_t prev_pos = 0;
+    int64_t prev_file_pos = 0;
     
     // read the TAF header
     bool run_length_encode_bases = 0;
@@ -211,12 +212,18 @@ int tai_create(LI *li, FILE* idx_fh, int64_t index_block_size){
 
             // we need to update our index if we're on a new reference contig
             // or we're on the same contig but >= index_block_size bases away
-            if (!prev_ref || strcmp(ref, prev_ref) != 0 ||
-                pos - prev_pos >= index_block_size) {
-                // we write contig - position - file_offset and that's it
-                fprintf(idx_fh, "%s\t%" PRIi64 "\t%" PRIi64 "\n", ref, pos, LI_tell(li));
+            bool same_ref = prev_ref && strcmp(ref, prev_ref) == 0;
+            if (!same_ref || pos - prev_pos >= index_block_size) {
+                int64_t file_pos = LI_tell(li);
+                if (same_ref) {
+                    // save a little space by writing relative coordinates
+                    fprintf(idx_fh, "*\t%" PRIi64 "\t%" PRIi64 "\n", pos-prev_pos, file_pos-prev_file_pos);
+                } else {
+                    fprintf(idx_fh, "%s\t%" PRIi64 "\t%" PRIi64 "\n", ref, pos, file_pos);
+                }
                 prev_ref = ref;
-                prev_pos = pos;                
+                prev_pos = pos;
+                prev_file_pos = file_pos;
             }
         }
         stList_destruct(tokens);
@@ -232,7 +239,7 @@ typedef struct _TaiRec {
     int64_t file_pos;
 } TaiRec;
 
-static int taf_record_cmp(const void *v1, const void *v2) {
+static int tai_record_cmp(const void *v1, const void *v2) {
     TaiRec *tr1 = (TaiRec*)v1;
     TaiRec *tr2 = (TaiRec*)v2;
     int ret = strcmp(tr1->name, tr2->name);
@@ -246,29 +253,57 @@ static int taf_record_cmp(const void *v1, const void *v2) {
     return ret;
 }
 
+struct _Tai {
+    stSortedSet *idx;
+    stList *names; // just to keep track of memory -- we only keep one instance of each sequence name
+};
+
+static Tai *tai_construct() {
+    Tai *tai = st_calloc(1, sizeof(Tai));
+    tai->idx = stSortedSet_construct3(tai_record_cmp, free);
+    tai->names = stList_construct3(0, free);
+    return tai;
+}
+
+void tai_destruct(Tai* tai) {
+    stSortedSet_destruct(tai->idx);
+    stList_destruct(tai->names);
+    free(tai);
+}
+
 Tai *tai_load(FILE* idx_fh) {
-    stSortedSet *taf_index = stSortedSet_construct3(taf_record_cmp, free);
+    Tai *tai = tai_construct();
     LI* li = LI_construct(idx_fh);
     char *line;
+    TaiRec *prev_rec = NULL;
     while ((line = LI_get_next_line(li)) != NULL) {
         stList* tokens = stString_splitByString(line, "\t");
         if (stList_length(tokens) != 3) {
             fprintf(stderr, "Skipping tai line that does not have 3 columns: %s\n", line);
             continue;
         }
-        TaiRec* tr = (TaiRec*)st_calloc(1, sizeof(TaiRec));
-        tr->name = stString_copy(stList_get(tokens, 0));
-        tr->seq_pos = atol(stList_get(tokens, 1));
-        tr->file_pos = atol(stList_get(tokens, 2));
-        stSortedSet_insert(taf_index, tr);
+        TaiRec* rec = (TaiRec*)st_calloc(1, sizeof(TaiRec));
+        rec->seq_pos = atol(stList_get(tokens, 1));
+        rec->file_pos = atol(stList_get(tokens, 2));
+        char *name = (char*)stList_get(tokens, 0);
+        if (strcmp(name, "*") == 0) {
+            if (prev_rec == NULL) {
+                fprintf(stderr, "Unable to deduce name from tai line: %s\n", line);
+                exit(1);
+            }
+            rec->name = prev_rec->name;
+            rec->seq_pos += prev_rec->seq_pos;
+            rec->file_pos += prev_rec->file_pos;
+        } else {
+            rec->name = stString_copy(stList_get(tokens, 0));
+            stList_append(tai->names, rec->name);
+        }
+        stSortedSet_insert(tai->idx, rec);
         stList_destruct(tokens);
+        prev_rec = rec;
     }
     LI_destruct(li);
-    return taf_index;
-}
-
-void tai_destruct(Tai* idx) {
-    stSortedSet_destruct(idx);
+    return tai;
 }
 
 struct _TaiIt {
@@ -296,7 +331,7 @@ TaiIt *tai_iterator(Tai* tai, LI *li, bool run_length_encode_bases, const char *
     qr.name = tai_it->name;
     qr.seq_pos = tai_it->start;
 
-    TaiRec *tair_1 = stSortedSet_searchLessThanOrEqual(tai, &qr);
+    TaiRec *tair_1 = stSortedSet_searchLessThanOrEqual(tai->idx, &qr);
     if (tair_1 == NULL) {
         tai_iterator_destruct(tai_it);
         // there's no chance of finding the region as its contig isn't
@@ -307,7 +342,7 @@ TaiIt *tai_iterator(Tai* tai, LI *li, bool run_length_encode_bases, const char *
 
     // sorted set doesn't let us iterate, so we use a second lookup to get
     // the next record
-    TaiRec *tair_2 = stSortedSet_searchGreaterThan(tai, &qr);
+    TaiRec *tair_2 = stSortedSet_searchGreaterThan(tai->idx, &qr);
 
     // now we know that the start of our region is somewhere in [tair_1, tair_2)
     // (with the possibility of tair_2 not existing)
