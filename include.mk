@@ -72,7 +72,11 @@ inclDirs = taffy/inc taffy/submodules/sonLib/C/inc taffy/submodules/sonLib/exter
 HAVE_HTSLIB = $(shell pkg-config --exists htslib; echo $$?)
 ifeq (${HAVE_HTSLIB},0)
 	HTSLIB_CFLAGS = $(shell pkg-config htslib --cflags) -DUSE_HTSLIB
-	HTSLIB_LIBS = $(shell pkg-config htslib --libs)
+	ifdef TAF_STATIC
+		HTSLIB_LIBS = $(shell pkg-config htslib --libs --static) -llzma
+	else
+		HTSLIB_LIBS = $(shell pkg-config htslib --libs)
+	endif
 endif
 
 CFLAGS += ${inclDirs:%=-I${rootPath}/%} -I${LIBDIR} -I${rootPath}/include  ${HTSLIB_CFLAGS}

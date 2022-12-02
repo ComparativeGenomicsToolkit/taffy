@@ -76,6 +76,7 @@ clean :
 	rm -rf *.o taffy/impl/*.o ${LIBDIR} ${BINDIR}
 
 static :
-	CFLAGS="$${CFLAGS} -static" \
-	CPPFLAGS="$${CXXFLAGS} -static" \
+	CFLAGS="$${CFLAGS} -static -march=nehalem" \
+	CPPFLAGS="$${CXXFLAGS} -static -march=nehalem" \
+	TAF_STATIC=1 \
 	make all
