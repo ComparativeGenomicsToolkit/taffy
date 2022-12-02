@@ -316,21 +316,37 @@ void write_coordinates(Alignment_Row *p_row, Alignment_Row *row, int64_t repeat_
         p_row = p_row->n_row;
     }
     i = 0;
+    // in order to randomly seek in the taf file, we need rows that we can use for anchors that
+    // have coordinates for every base. in particular, we need such rows at the beginning of every
+    // reference contig, and somewhat evenly spaced along every reference contig.
+    // this flag detects such cases (looking at row 0) and then triggers every other row to report
+    // coordinates if it is set.
+    bool report_everything = false; 
     while(row != NULL) { // Now write the new rows
         if(row->l_row == NULL) { // if the row is inserted
             fprintf(fh, " i %" PRIi64 " %s %" PRIi64 " %c %" PRIi64 "",
                     i, row->sequence_name, row->start, row->strand ? '+' : '-', row->sequence_length);
             row->bases_since_coordinates_reported = 0;
+            if (i == 0) {
+                report_everything = true;
+            }
         }
         else {
-            if(alignment_row_is_predecessor(row->l_row, row)) {
+            bool is_predecessor = alignment_row_is_predecessor(row->l_row, row);
+            if (!is_predecessor && i == 0) {
+                report_everything = true;
+            }
+            if(is_predecessor) {
                 row->bases_since_coordinates_reported = row->l_row->bases_since_coordinates_reported + row->l_row->length;
-                if(repeat_coordinates_every_n_columns > 0 &&
-                   row->bases_since_coordinates_reported > repeat_coordinates_every_n_columns) { // Report the coordinates again
+                if(report_everything || (repeat_coordinates_every_n_columns > 0 &&
+                   row->bases_since_coordinates_reported > repeat_coordinates_every_n_columns)) { // Report the coordinates again
                     // so they are easy to find
                     row->bases_since_coordinates_reported = 0;
                     fprintf(fh, " s %" PRIi64 " %s %" PRIi64 " %c %" PRIi64 "",
                             i, row->sequence_name, row->start, row->strand ? '+' : '-', row->sequence_length);
+                    if (i == 0) {
+                        report_everything = true;
+                    }
                 }
                 else {
                     int64_t gap_length = row->start - (row->l_row->start + row->l_row->length);
