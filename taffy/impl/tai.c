@@ -98,8 +98,8 @@ static char *parse_coordinates_line(stList *tokens, int64_t *start, bool *strand
             } else {
                 // we parse but don't use
                 // todo: smoother api
-                char *seq = parse_coordinates(&j, tokens, &sequence_length, &dummy, &sequence_length);
-                free(seq);
+                char *s = parse_coordinates(&j, tokens, &sequence_length, &dummy, &sequence_length);
+                free(s);
             }
         } else if (op_type[0] == 'd') {
         } else if (op_type[0] == 'g') {
