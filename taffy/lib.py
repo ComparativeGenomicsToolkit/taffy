@@ -144,21 +144,20 @@ class AlignmentParser:
             else ffi.cast("FILE *", file)  # Either open the file or cast the python file handle to a C file handle
         # note the Python file handle is *way* slower
         self.file_string_not_handle = file_string_not_handle
-        if taf_not_maf:  # If taf then we wrap the file handle in a C line iterator
-            self.c_file_handle = lib.LI_construct(self.c_file_handle)
+        self.c_li_handle = lib.LI_construct(self.c_file_handle)
 
     def get_header(self):
         """ Get tags from the header line as a dictionary of key:value pairs. Must be called if a header is
          present in the file before blocks are retrieved """
-        c_tag = lib.taf_read_header(self.c_file_handle) if self.taf_not_maf else lib.maf_read_header(self.c_file_handle)
+        c_tag = lib.taf_read_header(self.c_li_handle) if self.taf_not_maf else lib.maf_read_header(self.c_li_handle)
         p_tags = _c_tags_to_dictionary(c_tag)
         lib.tag_destruct(c_tag)  # Clean up tag
         return p_tags
 
     def __next__(self):
         # Read a taf/maf block
-        c_alignment = lib.taf_read_block(self.p_c_alignment, 0, self.c_file_handle) if self.taf_not_maf \
-                      else lib.maf_read_block(self.c_file_handle)
+        c_alignment = lib.taf_read_block(self.p_c_alignment, 0, self.c_li_handle) if self.taf_not_maf \
+                      else lib.maf_read_block(self.c_li_handle)
 
         if c_alignment == ffi.NULL:  # If the c_alignment is null
             raise StopIteration  # We're done
@@ -204,10 +203,7 @@ class AlignmentParser:
 
     def close(self):
         """ Close any associated underlying file """
-        if self.taf_not_maf:  # If taf, cleanup the allocated line iterator
-            i = self.c_file_handle
-            self.c_file_handle = self.c_file_handle.fh
-            lib.LI_destruct(i)
+        lib.LI_destruct(self.c_li_handle) # Cleanup the allocated line iterator
         if self.file_string_not_handle:  # Close the underlying file handle
             lib.fclose(self.c_file_handle)
 
