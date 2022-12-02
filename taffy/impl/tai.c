@@ -97,7 +97,9 @@ static char *parse_coordinates_line(stList *tokens, int64_t *start, bool *strand
                 seq = parse_coordinates(&j, tokens, start, strand, &sequence_length);
             } else {
                 // we parse but don't use
-                parse_coordinates(&j, tokens, &sequence_length, &dummy, &sequence_length);
+                // todo: smoother api
+                char *seq = parse_coordinates(&j, tokens, &sequence_length, &dummy, &sequence_length);
+                free(seq);
             }
         } else if (op_type[0] == 'd') {
         } else if (op_type[0] == 'g') {
@@ -221,6 +223,7 @@ int tai_create(LI *li, FILE* idx_fh, int64_t index_block_size){
                 } else {
                     fprintf(idx_fh, "%s\t%" PRIi64 "\t%" PRIi64 "\n", ref, pos, file_pos);
                 }
+                free(prev_ref);
                 prev_ref = ref;
                 prev_pos = pos;
                 prev_file_pos = file_pos;
@@ -229,6 +232,7 @@ int tai_create(LI *li, FILE* idx_fh, int64_t index_block_size){
         stList_destruct(tokens);
         free(line);
     }
+    free(prev_ref);
     return 0;
 }
 
