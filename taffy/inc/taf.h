@@ -118,12 +118,12 @@ bool alignment_row_is_predecessor(Alignment_Row *left_row, Alignment_Row *right_
 /*
  * Read a maf header line
  */
-Tag *maf_read_header(FILE *fh);
+Tag *maf_read_header(LI *li);
 
 /*
  * Read a maf alignment block from the file stream. Return NULL if none available
  */
-Alignment *maf_read_block(FILE *fh);
+Alignment *maf_read_block(LI *li);
 
 /*
  * Write a maf header line

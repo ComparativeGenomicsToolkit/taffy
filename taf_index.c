@@ -9,7 +9,7 @@
 #include <getopt.h>
 #include <time.h>
 
-void usage() {
+static void usage() {
     fprintf(stderr, "taf_index [options]\n");
     fprintf(stderr, "Index a TAF file, output goes in <file>.tai\n");
     fprintf(stderr, "-i --inputFile : Input taf file to invert [REQUIRED]\n");
@@ -18,7 +18,7 @@ void usage() {
     fprintf(stderr, "-h --help : Print this help message\n");
 }
 
-int main(int argc, char *argv[]) {
+int taf_index_main(int argc, char *argv[]) {
     time_t startTime = time(NULL);
 
     /*

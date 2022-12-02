@@ -19,8 +19,9 @@ static void test_normalize(CuTest *testCase) {
     char *example_file = "./tests/evolverMammals.maf";
     // Read a maf and write a copy of it
     FILE *file = fopen(example_file, "r");
+    LI *li = LI_construct(file);
     Alignment *alignment, *p_alignment = NULL;
-    while((alignment = maf_read_block(file)) != NULL) {
+    while((alignment = maf_read_block(li)) != NULL) {
         if(p_alignment != NULL) {
             // Align the rows of the block
             alignment_link_adjacent(p_alignment, alignment, 0);
@@ -88,6 +89,7 @@ static void test_normalize(CuTest *testCase) {
         alignment_destruct(p_alignment, 1);
     }
     fclose(file);
+    LI_destruct(li);
 }
 
 void add_to_hash(void *fastas, const char *fasta_header, const char *sequence, int64_t length) {
@@ -108,7 +110,7 @@ static void test_maf_norm_to_maf(CuTest *testCase) {
     // Example maf file
     char *example_file = "./tests/evolverMammals.maf";
     char *output_file = "./tests/evolverMammals.maf.norm";
-    int i = st_system("./bin/maf_to_taf -i %s | ./bin/taf_add_gap_bases ./tests/seqs/* | ./bin/taf_norm -k > %s",
+    int i = st_system("./bin/taffy view -i %s | ./bin/taffy add-gap-bases ./tests/seqs/* | ./bin/taffy norm -k > %s",
               example_file, output_file);
     CuAssertIntEquals(testCase, 0, i); // return value should be zero
 
@@ -126,7 +128,8 @@ static void test_maf_norm_to_maf(CuTest *testCase) {
     // Now load the maf and check that the bases match the sequences
     FILE *file = fopen(example_file, "r");
     Alignment *alignment;
-    while((alignment = maf_read_block(file)) != NULL) {
+    LI *li = LI_construct(file);
+    while((alignment = maf_read_block(li)) != NULL) {
         Alignment_Row *row = alignment->row;
         while(row != NULL) {
             // Get the sequence
@@ -156,6 +159,7 @@ static void test_maf_norm_to_maf(CuTest *testCase) {
     // Cleanup
     stHash_destruct(fastas);
     fclose(file);
+    LI_destruct(li);
 }
 
 static void test_maf_norm(CuTest *testCase) {
@@ -165,7 +169,7 @@ static void test_maf_norm(CuTest *testCase) {
     // Example maf file
     char *example_file = "./tests/evolverMammals.maf";
     char *output_file = "./tests/evolverMammals.taf.norm";
-    int i = st_system("./bin/maf_to_taf -i %s | ./bin/taf_add_gap_bases ./tests/seqs/* | ./bin/taf_norm > %s",
+    int i = st_system("./bin/taffy view -i %s | ./bin/taffy add-gap-bases ./tests/seqs/* | ./bin/taffy norm > %s",
                       example_file, output_file);
     CuAssertIntEquals(testCase, 0, i); // return value should be zero
 }

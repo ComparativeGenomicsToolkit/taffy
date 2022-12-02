@@ -14,7 +14,7 @@ int64_t maximum_gap_length = 30;
 float fraction_shared_rows = 0.6;
 int64_t repeat_coordinates_every_n_columns = 1000;
 
-void usage() {
+static void usage() {
     fprintf(stderr, "taf_norm [options]\n");
     fprintf(stderr, "Normalize a taf format alignment to remove small blocks using the -m and -n options to determine what to merge \n");
     fprintf(stderr, "-i --inputFile : Input taf file to normalize. If not specified reads from stdin\n");
@@ -28,7 +28,7 @@ void usage() {
     fprintf(stderr, "-h --help : Print this help message\n");
 }
 
-Alignment *get_next_taf_block(LI *li, bool run_length_encode_bases) {
+static Alignment *get_next_taf_block(LI *li, bool run_length_encode_bases) {
     static Alignment *alignments[3];
     static int64_t alignment_index=0;
     assert(alignment_index >= 0);
@@ -54,7 +54,7 @@ Alignment *get_next_taf_block(LI *li, bool run_length_encode_bases) {
     return block;
 }
 
-int main(int argc, char *argv[]) {
+int taf_norm_main(int argc, char *argv[]) {
     time_t startTime = time(NULL);
 
     /*

@@ -30,7 +30,7 @@ def test_region(taf_path, contig, start, end):
 
     # extract the region right into maf
     out_path = './tests/tai/{}_{}_{}.taf.maf'.format(os.path.basename(os.path.splitext(maf_path)[0]), start, end)
-    subprocess.check_call('./bin/taf_find -i {} -r {}:{}-{} | ./bin/taf_to_maf > {}'.format(taf_path, contig, start, end, out_path), shell=True)
+    subprocess.check_call('./bin/taffy view -i {} -r {}:{}-{} -m  > {}'.format(taf_path, contig, start, end, out_path), shell=True)
     assert os.path.isfile(out_path)
 
     # run the comparison.
@@ -47,7 +47,7 @@ def create_index(taf_path, block_size):
     assert os.path.isfile(taf_path)
     subprocess.check_call(['rm', '-f', taf_path + '.tai'])
 
-    subprocess.check_call(['./bin/taf_index', '-i', taf_path, '-b', str(block_size)])
+    subprocess.check_call(['./bin/taffy', 'index', '-i', taf_path, '-b', str(block_size)])
     assert os.path.isfile(taf_path + '.tai')
     
 def test_tai(regions_path, taf_path, bgzip, block_size):
@@ -73,11 +73,11 @@ sys.stderr.write("Running tai tests...\n")
 maf_path = './tests/evolverMammals.maf'
 taf_path = './tests/tai/evolverMammals.taf'
 sys.stderr.write(" * creating evolver taf {}".format(taf_path))
-subprocess.check_call(['./bin/maf_to_taf', '-i', maf_path, '-o', taf_path])
+subprocess.check_call(['./bin/taffy', 'view', '-i', maf_path, '-o', taf_path])
 sys.stderr.write("\t\t\tOK\n")
 taf_rle_path = './tests/tai/evolverMammals.rle.taf'
 sys.stderr.write(" * creating run length encoded evolver taf {}".format(taf_rle_path))
-subprocess.check_call(['./bin/maf_to_taf', '-i', maf_path, '-o', taf_rle_path, '-r'])
+subprocess.check_call(['./bin/taffy', 'view', '-i', maf_path, '-o', taf_rle_path, '-u'])
 sys.stderr.write("\t\t\tOK\n")    
 regions_path = './tests/tai/evolverMammals_subregions.bed'
 

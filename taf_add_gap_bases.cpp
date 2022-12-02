@@ -14,10 +14,10 @@ extern "C" {
 #include "halBlockViz.h"
 #endif
 
-int64_t maximum_gap_string_length = 50;
-int64_t repeat_coordinates_every_n_columns = 1000;
+static int64_t maximum_gap_string_length = 50;
+static int64_t repeat_coordinates_every_n_columns = 1000;
 
-void usage() {
+static void usage() {
     fprintf(stderr, "taf_add_gap_bases SEQ_FILExN [options]\n");    
     fprintf(stderr, "Add interstitial gap strings to taf file\n");
     fprintf(stderr, "-i --inputFile : Input taf file to normalize. If not specified reads from stdin\n");
@@ -30,7 +30,7 @@ void usage() {
     fprintf(stderr, "-h --help : Print this help message\n");
 }
 
-void add_to_hash(void *fastas, const char *fasta_header, const char *sequence, int64_t length) {
+static void add_to_hash(void *fastas, const char *fasta_header, const char *sequence, int64_t length) {
     if(stHash_search((stHash *)fastas, (void *)fasta_header) != NULL) {
         // c++ gives an angry warning if we try to send our string literal directly to st_errAbort, so we do this
         char msg[8192];
@@ -45,7 +45,7 @@ void add_to_hash(void *fastas, const char *fasta_header, const char *sequence, i
 // so this function uses knowloedge of the genome names to greedily scan for a prefix ending in "."
 // that corresponds to a genome name in the hal. the extracted genome name is returned if found
 // (it must be freed)
-char *extract_genome_name(const char *sequence_name, stSet *hal_species) {
+static char *extract_genome_name(const char *sequence_name, stSet *hal_species) {
     const char *dot = NULL;
     int64_t offset = 0;
     const char *last = sequence_name + strlen(sequence_name) - 1;
@@ -72,7 +72,7 @@ char *extract_genome_name(const char *sequence_name, stSet *hal_species) {
 
 // get a dna interval either from the fastas hash file or from the hal_handle
 // note the string returned needs to be freed
-char *get_sequence_fragment(const char* sequence_name, int64_t start, int64_t length, stHash *fastas, int hal_handle, stSet *hal_species) {
+static char *get_sequence_fragment(const char* sequence_name, int64_t start, int64_t length, stHash *fastas, int hal_handle, stSet *hal_species) {
     char *fragment = NULL;
     if (fastas) {
         assert(hal_handle == -1);
@@ -96,7 +96,7 @@ char *get_sequence_fragment(const char* sequence_name, int64_t start, int64_t le
 }
 
 
-void add_gap_strings(Alignment *p_alignment, Alignment *alignment, stHash *fastas, int hal_handle, stSet *hal_species) {
+static void add_gap_strings(Alignment *p_alignment, Alignment *alignment, stHash *fastas, int hal_handle, stSet *hal_species) {
     Alignment_Row *row = alignment->row;
     while(row != NULL) {
         if(row->l_row != NULL && alignment_row_is_predecessor(row->l_row, row)) {
@@ -130,7 +130,7 @@ void add_gap_strings(Alignment *p_alignment, Alignment *alignment, stHash *fasta
     }
 }
 
-int main(int argc, char *argv[]) {
+int taf_add_gap_bases_main(int argc, char *argv[]) {
     time_t startTime = time(NULL);
 
     /*

@@ -106,5 +106,4 @@ endif
 
 # note: the CACTUS_STATIC_LINK_FLAGS below can generally be empty -- it's used by the static builder script only
 LDLIBS += ${sonLibLibs} ${LIBS} -L${rootPath}/lib -Wl,-rpath,${rootPath}/lib -lz -lbz2 -lpthread -lm -lstdc++ -lm ${CACTUS_STATIC_LINK_FLAGS}
-LIBDEPENDS = ${sonLibDir}/sonLib.a ${sonLibDir}/cuTest.a
 

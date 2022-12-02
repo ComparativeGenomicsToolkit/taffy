@@ -3,10 +3,11 @@
 
 #include "taf.h"
 #include "sonLib.h"
+#include "line_iterator.h"
 
-Alignment *maf_read_block(FILE *fh) {
+Alignment *maf_read_block(LI *li) {
     while(1) {
-        char *line = stFile_getLineFromFile(fh);
+        char *line = LI_get_next_line(li);
         if(line == NULL) {
             return NULL;
         }
@@ -21,7 +22,7 @@ Alignment *maf_read_block(FILE *fh) {
             Alignment *alignment = st_calloc(1, sizeof(Alignment));
             Alignment_Row **p_row = &(alignment->row);
             while(1) {
-                line = stFile_getLineFromFile(fh);
+                line = LI_get_next_line(li);
                 if(line == NULL) {
                     return alignment;
                 }
@@ -68,8 +69,8 @@ Alignment *maf_read_block(FILE *fh) {
 
 Tag *parse_header(stList *tokens, char *header_prefix, char *delimiter);
 
-Tag *maf_read_header(FILE *fh) {
-    char *line = stFile_getLineFromFile(fh);
+Tag *maf_read_header(LI *li) {
+    char *line = LI_get_next_line(li);
     stList *tokens = stString_split(line);
     free(line);
     Tag *tag = parse_header(tokens, "##maf", "=");
