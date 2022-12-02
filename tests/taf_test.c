@@ -36,7 +36,8 @@ static void test_taf(CuTest *testCase) {
     FILE *file = fopen(example_file, "r");
     FILE *out_file = fopen(temp_copy, "w");
     Alignment *alignment, *p_alignment = NULL;
-    while((alignment = maf_read_block(file)) != NULL) {
+    LI *li_maf = LI_construct(file);
+    while((alignment = maf_read_block(li_maf)) != NULL) {
         if(p_alignment != NULL) {
             alignment_link_adjacent(p_alignment, alignment, 1);
         }
@@ -62,6 +63,7 @@ static void test_taf(CuTest *testCase) {
     }
     fclose(file);
     fclose(out_file);
+    LI_destruct(li_maf);
 
     // Now parse the taf
     file = fopen(example_file, "r");
@@ -70,7 +72,8 @@ static void test_taf(CuTest *testCase) {
     Alignment *alignment2 = NULL;
     Alignment *p_alignment2 = NULL;
     int64_t column_index = 0;
-    while((alignment = maf_read_block(file)) != NULL) {
+    li_maf = LI_construct(file);
+    while((alignment = maf_read_block(li_maf)) != NULL) {
         // Alignment *taf_read_block(Alignment *p_block, bool run_length_encode_bases, LI *li)
         alignment2 = taf_read_block(p_alignment2, run_length_encode_bases, li);
         CuAssertTrue(testCase, alignment2 != NULL);
@@ -112,6 +115,7 @@ static void test_taf(CuTest *testCase) {
     stList_destruct(column_tags);
     LI_destruct(li);
     fclose(file);
+    LI_destruct(li_maf);
 }
 
 CuSuite* taf_test_suite(void) {
