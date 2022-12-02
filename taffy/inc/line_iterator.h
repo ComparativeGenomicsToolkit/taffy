@@ -12,7 +12,19 @@ typedef struct BGZF BGZF;
  * and "peek" at lines before choosing to get them.
  */
 
-typedef struct _LI LI;
+struct BGZF;
+
+typedef struct _LI {
+#ifdef USE_HTSLIB
+    BGZF *bgzf;
+#else
+    FILE *fh;
+#endif
+    char *line;
+    int64_t prev_pos; // position before reading the current buffer
+    int64_t pos;      // position after reading the curent buffer    
+} LI;
+
 
 LI *LI_construct(FILE *fh);
 

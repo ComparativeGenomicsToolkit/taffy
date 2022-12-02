@@ -6,17 +6,6 @@
 #include "htslib/kstring.h"
 #endif
 
-struct _LI {
-#ifdef USE_HTSLIB
-    BGZF *bgzf;
-#else
-    FILE *fh;
-#endif
-    char *line;
-    int64_t prev_pos; // position before reading the current buffer
-    int64_t pos;      // position after reading the curent buffer    
-};
-
 LI *LI_construct(FILE *fh) {
     LI *li = st_calloc(1, sizeof(LI));
 #ifdef USE_HTSLIB
