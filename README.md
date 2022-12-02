@@ -174,31 +174,42 @@ then want to add the taf/bin directory to your path.
 
 # Taffy Utilities
 
-This repo contains various tools for working with taf files and converting to and 
-from maf. For example, to convert a maf file to a taf use:
+All Taffy utilities are run using `taffy <command>`, where the available commands are:
 
-    maf_to_taf -i MAF_FILE
+```
+    view           MAF / TAF conversion and region extraction
+    norm           normalize TAF blocks
+    add-gap-bases  add sequences from HAL or FASTA files into TAF gaps
+    index          create a .tai index (required for region extraction)
+```
+
+Taffy supports both uncompressed and [bgzipped](http://www.htslib.org/doc/bgzip.html) input (though Taffy must be built
+with [htslib](http://www.htslib.org/) for bgzip support).
+
+For example, to convert a maf file to a taf use:
+
+    taffy view -i MAF_FILE
 
 To go back to maf use:
 
-    taf_to_maf -i TAF_FILE
+    taffy view -i TAF_FILE -m
 
 There is also a utility for adding sequences between blocks to a taf file
 
-    taf_add_gap_bases SEQ_FILES -i TAF_FILE
+    taffy add-gap-bases SEQ_FILES -i TAF_FILE
 
 And finally, a utility to merge together short alignment blocks to create a more
 "normalized" maf/taf file:
  
-    taf_norm
+    taffy norm
 
 For example, to normalize a maf file do the following:
 
-    maf_to_taf -i MAF_FILE | taf_add_gap_bases SEQUENCE_FILES | taf_norm -k > out.maf
+    taffy view -i MAF_FILE | taffy add-gap-bases SEQUENCE_FILES | taffy norm -k > out.maf
 
-The maf_to_taf converts MAF_FILE into taf, taf_add_gap_bases adds in missing
-unaligned sequences between maf blocks and taf_norm then merges together the blocks. The 
--k option causes the output to be in maf format.
+`taffy view` converts MAF_FILE into taf, `taffy add-gap-bases` adds in missing
+unaligned sequences between maf blocks and `taffy norm` then merges together the blocks. The 
+`-k` option causes the output to be in maf format.
 
 # Using C Library
 
@@ -284,7 +295,7 @@ Using the file:  https://hgwdev.gi.ucsc.edu/~markd/cactus/cactus241way/ucscNames
 (A randomly chosen alignment part of the Cactus 241-way alignment).
 Running the command:
 
-    maf_to_taf -i ./chr3_KI270777v1_alt.maf > ./chr3_KI270777v1_alt.taf
+    taffy view -i ./chr3_KI270777v1_alt.maf > ./chr3_KI270777v1_alt.taf
 
 Took: 
     
@@ -305,7 +316,7 @@ The .taf is 1.9x smaller than the .maf.gz.
 
 Normalizing the maf file using the command:
 
-    maf_to_taf -i ./chr3_KI270777v1_alt.maf | taf_norm -k > ./chr3_KI270777v1_alt.norm.maf
+    taffy view -i ./chr3_KI270777v1_alt.maf | taffy norm -k > ./chr3_KI270777v1_alt.norm.maf
 
 Took: 
 
@@ -332,6 +343,4 @@ Which is a 6.97x reduction in block number.
 
 Things that are ongoing:
 
-* Make taf_add_gap_bases use indexed fastas to avoid loading everything into memory
-* Create an index format for random access to TAF files
-* Add a binary/compressed version
+* Make `taffy add-gap-bases` use indexed fastas to avoid loading everything into memory
