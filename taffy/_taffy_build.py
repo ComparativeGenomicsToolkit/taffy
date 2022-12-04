@@ -176,6 +176,46 @@ ffibuilder.cdef("""
      */
     void taf_write_block(Alignment *p_alignment, Alignment *alignment, bool run_length_encode_bases,
                          int64_t repeat_coordinates_every_n_columns, FILE *fh);
+                         
+
+   typedef struct _Tai Tai;
+    
+   typedef struct _TaiIt TaiIt;
+    
+    /*
+     * Make an index of a TAF in "idx_fh" 
+     * The index is made on the "reference" first contig of each block
+     * For each such contig, the index will have one line for each index_block_size
+     * region of it found in the TAF. 
+     */
+    int tai_create(LI *li, FILE* idx_fh, int64_t index_block_size);
+    
+    /*
+     * Load the index from disk
+     */
+    Tai *tai_load(FILE* idx_fh);
+    
+    /*
+     * Free the index
+     */
+    void tai_destruct(Tai* idx);
+    
+    /*
+     * Query the taf index
+     * start is 0-based
+     * length can be -1 for everything
+     */
+    TaiIt *tai_iterator(Tai* idx, LI *li, bool run_length_encode_bases, const char *contig, int64_t start, int64_t length);
+    
+    /*
+     * Iterate through a region as obtained via the iterator
+     */
+    Alignment *tai_next(TaiIt *tai_it, LI *li);
+                        
+    /*
+     * Free a tai iterator
+     */
+    void tai_iterator_destruct(TaiIt *tai_it);
 """)
 
 # set_source() gives the name of the python extension module to
@@ -188,6 +228,7 @@ ffibuilder.set_source("taffy._taffy_cffi",
                            #include <stdlib.h>
                            #include "taf.h" // the C header of the library
                            #include "line_iterator.h" 
+                           #include "tai.h"
                       """,
                       include_dirs=["taffy/submodules/sonLib/externalTools/cutest",
                                     "taffy/submodules/sonLib/C/inc",
@@ -210,7 +251,8 @@ ffibuilder.set_source("taffy._taffy_cffi",
                                "taffy/impl/merge_adjacent_alignments.c",
                                "taffy/impl/maf.c",
                                "taffy/impl/ond.c",
-                               "taffy/impl/taf.c"],
+                               "taffy/impl/taf.c",
+                               "taffy/impl/tai.c"],
                       )
 
 if __name__ == "__main__":

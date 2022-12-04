@@ -80,3 +80,8 @@ static :
 	CPPFLAGS="$${CXXFLAGS} -static -march=nehalem" \
 	TAF_STATIC=1 \
 	make all
+
+python :
+	python3 -m build
+	python3 -m pip install .
+	cd tests && python3 taffyTest.py && cd ..

@@ -257,11 +257,6 @@ static int tai_record_cmp(const void *v1, const void *v2) {
     return ret;
 }
 
-struct _Tai {
-    stSortedSet *idx;
-    stList *names; // just to keep track of memory -- we only keep one instance of each sequence name
-};
-
 static Tai *tai_construct() {
     Tai *tai = st_calloc(1, sizeof(Tai));
     tai->idx = stSortedSet_construct3(tai_record_cmp, free);
@@ -309,16 +304,6 @@ Tai *tai_load(FILE* idx_fh) {
     LI_destruct(li);
     return tai;
 }
-
-struct _TaiIt {
-    char *name;
-    // these are bed-like 0-based half-open
-    int64_t start;
-    int64_t end;
-    Alignment *alignment;
-    Alignment *p_alignment;
-    bool run_length_encode_bases;
-};
 
 TaiIt *tai_iterator(Tai* tai, LI *li, bool run_length_encode_bases, const char *contig, int64_t start, int64_t length) {
 
