@@ -105,6 +105,17 @@ int64_t alignment_number_of_common_rows(Alignment *left_alignment, Alignment *ri
 Alignment *alignment_merge_adjacent(Alignment *left_alignment, Alignment *right_alignment);
 
 /*
+ * Read a column of the alignment into the buffer. The buffer must be initialized and be at least
+ * of length alignment->row_number.
+ */
+void alignment_get_column_in_buffer(Alignment *alignment, int64_t column_index, char *buffer);
+
+/*
+ * Read a column of the alignment and return as a string
+ */
+char *alignment_get_column(Alignment *alignment, int64_t column_index);
+
+/*
  * Cleanup a row
  */
 void alignment_row_destruct(Alignment_Row *row);

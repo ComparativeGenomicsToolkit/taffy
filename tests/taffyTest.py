@@ -46,6 +46,15 @@ class TafTest(unittest.TestCase):
             self.assertEqual(row.bases(), "GTCAAGCTCAGTAGATACTGGATTAGGAATTCATGAGTTAAGCTGTAGCC")
             self.assertEqual(row.left_gap_sequence(), "")
 
+            # Check column retrieval
+            self.assertEqual(a.get_column(0), "GGGGGGGGG")
+            self.assertEqual(a.get_column(1), "TTTTTTTTT")
+            self.assertEqual(a.get_column(2), "CCCCGCCCC")
+            self.assertEqual(a.get_column(a.column_number()-1), "CCCTCCCTT")
+            self.assertEqual(a.get_column(-1), "CCCTCCCTT")
+            self.assertEqual(a.get_column(a.column_number()-2), "CCTCGTCCC")
+            self.assertEqual(a.get_column(-2), "CCTCGTCCC")
+
             # The second alignment block
             b = next(mp)
             self.assertEqual(b.row_number(), 9)  # Should be nine rows in block
@@ -66,6 +75,10 @@ class TafTest(unittest.TestCase):
             # Check left and right connections
             self.assertEqual(row.left_row(), a.first_row())
             self.assertEqual(a.first_row().right_row(), row)
+
+            # Check column retrieval
+            self.assertEqual(b.get_column(0), "AAAATAAAA")
+            self.assertEqual(b.get_column(-1), "AAAATAAAA")
 
     def test_maf_to_taf(self):
         """ Read a maf file, write a taf file and then read it back and check
@@ -103,6 +116,10 @@ class TafTest(unittest.TestCase):
                     for i in range(ma.column_number()):
                         self.assertEqual(column_tags[column_index], ta.column_tags(i))
                         column_index += 1
+
+                    # Check the columns are equal
+                    for i in range(ma.column_number()):
+                        self.assertEqual(ma.get_column(i), ta.get_column(i))
 
                     # Check the rows are equal
                     mr, tr = ma.first_row(), ta.first_row()

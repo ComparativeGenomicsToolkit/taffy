@@ -4,6 +4,8 @@ ffibuilder = FFI()
 # cdef() expects a single string declaring the C types, functions and
 # globals needed to use the shared object. It must be in valid C syntax.
 ffibuilder.cdef("""
+    void free(void *ptr);
+
     FILE *fopen(const char *filename, const char *mode);
     
     int fclose(FILE *stream);
@@ -122,6 +124,17 @@ ffibuilder.cdef("""
     bool alignment_row_is_predecessor(Alignment_Row *left_row, Alignment_Row *right_row);
     
     /*
+     * Read a column of the alignment into the buffer. The buffer must be initialized and be at least
+     * of length alignment->row_number.
+     */
+    void alignment_get_column_in_buffer(Alignment *alignment, int64_t column_index, char *buffer);
+    
+    /*
+     * Read a column of the alignment and return as a string
+     */
+    char *alignment_get_column(Alignment *alignment, int64_t column_index);
+
+    /*
      * Read a maf header line
      */
     Tag *maf_read_header(LI *li);
@@ -235,6 +248,7 @@ ffibuilder.set_source("taffy._taffy_cffi",
                                "taffy/submodules/sonLib/C/impl/sonLibFile.c",
                                "taffy/impl/line_iterator.c",
                                "taffy/impl/alignment_block.c",
+                               "taffy/impl/merge_adjacent_alignments.c",
                                "taffy/impl/maf.c",
                                "taffy/impl/ond.c",
                                "taffy/impl/taf.c",
