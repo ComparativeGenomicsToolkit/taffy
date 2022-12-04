@@ -33,8 +33,17 @@ def _dictionary_to_c_tags(tags):
     return first_c_tag
 
 
+def _get_c_file_handle(file, file_string_not_handle, modifier_string="r"):
+    """ Gets the c file handle for file """
+    # Either open the file or cast the python file handle to a C file handle
+    # note the Python file handle is *way* slower
+    return lib.fopen(_to_c_string(file), _to_c_string(modifier_string)) if \
+        file_string_not_handle else ffi.cast("FILE *", file)
+
+
 class Alignment:
     """ Represents an alignment block. See taf.h """
+
     def __init__(self, c_alignment=None, py_row=None):
         self._c_alignment = c_alignment
         self._py_row = py_row
@@ -69,6 +78,7 @@ class Alignment:
 
 class Row:
     """ Represents a row of an alignment block. See taf.h """
+
     def __init__(self, c_row=None, l_row=None, r_row=None, n_row=None):
         self._c_row = c_row  # The underlying C row
         self._l_row = l_row  # The prior (left) row in the previous alignment block
@@ -121,10 +131,31 @@ class Row:
         lib.alignment_row_destruct(self._c_row)  # Cleans up the underlying C alignment structure
 
 
+class TafIndex:
+    """ Taf Index (.tai)
+    """
+    def __init__(self, file, file_string_not_handle=True):
+        """ Load from a file. Can be a file name or a Python file handle """
+        c_file_handle = _get_c_file_handle(file, file_string_not_handle)
+        self._c_taf_index = lib.tai_load(c_file_handle)
+        if file_string_not_handle:  # Close the underlying file handle if opened
+            lib.fclose(c_file_handle)
+
+    def __del__(self):
+        lib.tai_destruct(self._c_taf_index)  # Clean up the underlying C
+
+
 class AlignmentParser:
     """ Taf or maf alignment parser.
     """
-    def __init__(self, file, taf_not_maf=True, use_run_length_encoding=False, file_string_not_handle=True):
+    def __init__(self, file,
+                 taf_not_maf=True,
+                 use_run_length_encoding=False,
+                 file_string_not_handle=True,
+                 taf_index=None,
+                 sequence_name=None,
+                 start=-1,
+                 length=-1):
         """ Use taf_not_maf to switch between MAF or TAF parsing.
 
         Set use_run_length_encoding to determine how
@@ -140,11 +171,19 @@ class AlignmentParser:
         self.p_c_alignment = ffi.NULL  # The previous C alignment returned
         self.p_c_rows_to_py_rows = {}  # Hash from C rows to Python rows of the previous
         # alignment block, allowing linking of rows between blocks
-        self.c_file_handle = lib.fopen(_to_c_string(file), _to_c_string("r")) if file_string_not_handle \
-            else ffi.cast("FILE *", file)  # Either open the file or cast the python file handle to a C file handle
-        # note the Python file handle is *way* slower
+        self.c_file_handle = _get_c_file_handle(file, file_string_not_handle)
         self.file_string_not_handle = file_string_not_handle
         self.c_li_handle = lib.LI_construct(self.c_file_handle)
+        self.taf_index = taf_index  # Store the taf index (if there is one)
+        if taf_index:
+            assert taf_not_maf  # Can not be trying to parse maf with a taf index
+            assert sequence_name  # The contig name can not be none if using a taf index
+            assert start >= 0  # The start coordinate must be valid
+            assert length >= 0  # The length must be valid
+            self._c_taf_index_it = lib.tai_iterator(taf_index._c_taf_index,
+                                                    self.c_li_handle,
+                                                    use_run_length_encoding,
+                                                    _to_c_string(sequence_name), start, length)
 
     def get_header(self):
         """ Get tags from the header line as a dictionary of key:value pairs. Must be called if a header is
@@ -156,8 +195,12 @@ class AlignmentParser:
 
     def __next__(self):
         # Read a taf/maf block
-        c_alignment = lib.taf_read_block(self.p_c_alignment, 0, self.c_li_handle) if self.taf_not_maf \
-                      else lib.maf_read_block(self.c_li_handle)
+        if self.taf_not_maf:  # Is a taf block
+            # Use the taf index if present
+            c_alignment = lib.tai_next(self._c_taf_index_it, self.c_li_handle) if self.taf_index else \
+                lib.taf_read_block(self.p_c_alignment, 0, self.c_li_handle)
+        else:  # Is a maf block
+            c_alignment = lib.maf_read_block(self.c_li_handle)
 
         if c_alignment == ffi.NULL:  # If the c_alignment is null
             raise StopIteration  # We're done
@@ -203,7 +246,9 @@ class AlignmentParser:
 
     def close(self):
         """ Close any associated underlying file """
-        lib.LI_destruct(self.c_li_handle) # Cleanup the allocated line iterator
+        if self.taf_index:
+            lib.tai_iterator_destruct(self._c_taf_index_it)
+        lib.LI_destruct(self.c_li_handle)  # Cleanup the allocated line iterator
         if self.file_string_not_handle:  # Close the underlying file handle
             lib.fclose(self.c_file_handle)
 
@@ -214,10 +259,25 @@ class AlignmentParser:
         self.close()
 
 
+def write_taf_index_file(taf_file, index_file,
+                         taf_file_string_not_handle=True,
+                         index_file_string_not_handle=True,
+                         index_block_size=10000):
+    """ Create a taf index file """
+    c_taf_file_handle = _get_c_file_handle(taf_file, taf_file_string_not_handle)
+    c_li_handle = lib.LI_construct(c_taf_file_handle)
+    c_index_file_handle = _get_c_file_handle(index_file, taf_file_string_not_handle, "w")
+    lib.tai_create(c_li_handle, c_index_file_handle, index_block_size)
+    lib.LI_destruct(c_li_handle)  # Cleanup the allocated line iterator
+    if taf_file_string_not_handle:  # Close the underlying file handle
+        lib.fclose(c_taf_file_handle)
+    if index_file_string_not_handle:  # Close the underlying file handle
+        lib.fclose(c_index_file_handle)
+
+
 class AlignmentWriter:
     """ Taf or maf alignment writer.
     """
-
     def __init__(self, file, taf_not_maf=True, header_tags=None,
                  repeat_coordinates_every_n_columns=-1,
                  file_string_not_handle=True):
@@ -230,9 +290,7 @@ class AlignmentWriter:
         self.taf_not_maf = taf_not_maf
         self.header_tags = {} if header_tags is None else header_tags
         self.p_py_alignment = None  # The previous alignment
-        self.c_file_handle = lib.fopen(_to_c_string(file), _to_c_string("w")) if file_string_not_handle \
-            else ffi.cast("FILE *", file)  # Either open the file or cast the python file handle to a C file handle
-        # note the Python file handle is *way* slower
+        self.c_file_handle = _get_c_file_handle(file, file_string_not_handle, "w")
         self.file_string_not_handle = file_string_not_handle
         self.repeat_coordinates_every_n_columns = repeat_coordinates_every_n_columns
 

@@ -11,8 +11,21 @@
 
 #include "line_iterator.h"
 
-typedef struct _Tai Tai;
-typedef struct _TaiIt TaiIt;
+typedef struct _Tai {
+    stSortedSet *idx;
+    stList *names; // just to keep track of memory -- we only keep one instance of each sequence name
+} Tai;
+
+typedef struct _TaiIt {
+    char *name;
+    // these are bed-like 0-based half-open
+    int64_t start;
+    int64_t end;
+    Alignment *alignment;
+    Alignment *p_alignment;
+    bool run_length_encode_bases;
+} TaiIt;
+
 
 /* Return taf_path + .tai 
  */
