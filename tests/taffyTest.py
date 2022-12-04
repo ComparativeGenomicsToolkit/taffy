@@ -1,13 +1,14 @@
 import unittest
 import pathlib
 from random import randint
-from taffy.lib import AlignmentParser, AlignmentWriter
+from taffy.lib import AlignmentParser, AlignmentWriter, TafIndex, write_taf_index_file
 
 
 class TafTest(unittest.TestCase):
     def setUp(self):
         self.test_maf_file = (pathlib.Path().absolute() / "../tests/evolverMammals.maf").as_posix()
         self.test_taf_file = (pathlib.Path().absolute() / "../tests/evolverMammals.taf").as_posix()
+        self.test_index_file = (pathlib.Path().absolute() / "../tests/evolverMammals.tai").as_posix()
 
     def test_maf_parser(self):
         """ Manually test the first couple blocks from the maf file """
@@ -116,6 +117,36 @@ class TafTest(unittest.TestCase):
                         mr = mr.next_row()
                         tr = tr.next_row()
                     self.assertTrue(not tr)
+
+    def test_taf_index(self):
+        """ Index a taf file then load a portion of the file with the
+         AlignmentParser """
+        # Convert MAF to TAF
+        with AlignmentParser(self.test_maf_file, taf_not_maf=False) as mp:
+            maf_header_tags = mp.get_header()  # Get the maf header tags
+            with AlignmentWriter(self.test_taf_file, header_tags=maf_header_tags) as tw:
+                tw.write_header()  # Write the header
+                for a in mp:  # For each alignment block in input
+                    tw.write_alignment(a)  # Write a corresponding output block
+
+        # Write the index file
+        write_taf_index_file(taf_file=self.test_taf_file, index_file=self.test_index_file)
+
+        # Make the Taf Index object
+        taf_index = TafIndex(self.test_index_file)
+
+        # Create a taf reader
+        with AlignmentParser(self.test_taf_file,
+                             taf_index=taf_index,
+                             sequence_name="Anc0.Anc0refChr0",
+                             start=100,
+                             length=500) as tp:
+
+            for a in tp:  # For each alignment block in input
+                ref_row = a.first_row()  # Check the reference row is in the bounds of the search
+                self.assertEqual(ref_row.sequence_name(), "Anc0.Anc0refChr0")
+                self.assertTrue(ref_row.start() >= 100)
+                self.assertTrue(ref_row.start() + ref_row.length() <= 600)
 
 
 if __name__ == '__main__':
