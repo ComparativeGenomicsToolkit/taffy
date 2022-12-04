@@ -11,20 +11,24 @@ static void test_maf(CuTest *testCase) {
     FILE *file = fopen(example_file, "r");
     FILE *out_file = fopen(temp_copy, "w");
     Alignment *alignment;
-    while((alignment = maf_read_block(file)) != NULL) {
+    LI *li = LI_construct(file);
+    while((alignment = maf_read_block(li)) != NULL) {
         //maf_write_block(alignment, stdout);
         maf_write_block(alignment, out_file);
         alignment_destruct(alignment, 1);
     }
     fclose(file);
     fclose(out_file);
+    LI_destruct(li);
 
     // Now check that all the maf blocks are the same
     file = fopen(example_file, "r");
     FILE *file_copy = fopen(temp_copy, "r");
     Alignment *alignment2;
-    while((alignment = maf_read_block(file)) != NULL) {
-        alignment2 = maf_read_block(file_copy);
+    li = LI_construct(file);
+    LI *li_copy = LI_construct(file_copy);
+    while((alignment = maf_read_block(li)) != NULL) {
+        alignment2 = maf_read_block(li_copy);
         CuAssertTrue(testCase, alignment2 != NULL);
         // Check that the blocks are the same
 
@@ -44,7 +48,9 @@ static void test_maf(CuTest *testCase) {
         alignment_destruct(alignment, 1);
         alignment_destruct(alignment2, 1);
     }
-    CuAssertTrue(testCase, maf_read_block(file_copy) == NULL);
+    CuAssertTrue(testCase, maf_read_block(li_copy) == NULL);    
+    LI_destruct(li);
+    LI_destruct(li_copy);
 
     fclose(file);
 }

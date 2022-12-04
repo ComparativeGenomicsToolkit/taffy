@@ -1,0 +1,864 @@
+##maf version=1
+
+a score=0 mafExtractor_splicedBlock=true splice_id=1926_0
+s Anc0.Anc0refChr2                10001  67 +  269145 TTTGTATTTCCCTCAGAGGTGTGCTTCCCACAGAGGCTCTTCTGCACTGAGCTTCTGGAGGTGTGGC
+s Anc1.Anc1refChr1                18420  67 +  296994 TTTGTATTTCCCTCAGAGGTGTGCTTCCCACAGAGGCTCTTCTGCACTGAGCTTCTGGAGGTGTGGC
+s Anc2.Anc2refChr4                 9555  67 +   16800 TTTGTGTTTCCCTTAGAGGTGTGCTTCCCACAGAGGCTCTTCTGCAATGAGCTTCTGGAGTTGTGGC
+s mr.mrrefChr3                   175858  65 +  296991 TTTGTATTCCCCCCAG--GTCTGCTTCCCTCAGAGGCTTTTCTGCACGGATCTTCTGCAGGTGAGGC
+s simCow_chr6.simCow.chr6        300850  65 +  602619 TTTGTGCTTCCCCTAGAGGTGCGCTTCCCGTAGAGGTTAT--TGCATTAAGCTTCTGGTCTTGTAGC
+s simDog_chr6.simDog.chr6        287041  67 +  593897 TTTGTGTTTCCCTTCGAGGTGTGCTTTCCACAGAGGCTCTTCTACAATGAGCTTCTGGAGTTGTGGC
+s simHuman_chr6.simHuman.chr6    310724  67 +  601863 TATATATTTCCCTCATAGGTGTGCTTCCCACATAAGCTCACCTGCACTGAGTGTCAGGAGGTGTGGC
+s simMouse_chr6.simMouse.chr6    324904  65 +  636262 TTTGTATTCCCCCCAG--GTCTGCTTCCCTCAGCGGCATTTCCGCACGGATCTTCTGCAGGTGAGGC
+s simRat_chr6.simRat.chr6        316330  65 +  647215 TTTGTTTTCCCCCCAA--GTCAGTTGCGCTCAGAAGCTTTTCTGCACGGATGTTCTGAAGCTGAGGC
+
+a
+s Anc0.Anc0refChr2                10068  1 +  269145 A
+s Anc1.Anc1refChr1                18488  1 +  296994 A
+s Anc2.Anc2refChr4                 9622  1 +   16800 A
+s mr.mrrefChr3                   175924  1 +  296991 G
+s simCow_chr6.simCow.chr6        300915  1 +  602619 A
+s simDog_chr6.simDog.chr6        287108  1 +  593897 A
+s simHuman_chr6.simHuman.chr6    310792  1 +  601863 A
+s simMouse_chr6.simMouse.chr6    324970  1 +  636262 G
+s simRat_chr6.simRat.chr6        316396  1 +  647215 G
+
+a
+s Anc0.Anc0refChr2                10069  1 +  269145 C
+s Anc1.Anc1refChr1                18504  1 +  296994 C
+s Anc2.Anc2refChr4                 9623  1 +   16800 C
+s mr.mrrefChr3                   175940  1 +  296991 C
+s simCow_chr6.simCow.chr6        300916  1 +  602619 G
+s simDog_chr6.simDog.chr6        287109  1 +  593897 C
+s simHuman_chr6.simHuman.chr6    310820  1 +  601863 C
+s simMouse_chr6.simMouse.chr6    324986  1 +  636262 C
+s simRat_chr6.simRat.chr6        316412  1 +  647215 C
+
+a
+s Anc0.Anc0refChr2                10070  3 +  269145 TGG
+s Anc1.Anc1refChr1                18505  3 +  296994 TGG
+s Anc2.Anc2refChr4                 9624  3 +   16800 TGG
+s mr.mrrefChr3                   175941  3 +  296991 TGG
+s simCow_chr6.simCow.chr6        300917  3 +  602619 TGT
+s simDog_chr6.simDog.chr6        287110  3 +  593897 AGG
+s simHuman_chr6.simHuman.chr6    310823  3 +  601863 TGG
+s simMouse_chr6.simMouse.chr6    324987  3 +  636262 TGG
+s simRat_chr6.simRat.chr6        316413  3 +  647215 TGG
+
+a
+s Anc0.Anc0refChr2                10073  12 +  269145 AATCATCACTCA
+s Anc1.Anc1refChr1                18508  12 +  296994 AATCATCACTCA
+s Anc2.Anc2refChr4                 9627  12 +   16800 AGTCATCACTCA
+s mr.mrrefChr3                   175947  12 +  296991 AATCAAGACTCA
+s simCow_chr6.simCow.chr6        300920  12 +  602619 AGTCATGATTCA
+s simDog_chr6.simDog.chr6        287113  12 +  593897 AGTCATCACTCA
+s simHuman_chr6.simHuman.chr6    310826  12 +  601863 AATAATTACTCA
+s simMouse_chr6.simMouse.chr6    324993  12 +  636262 AATCAAGACTCA
+s simRat_chr6.simRat.chr6        316419  12 +  647215 AACAAAGACTCA
+
+a
+s Anc0.Anc0refChr2                10085  5 +  269145 AGATT
+s Anc1.Anc1refChr1                18520  5 +  296994 AGATT
+s Anc2.Anc2refChr4                 9639  5 +   16800 AGATT
+s mr.mrrefChr3                   175959  3 +  296991 A--TT
+s simCow_chr6.simCow.chr6        300932  5 +  602619 AGACA
+s simDog_chr6.simDog.chr6        287129  5 +  593897 AGATT
+s simHuman_chr6.simHuman.chr6    310838  5 +  601863 TGATG
+s simMouse_chr6.simMouse.chr6    325005  3 +  636262 A--TT
+s simRat_chr6.simRat.chr6        316431  3 +  647215 A--TC
+
+a
+s Anc0.Anc0refChr2                10090  1 +  269145 C
+s Anc1.Anc1refChr1                18525  1 +  296994 C
+s Anc2.Anc2refChr4                 9644  1 +   16800 C
+s mr.mrrefChr3                   175963  1 +  296991 C
+s simCow_chr6.simCow.chr6        300937  1 +  602619 C
+s simDog_chr6.simDog.chr6        287134  1 +  593897 C
+s simHuman_chr6.simHuman.chr6    310843  1 +  601863 C
+s simMouse_chr6.simMouse.chr6    325009  1 +  636262 C
+s simRat_chr6.simRat.chr6        316435  1 +  647215 C
+
+a
+s Anc0.Anc0refChr2                10091  8 +  269145 TGGAGCAG
+s Anc1.Anc1refChr1                18526  8 +  296994 TGGAGCAG
+s Anc2.Anc2refChr4                 9645  8 +   16800 TGGAGCAG
+s mr.mrrefChr3                   175966  8 +  296991 TGGATAAG
+s simCow_chr6.simCow.chr6        300938  8 +  602619 TGCAGCAG
+s simDog_chr6.simDog.chr6        287135  6 +  593897 TCGA--AG
+s simHuman_chr6.simHuman.chr6    310844  8 +  601863 AGGAGTGG
+s simMouse_chr6.simMouse.chr6    325012  8 +  636262 TGGATAAG
+s simRat_chr6.simRat.chr6        316438  8 +  647215 TGGATAAG
+
+a
+s Anc0.Anc0refChr2                10099  1 +  269145 A
+s Anc1.Anc1refChr1                18534  1 +  296994 A
+s Anc2.Anc2refChr4                 9653  1 +   16800 A
+s mr.mrrefChr3                   175975  1 +  296991 A
+s simCow_chr6.simCow.chr6        300946  1 +  602619 A
+s simDog_chr6.simDog.chr6        287141  1 +  593897 A
+s simHuman_chr6.simHuman.chr6    310852  1 +  601863 A
+s simMouse_chr6.simMouse.chr6    325021  1 +  636262 A
+s simRat_chr6.simRat.chr6        316447  1 +  647215 A
+
+a
+s Anc0.Anc0refChr2                10100  2 +  269145 CA
+s Anc1.Anc1refChr1                18536  2 +  296994 CA
+s Anc2.Anc2refChr4                 9654  2 +   16800 CA
+s mr.mrrefChr3                   175978  2 +  296991 CA
+s simCow_chr6.simCow.chr6        300947  2 +  602619 CA
+s simDog_chr6.simDog.chr6        287142  2 +  593897 TA
+s simHuman_chr6.simHuman.chr6    310854  2 +  601863 CA
+s simMouse_chr6.simMouse.chr6    325024  2 +  636262 CA
+s simRat_chr6.simRat.chr6        316450  2 +  647215 AG
+
+a
+s Anc0.Anc0refChr2                10102  4 +  269145 AGTG
+s Anc1.Anc1refChr1                18538  4 +  296994 AGTG
+s Anc2.Anc2refChr4                 9656  4 +   16800 AGTG
+s mr.mrrefChr3                   175980  4 +  296991 ACTG
+s simCow_chr6.simCow.chr6        300949  4 +  602619 ATTG
+s simDog_chr6.simDog.chr6        287145  4 +  593897 AGTG
+s simHuman_chr6.simHuman.chr6    310856  4 +  601863 TGTG
+s simMouse_chr6.simMouse.chr6    325026  4 +  636262 ACTG
+s simRat_chr6.simRat.chr6        316452  4 +  647215 ACTT
+
+a
+s Anc0.Anc0refChr2                10106  5 +  269145 TGAGG
+s Anc1.Anc1refChr1                18542  5 +  296994 TGAGG
+s Anc2.Anc2refChr4                 9660  5 +   16800 TGAGG
+s mr.mrrefChr3                   175984  5 +  296991 AAAAC
+s simCow_chr6.simCow.chr6        300953  5 +  602619 TGACA
+s simDog_chr6.simDog.chr6        287149  5 +  593897 TGAGG
+s simHuman_chr6.simHuman.chr6    310863  5 +  601863 TGAGG
+s simMouse_chr6.simMouse.chr6    325030  5 +  636262 AAAAC
+s simRat_chr6.simRat.chr6        316456  5 +  647215 AAAAC
+
+a
+s Anc0.Anc0refChr2                10111  17 +  269145 TCTATTGCTTGTAGAAG
+s Anc1.Anc1refChr1                18547  17 +  296994 TCTATTGCTTGTAGAAG
+s Anc2.Anc2refChr4                 9665  17 +   16800 TCTATTGCTTGTAGAAG
+s mr.mrrefChr3                   175991  17 +  296991 TCTGCTCCTTCTGGTCC
+s simCow_chr6.simCow.chr6        300958  17 +  602619 TCTATTGCTTGTAGAAG
+s simDog_chr6.simDog.chr6        287154  11 +  593897 TCCGTT-----TATAA-
+s simHuman_chr6.simHuman.chr6    310868  17 +  601863 TCTATGAATTGTAGAAG
+s simMouse_chr6.simMouse.chr6    325037  17 +  636262 TCTGCTCCTTCTGGTCC
+s simRat_chr6.simRat.chr6        316463  17 +  647215 TCGGCTCCTTCTGGTGC
+
+a
+s Anc0.Anc0refChr2                10128  10 +  269145 CTGCAGTTGG
+s Anc1.Anc1refChr1                18564  10 +  296994 CTGCAGTTGG
+s Anc2.Anc2refChr4                 9682  10 +   16800 CTGCAGTTGG
+s mr.mrrefChr3                   176009   7 +  296991 CTGC---TCC
+s simCow_chr6.simCow.chr6        300975  10 +  602619 CTGCAGTTGG
+s simDog_chr6.simDog.chr6        287165   9 +  593897 -TTAAGTTGG
+s simHuman_chr6.simHuman.chr6    310885  10 +  601863 CTGCAGTTGG
+s simMouse_chr6.simMouse.chr6    325055   7 +  636262 CTGC---TCC
+s simRat_chr6.simRat.chr6        316481   7 +  647215 CCGC---TTT
+
+a
+s Anc0.Anc0refChr2                10138  4 +  269145 TGCT
+s Anc1.Anc1refChr1                18574  4 +  296994 TGCT
+s Anc2.Anc2refChr4                 9692  4 +   16800 TGCT
+s mr.mrrefChr3                   176016  4 +  296991 TGAA
+s simCow_chr6.simCow.chr6        300985  4 +  602619 TGCT
+s simDog_chr6.simDog.chr6        287174  1 +  593897 T---
+s simHuman_chr6.simHuman.chr6    310896  4 +  601863 TGTT
+s simMouse_chr6.simMouse.chr6    325062  4 +  636262 TGAA
+s simRat_chr6.simRat.chr6        316488  4 +  647215 TGAA
+
+a
+s Anc0.Anc0refChr2                10142  4 +  269145 TCTT
+s Anc1.Anc1refChr1                18578  4 +  296994 TCTT
+s Anc2.Anc2refChr4                 9696  4 +   16800 TCTT
+s mr.mrrefChr3                   176020  4 +  296991 TCTT
+s simCow_chr6.simCow.chr6        300990  4 +  602619 TCTT
+s simDog_chr6.simDog.chr6        287175  3 +  593897 -CTT
+s simHuman_chr6.simHuman.chr6    310900  4 +  601863 TCTT
+s simMouse_chr6.simMouse.chr6    325066  4 +  636262 TCTT
+s simRat_chr6.simRat.chr6        316492  4 +  647215 TCTT
+
+a
+s Anc0.Anc0refChr2                10146  8 +  269145 TGACCACC
+s Anc1.Anc1refChr1                18582  8 +  296994 TGACCACC
+s Anc2.Anc2refChr4                 9700  8 +   16800 TGACCACC
+s mr.mrrefChr3                   176027  8 +  296991 TGATGACT
+s simCow_chr6.simCow.chr6        300994  8 +  602619 TGACCACC
+s simDog_chr6.simDog.chr6        287178  8 +  593897 TGACCACC
+s simHuman_chr6.simHuman.chr6    310904  8 +  601863 GGACCAGC
+s simMouse_chr6.simMouse.chr6    325073  8 +  636262 TGATGACT
+s simRat_chr6.simRat.chr6        316499  8 +  647215 TGATGACT
+
+a
+s Anc0.Anc0refChr2                10154  3 +  269145 AAT
+s Anc1.Anc1refChr1                18590  3 +  296994 AAT
+s Anc2.Anc2refChr4                 9708  3 +   16800 AAT
+s mr.mrrefChr3                   176035  3 +  296991 AAT
+s simCow_chr6.simCow.chr6        301002  3 +  602619 AAT
+s simDog_chr6.simDog.chr6        287189  3 +  593897 AAT
+s simHuman_chr6.simHuman.chr6    310912  3 +  601863 AAA
+s simMouse_chr6.simMouse.chr6    325081  3 +  636262 AAT
+s simRat_chr6.simRat.chr6        316507  3 +  647215 GAT
+
+a
+s Anc0.Anc0refChr2                10157  1 +  269145 T
+s Anc1.Anc1refChr1                18593  1 +  296994 T
+s Anc2.Anc2refChr4                 9711  1 +   16800 T
+s mr.mrrefChr3                   176039  1 +  296991 T
+s simCow_chr6.simCow.chr6        301005  1 +  602619 G
+s simDog_chr6.simDog.chr6        287192  1 +  593897 T
+s simHuman_chr6.simHuman.chr6    310915  1 +  601863 T
+s simMouse_chr6.simMouse.chr6    325085  1 +  636262 T
+s simRat_chr6.simRat.chr6        316511  1 +  647215 T
+
+a
+s Anc0.Anc0refChr2                10158  4 +  269145 CCCA
+s Anc1.Anc1refChr1                18594  4 +  296994 CCCA
+s Anc2.Anc2refChr4                 9712  4 +   16800 CCCA
+s mr.mrrefChr3                   176040  4 +  296991 ACCA
+s simCow_chr6.simCow.chr6        301007  3 +  602619 -CCA
+s simDog_chr6.simDog.chr6        287193  4 +  593897 CCCA
+s simHuman_chr6.simHuman.chr6    310916  4 +  601863 CCCA
+s simMouse_chr6.simMouse.chr6    325089  4 +  636262 ACCA
+s simRat_chr6.simRat.chr6        316512  4 +  647215 ACCA
+
+a
+s Anc0.Anc0refChr2                10162  1 +  269145 A
+s Anc1.Anc1refChr1                18598  1 +  296994 A
+s Anc2.Anc2refChr4                 9716  1 +   16800 A
+s mr.mrrefChr3                   176045  1 +  296991 A
+s simCow_chr6.simCow.chr6        301010  1 +  602619 A
+s simDog_chr6.simDog.chr6        287197  1 +  593897 A
+s simHuman_chr6.simHuman.chr6    310920  1 +  601863 A
+s simMouse_chr6.simMouse.chr6    325094  1 +  636262 A
+s simRat_chr6.simRat.chr6        316517  1 +  647215 A
+
+a
+s Anc0.Anc0refChr2                10163  61 +  269145 TGAAATCCTGCAAATCCTGCTAGACCATGTTCTAGTTCTCAACCCTTCAAATGGAATTGTT
+s Anc1.Anc1refChr1                18599  61 +  296994 TGAAATCCTGCAAATCCTGCTAGACCATGTTCTAGTTCTCAACCCTTCAAATGGAATTGTT
+s Anc2.Anc2refChr4                 9717  61 +   16800 TAAAATCCTGCAAATCCTGCTAGATCATGTTCTAGTTCTCAACCCTTCAAATGGAATTGTT
+s mr.mrrefChr3                   176050  61 +  296991 TGAACTCCTGCAATCCATACAAGTCCAATGTATAGTTTTTGACCCTTCATATCGAATTGTT
+s simCow_chr6.simCow.chr6        301011  61 +  602619 TAAAATCCTGCAAATCCTGCTTGATCATGTTATATTTTTCAAACCTTCGGATTGTAGTGTT
+s simDog_chr6.simDog.chr6        287198  61 +  593897 CAAAATCCCGCGAACCCCGCTAGATCACATTCTAGGTCTCAACCCTTCAAATGGAATTGTT
+s simHuman_chr6.simHuman.chr6    310921  60 +  601863 TGAAATCCTGCAAATTCTCCCAGACCATGTTGTAGTTCTCATCCCTTCAAAT-GAATCATT
+s simMouse_chr6.simMouse.chr6    325112  61 +  636262 TGAACTCCTGCAATCCATACAAGTCCAATGTATAGTTTTTGACCCTTCATATCGAATTGTT
+s simRat_chr6.simRat.chr6        316522  61 +  647215 TGAAGTCCTGCAATCTGTACAAGTTCAATGGATAGTTTTCTACCCTCCATATCGAATTGTT
+
+a
+s Anc0.Anc0refChr2                10224  2 +  269145 GT
+s Anc1.Anc1refChr1                18660  2 +  296994 GT
+s Anc2.Anc2refChr4                 9781  2 +   16800 GT
+s mr.mrrefChr3                   176111  2 +  296991 GT
+s simCow_chr6.simCow.chr6        301075  2 +  602619 GT
+s simDog_chr6.simDog.chr6        287262  2 +  593897 GT
+s simHuman_chr6.simHuman.chr6    310981  2 +  601863 GT
+s simMouse_chr6.simMouse.chr6    325173  2 +  636262 GT
+s simRat_chr6.simRat.chr6        316583  2 +  647215 AT
+
+a
+s Anc0.Anc0refChr2                10226  17 +  269145 CAcAGGTCctaaaatta
+s Anc1.Anc1refChr1                18662  17 +  296994 CACAGGTCCTAAAATTA
+s Anc2.Anc2refChr4                 9784  17 +   16800 CTcTAATCtgcaaatta
+s mr.mrrefChr3                   176113  17 +  296991 GACAGGTCCTAAACTTA
+s simCow_chr6.simCow.chr6        301078   7 +  602619 CT-TAATC---------
+s simDog_chr6.simDog.chr6        287265  17 +  593897 CTCTACTCTGCAAATTA
+s simHuman_chr6.simHuman.chr6    310983  15 +  601863 CACGGG-CC-ACAGCGG
+s simMouse_chr6.simMouse.chr6    325175  17 +  636262 GACAGGTCCTAAACTTA
+s simRat_chr6.simRat.chr6        316585  17 +  647215 GACAGGCCATAGACTTA
+
+a
+s Anc0.Anc0refChr2                10243  3 +  269145 ttt
+s Anc1.Anc1refChr1                18679  3 +  296994 TTT
+s Anc2.Anc2refChr4                 9801  3 +   16800 agt
+s mr.mrrefChr3                   176130  3 +  296991 TTT
+s simDog_chr6.simDog.chr6        287282  3 +  593897 AGT
+s simHuman_chr6.simHuman.chr6    310998  3 +  601863 TTT
+s simMouse_chr6.simMouse.chr6    325193  3 +  636262 TTT
+s simRat_chr6.simRat.chr6        316602  3 +  647215 CTT
+
+a
+s Anc0.Anc0refChr2                10246  7 +  269145 tatgaca
+s Anc1.Anc1refChr1                18682  7 +  296994 TATGACA
+s Anc2.Anc2refChr4                 9804  7 +   16800 gatgtca
+s mr.mrrefChr3                   176133  7 +  296991 TAGGACA
+s simDog_chr6.simDog.chr6        287286  7 +  593897 GATGTCA
+s simHuman_chr6.simHuman.chr6    311001  7 +  601863 TATTACA
+s simMouse_chr6.simMouse.chr6    325196  7 +  636262 TAGGACA
+s simRat_chr6.simRat.chr6        316605  7 +  647215 TAAGACA
+
+a
+s Anc0.Anc0refChr2                10253  4 +  269145 CACC
+s Anc1.Anc1refChr1                18689  4 +  296994 CACC
+s Anc2.Anc2refChr4                 9811  4 +   16800 CACG
+s mr.mrrefChr3                   176140  3 +  296991 -ACC
+s simDog_chr6.simDog.chr6        287293  4 +  593897 CACG
+s simHuman_chr6.simHuman.chr6    311009  4 +  601863 CACC
+s simMouse_chr6.simMouse.chr6    325203  3 +  636262 -ACC
+s simRat_chr6.simRat.chr6        316612  3 +  647215 -ACC
+
+a
+s Anc0.Anc0refChr2                10257  5 +  269145 TCAAA
+s Anc1.Anc1refChr1                18693  5 +  296994 TCAAA
+s Anc2.Anc2refChr4                 9815  5 +   16800 CCACA
+s mr.mrrefChr3                   176143  5 +  296991 TCAAA
+s simDog_chr6.simDog.chr6        287297  5 +  593897 CCACA
+s simHuman_chr6.simHuman.chr6    311200  5 +  601863 TCAAA
+s simMouse_chr6.simMouse.chr6    325206  5 +  636262 TCAAA
+s simRat_chr6.simRat.chr6        316615  5 +  647215 TCAGA
+
+a
+s Anc0.Anc0refChr2                10262  27 +  269145 CAATATGAGGTAAGCCCCTGTAATGAT
+s Anc1.Anc1refChr1                18698  27 +  296994 CAATATGAGGTAAGCCCCTGTAATGAT
+s Anc2.Anc2refChr4                 9824  27 +   16800 CATTATTAGGTCATCCTCTTTAATCAT
+s mr.mrrefChr3                   176148  27 +  296991 CAACATGAGGTAAGGCCCTGTAATGAT
+s simDog_chr6.simDog.chr6        287306  27 +  593897 CATTATTAGGTCATCCTCTTTAATCAT
+s simHuman_chr6.simHuman.chr6    311205  27 +  601863 CAATATGAGATAAGACCCTGTAATGAT
+s simMouse_chr6.simMouse.chr6    325211  27 +  636262 CAACACGAGGTACAGCCCTGTAATGAT
+s simRat_chr6.simRat.chr6        316620  27 +  647215 CAGCATGAGTTAAGGCCATGTATTGAC
+
+a
+s Anc0.Anc0refChr2                10289  1 +  269145 A
+s Anc1.Anc1refChr1                18725  1 +  296994 A
+s Anc2.Anc2refChr4                 9851  1 +   16800 A
+s mr.mrrefChr3                   176175  1 +  296991 A
+s simDog_chr6.simDog.chr6        287333  1 +  593897 A
+s simHuman_chr6.simHuman.chr6    311235  1 +  601863 A
+s simMouse_chr6.simMouse.chr6    325238  1 +  636262 A
+s simRat_chr6.simRat.chr6        316647  1 +  647215 A
+
+a
+s Anc0.Anc0refChr2                10290  36 +  269145 TATTTACTGTCATGTTGACTTATGGGCACAGAGATA
+s Anc1.Anc1refChr1                18727  36 +  296994 TATTTACTGTCATGTTGACTTATGGGCACAGAGATA
+s Anc2.Anc2refChr4                 9852  36 +   16800 TATTTACTGCCATGTTGAGTTATAAGCACAGAGATA
+s mr.mrrefChr3                   176177  36 +  296991 TATTTGCTGTCATGGCAACTTGTGGGAAAAGACATA
+s simDog_chr6.simDog.chr6        287334  36 +  593897 TATTTACTGCCATGTTGAGTTATAAGCACAGAGATA
+s simHuman_chr6.simHuman.chr6    311237  36 +  601863 TATTTCCTGTCATGATGACTTATGGGCACAGAAATA
+s simMouse_chr6.simMouse.chr6    325240  36 +  636262 CATTTGCTGTCATGGCAACTTGCGGGAAAAGACATA
+s simRat_chr6.simRat.chr6        316649  36 +  647215 TATTTGTGGTTATGGCAACTTGTGAGAAAAGAGATA
+
+a
+s Anc0.Anc0refChr2                10326  4 +  269145 GATC
+s Anc1.Anc1refChr1                18763  4 +  296994 GATC
+s Anc2.Anc2refChr4                 9888  4 +   16800 GATC
+s mr.mrrefChr3                   176213  4 +  296991 CAGT
+s simDog_chr6.simDog.chr6        287370  4 +  593897 GATC
+s simHuman_chr6.simHuman.chr6    311274  4 +  601863 GTTC
+s simMouse_chr6.simMouse.chr6    325276  4 +  636262 CAGT
+s simRat_chr6.simRat.chr6        316685  4 +  647215 CAGC
+
+a
+s Anc0.Anc0refChr2                10330  19 +  269145 TGATGTATGGAGCTTCTTT
+s Anc1.Anc1refChr1                18767  19 +  296994 TGATGTATGGAGCTTCTTT
+s Anc2.Anc2refChr4                 9892  19 +   16800 TGATGTATGGAGCTCCTTT
+s mr.mrrefChr3                   176217  18 +  296991 TTGTGTATG-AGCTTGAAT
+s simDog_chr6.simDog.chr6        287375  19 +  593897 TGATGTATGGAGCTCCTTT
+s simHuman_chr6.simHuman.chr6    311278  19 +  601863 TGATGTGTGGAGCTTCTTT
+s simMouse_chr6.simMouse.chr6    325280  18 +  636262 TTGTATATG-AGCTTGAAT
+s simRat_chr6.simRat.chr6        316689   9 +  647215 TTGTGTAT----------T
+
+a
+s Anc0.Anc0refChr2                10349  4 +  269145 GCTT
+s Anc1.Anc1refChr1                18786  4 +  296994 GCTT
+s Anc2.Anc2refChr4                 9911  4 +   16800 GCTT
+s mr.mrrefChr3                   176235  4 +  296991 GCTA
+s simDog_chr6.simDog.chr6        287406  4 +  593897 GCTT
+s simHuman_chr6.simHuman.chr6    311297  4 +  601863 GCCT
+s simMouse_chr6.simMouse.chr6    325298  4 +  636262 GCTA
+s simRat_chr6.simRat.chr6        316698  2 +  647215 --TA
+
+a
+s Anc0.Anc0refChr2                10353  3 +  269145 ACT
+s Anc1.Anc1refChr1                18790  3 +  296994 ACT
+s Anc2.Anc2refChr4                 9915  3 +   16800 ACT
+s mr.mrrefChr3                   176239  3 +  296991 ATT
+s simDog_chr6.simDog.chr6        287416  3 +  593897 ACT
+s simHuman_chr6.simHuman.chr6    311301  3 +  601863 ACT
+s simMouse_chr6.simMouse.chr6    325302  3 +  636262 ATT
+s simRat_chr6.simRat.chr6        316700  3 +  647215 ATT
+
+a
+s Anc0.Anc0refChr2                10356  2 +  269145 TG
+s Anc1.Anc1refChr1                18793  2 +  296994 TG
+s Anc2.Anc2refChr4                 9918  2 +   16800 TG
+s mr.mrrefChr3                   176243  2 +  296991 TG
+s simDog_chr6.simDog.chr6        287419  2 +  593897 TG
+s simHuman_chr6.simHuman.chr6    311304  2 +  601863 TG
+s simMouse_chr6.simMouse.chr6    325306  2 +  636262 TG
+s simRat_chr6.simRat.chr6        316704  2 +  647215 TG
+
+a
+s Anc0.Anc0refChr2                10358  19 +  269145 CATGAGTTTGAACTTGTTA
+s Anc1.Anc1refChr1                18795  19 +  296994 CATGAGTTTGAACTTGTTA
+s Anc2.Anc2refChr4                 9920  19 +   16800 CATGAGTTTGAACTTGTTA
+s mr.mrrefChr3                   176245  19 +  296991 AATCAATTGGCATCTAATA
+s simCow_chr6.simCow.chr6        301085   7 +  602619 ------------CTTGTTA
+s simDog_chr6.simDog.chr6        287421  19 +  593897 CATGAGTTTGAACTCGTTA
+s simHuman_chr6.simHuman.chr6    311306  19 +  601863 TATGGGTTTGAACTTGCTA
+s simMouse_chr6.simMouse.chr6    325308  19 +  636262 AATAAATTGGCATCTAATA
+s simRat_chr6.simRat.chr6        316707  19 +  647215 AATCAATTGGCATCTAATA
+
+a
+s Anc0.Anc0refChr2                10377  5 +  269145 CTTGT
+s Anc1.Anc1refChr1                18814  5 +  296994 CTTGT
+s Anc2.Anc2refChr4                 9939  5 +   16800 CTTGT
+s mr.mrrefChr3                   176264  4 +  296991 CTA-T
+s simCow_chr6.simCow.chr6        301092  5 +  602619 CTTGA
+s simDog_chr6.simDog.chr6        287441  5 +  593897 CTTGT
+s simHuman_chr6.simHuman.chr6    311325  5 +  601863 CTTAT
+s simMouse_chr6.simMouse.chr6    325327  4 +  636262 CTA-T
+s simRat_chr6.simRat.chr6        316726  4 +  647215 CTA-A
+
+a
+s Anc0.Anc0refChr2                10382  22 +  269145 AAATCAATCTGCATTCAATGCT
+s Anc1.Anc1refChr1                18819  22 +  296994 AAATCAATCTGCATTCAATGCT
+s Anc2.Anc2refChr4                 9944  22 +   16800 AAATCAATCTGCAGTTGATGCT
+s mr.mrrefChr3                   176268  21 +  296991 AA-TCAATCTGTATTCAATGCT
+s simCow_chr6.simCow.chr6        301098  22 +  602619 CAATCAATATGTGGACAATGCT
+s simDog_chr6.simDog.chr6        287446  22 +  593897 AAATCAGACTGCAGTTGATGCT
+s simHuman_chr6.simHuman.chr6    311330  17 +  601863 AATTCCATCTCCATTCA-----
+s simMouse_chr6.simMouse.chr6    325331  21 +  636262 AA-TCAATCTGTATTTAATGCT
+s simRat_chr6.simRat.chr6        316730  21 +  647215 AA-CCAATCTGTATTCAATGCT
+
+a
+s Anc0.Anc0refChr2                10404  20 +  269145 CTTTTTCTACTTAGTATGAG
+s Anc1.Anc1refChr1                18841  20 +  296994 CTTTTTCTACTTAGTATGAG
+s Anc2.Anc2refChr4                 9966  20 +   16800 CTTTTTCTGCTTAGTATGAG
+s mr.mrrefChr3                   176290  16 +  296991 CTTATTCAACTAAGT-T---
+s simCow_chr6.simCow.chr6        301121  19 +  602619 CTTTTTCT-CTTAGTATGAG
+s simDog_chr6.simDog.chr6        287468  19 +  593897 CGTTCTCTGCTTAGTATT-G
+s simHuman_chr6.simHuman.chr6    311347  20 +  601863 CTTTTTCTACTCAGTATGAT
+s simMouse_chr6.simMouse.chr6    325353  16 +  636262 CTTATTGCACTAAGT-T---
+s simRat_chr6.simRat.chr6        316752  16 +  647215 CTTTTTCAACTTAGT-T---
+
+a
+s Anc0.Anc0refChr2                10424  51 +  269145 TTCAGACTTATCACTTACATTGGCTGCATCTAGTGCATACCCTTCCAAATG
+s Anc1.Anc1refChr1                18861  51 +  296994 TTCAGACTTATCACTTACATTGGCTGCATCTAGTGCATACCCTTCCAAATG
+s Anc2.Anc2refChr4                 9987  51 +   16800 TTCAGACTTATCACTTACATTGGCTGCATCTAGTGCATACCCTTCTAAATG
+s mr.mrrefChr3                   176306  21 +  296991 -----------------------CTGC-----GGGCACAC--TTCCAAAAA
+s simCow_chr6.simCow.chr6        301146  51 +  602619 TTCAGACTTATTACTTATATTGGCTGCAACTAGTGCATAGCTTTCTATAAC
+s simDog_chr6.simDog.chr6        287488  51 +  593897 TTCAGACCAATCACTTACATTCACTGCATCTAGTGCATGCCCTTTTAAATG
+s simHuman_chr6.simHuman.chr6    311367  50 +  601863 TTCAGACTTATCACTCACATGGGCTGCATCTAGCGTGTACTCTTCCAAAT-
+s simMouse_chr6.simMouse.chr6    325369  21 +  636262 -----------------------CTGC-----GGGCACAC--TTTCAAAAA
+s simRat_chr6.simRat.chr6        316768  21 +  647215 -----------------------CTAG-----GGACACAC--TTCCAAAAA
+
+a
+s Anc0.Anc0refChr2                10475  23 +  269145 TGTGAGTCATTTTCCTTCTTCCC
+s Anc1.Anc1refChr1                18912  23 +  296994 TGTGAGTCATTTTCCTTCTTCCC
+s Anc2.Anc2refChr4                10038  23 +   16800 TGTGAGTCATTTTCCTTCTTCCC
+s mr.mrrefChr3                   176328  23 +  296991 TGGAAGTAATTGTCCTTCTTCCC
+s simCow_chr6.simCow.chr6        301197  23 +  602619 TGATAGTCATTTTCCTTCTTCCC
+s simDog_chr6.simDog.chr6        287539  23 +  593897 TTTGATTCATTTTCCTTTTTTCC
+s simHuman_chr6.simHuman.chr6    311417  23 +  601863 TGTGAGTCACTTTCCTCCTTCCC
+s simMouse_chr6.simMouse.chr6    325391  23 +  636262 TGGAAGTAATTGTCCCTCTTCCC
+s simRat_chr6.simRat.chr6        316790  17 +  647215 TGGA------TCTCTTTCTTCCT
+
+a
+s Anc0.Anc0refChr2                10498  8 +  269145 ATCATATA
+s Anc1.Anc1refChr1                18935  8 +  296994 ATCATATA
+s Anc2.Anc2refChr4                10061  8 +   16800 ATCATATA
+s mr.mrrefChr3                   176352  7 +  296991 ATCCTAT-
+s simCow_chr6.simCow.chr6        301220  8 +  602619 ATCATATA
+s simDog_chr6.simDog.chr6        287562  8 +  593897 ACCATGTA
+s simHuman_chr6.simHuman.chr6    311440  7 +  601863 ATCAGA-A
+s simMouse_chr6.simMouse.chr6    325415  7 +  636262 ATCCAAT-
+s simRat_chr6.simRat.chr6        316808  5 +  647215 AT--TAT-
+
+a
+s Anc0.Anc0refChr2                10506  6 +  269145 GACAAT
+s Anc1.Anc1refChr1                18943  6 +  296994 GACAAT
+s Anc2.Anc2refChr4                10071  6 +   16800 GACAAT
+s mr.mrrefChr3                   176359  3 +  296991 ---AAT
+s simCow_chr6.simCow.chr6        301230  6 +  602619 GACAGT
+s simDog_chr6.simDog.chr6        287572  6 +  593897 GAGAAT
+s simHuman_chr6.simHuman.chr6    311447  5 +  601863 GACTA-
+s simMouse_chr6.simMouse.chr6    325422  3 +  636262 ---AAT
+s simRat_chr6.simRat.chr6        316813  3 +  647215 ---AAT
+
+a
+s Anc0.Anc0refChr2                10512  28 +  269145 GATTTAGGGACATTAAAAAGGCTCTCAT
+s Anc1.Anc1refChr1                18949  28 +  296994 GATTTAGGGACATTAAAAAGGCTCTCAT
+s Anc2.Anc2refChr4                10080  28 +   16800 GATTTAGGGACATTAAAAAGGCTCTCAT
+s mr.mrrefChr3                   176362  20 +  296991 GA-------AC-TCACAACAACTCTCTT
+s simCow_chr6.simCow.chr6        301239  28 +  602619 GATTTAGGAGTATTCAAAAGGCTCTCAT
+s simDog_chr6.simDog.chr6        287581  28 +  593897 GATTTAGGGACATTAAACAGGCTCTCAT
+s simHuman_chr6.simHuman.chr6    311452  28 +  601863 GATTTAAGGAAATTAAAAAGGCTCTTGT
+s simMouse_chr6.simMouse.chr6    325425  19 +  636262 GA-------AC-TCACAACAACTCTCT-
+s simRat_chr6.simRat.chr6        316816  20 +  647215 GA-------AC-TCACAACAACTCCCAT
+
+a
+s Anc0.Anc0refChr2                10540  17 +  269145 GGTGCATATTGGGGTAA
+s Anc1.Anc1refChr1                18977  17 +  296994 GGTGCATATTGGGGTAA
+s Anc2.Anc2refChr4                10108  17 +   16800 GGTGCATATTGGGGTAA
+s mr.mrrefChr3                   176382  17 +  296991 CGTGCATATTGGGGTTA
+s simCow_chr6.simCow.chr6        301267   9 +  602619 GGT---T-----GGTAA
+s simDog_chr6.simDog.chr6        287609  17 +  593897 GGTGCATATTGGGGTAA
+s simHuman_chr6.simHuman.chr6    311480  17 +  601863 GCTGCATATTGGGGTAA
+s simMouse_chr6.simMouse.chr6    325447  10 +  636262 CGTG-------GGGTTG
+s simRat_chr6.simRat.chr6        316836  17 +  647215 CGTGCATATTGGGGTTA
+
+a
+s Anc0.Anc0refChr2                10557  2 +  269145 AG
+s Anc1.Anc1refChr1                18994  2 +  296994 AG
+s Anc2.Anc2refChr4                10125  2 +   16800 TG
+s mr.mrrefChr3                   176399  2 +  296991 AG
+s simCow_chr6.simCow.chr6        301276  2 +  602619 TG
+s simDog_chr6.simDog.chr6        287626  2 +  593897 CT
+s simHuman_chr6.simHuman.chr6    311546  2 +  601863 AG
+s simMouse_chr6.simMouse.chr6    325457  2 +  636262 AG
+s simRat_chr6.simRat.chr6        316853  2 +  647215 AG
+
+a
+s Anc0.Anc0refChr2                10559  35 +  269145 GTTCAACTACATGGGTACTAAATTTCGGTTTTATT
+s Anc1.Anc1refChr1                18996  35 +  296994 GTTCAACTACATGGGTACTAAATTTCGGTTTTATT
+s Anc2.Anc2refChr4                10129  35 +   16800 GTTCAACTGCATGGGTACTAAATTTTGGTTTTATT
+s mr.mrrefChr3                   176401  26 +  296991 GTTCAAACACTTGGGTG-----TTTC----TTAGT
+s simCow_chr6.simCow.chr6        301280  35 +  602619 ATTCAACTGCATGGGTACTAAATTTTGGTTTTATT
+s simDog_chr6.simDog.chr6        287630  35 +  593897 GTTAGACTGTGAGGGCACTAAATTTTGGCTTTATT
+s simHuman_chr6.simHuman.chr6    311548  35 +  601863 GTTCAACTACATGGGTAGTAAATTTCGGTCTTAAT
+s simMouse_chr6.simMouse.chr6    325459  26 +  636262 GTTCAAACACTTGGGTG-----TTTC----TTAGT
+s simRat_chr6.simRat.chr6        316855  26 +  647215 GCTCACACACCTGGGTG-----CTTC----TTGGT
+
+a
+s Anc0.Anc0refChr2                10594  2 +  269145 CT
+s Anc1.Anc1refChr1                19032  2 +  296994 CT
+s Anc2.Anc2refChr4                10164  2 +   16800 CA
+s mr.mrrefChr3                   176428  2 +  296991 CT
+s simCow_chr6.simCow.chr6        301315  2 +  602619 CA
+s simDog_chr6.simDog.chr6        287665  2 +  593897 CA
+s simHuman_chr6.simHuman.chr6    311584  2 +  601863 CT
+s simMouse_chr6.simMouse.chr6    325486  2 +  636262 CT
+s simRat_chr6.simRat.chr6        316882  2 +  647215 CT
+
+a
+s Anc0.Anc0refChr2                10596  1 +  269145 T
+s Anc1.Anc1refChr1                19034  1 +  296994 T
+s Anc2.Anc2refChr4                10166  1 +   16800 T
+s mr.mrrefChr3                   176430  1 +  296991 T
+s simCow_chr6.simCow.chr6        301317  1 +  602619 A
+s simDog_chr6.simDog.chr6        287667  1 +  593897 T
+s simHuman_chr6.simHuman.chr6    311588  1 +  601863 T
+s simMouse_chr6.simMouse.chr6    325488  1 +  636262 T
+s simRat_chr6.simRat.chr6        316884  1 +  647215 T
+
+a
+s Anc0.Anc0refChr2                10597  17 +  269145 GGTTCTGAATCTTAATG
+s Anc1.Anc1refChr1                19035  17 +  296994 GGTTCTGAATCTTAATG
+s Anc2.Anc2refChr4                10167  17 +   16800 GGTTCTGAATTTTAATG
+s mr.mrrefChr3                   176433  14 +  296991 GGATCTAG-TCTT--TG
+s simCow_chr6.simCow.chr6        301318  17 +  602619 GGTTCTCAATTTTAATG
+s simDog_chr6.simDog.chr6        287668  17 +  593897 GGTTCTGGATTGTAATG
+s simHuman_chr6.simHuman.chr6    311589  17 +  601863 GGTTCTGAATCTTATTG
+s simMouse_chr6.simMouse.chr6    325491  14 +  636262 GGATCTAG-GCTT--TG
+s simRat_chr6.simRat.chr6        316887  14 +  647215 GGCTCTAG-TCCT--TG
+
+a
+s Anc0.Anc0refChr2                10614  58 +  269145 CCAGAGGCCTCACTAACTACCCATTGTGCATTTGTCTAAGACACCCAAGATATTTGTA
+s Anc1.Anc1refChr1                19052  58 +  296994 CCAGAGGCCTCACTAACTACCCATTGTGCATTTGTCTAAGACACCCAAGATATTTGTA
+s Anc2.Anc2refChr4                10184  58 +   16800 CCAGAGGCCTCACTAACTACCCATTGTGCATTTGTCTAAGACACCCAAGATATTTGTA
+s mr.mrrefChr3                   176447  49 +  296991 CCAGAGGCCTCACTGATTACACATTGTG-----GT--AAGTCACCCAGGTTTT--GTA
+s simCow_chr6.simCow.chr6        301335  58 +  602619 CCAGAGCCCTCTCTTACTACCCACTTTTCATTTGTCTACAATAACCAAGATATTTGTA
+s simDog_chr6.simDog.chr6        287685  54 +  593897 CCAGATGGCTCACTAGCTATGCATTGTGCACTT----AAGACACCCAATATGTTTGTA
+s simHuman_chr6.simHuman.chr6    311606  58 +  601863 CCAGAGACCTCACTAACAACCCAGTGTGCATGTGTATAAGAAACTCAAGATATTTGTA
+s simMouse_chr6.simMouse.chr6    325505  49 +  636262 CCAGAGGCCTCATTGATTACACGTTGTA-----GT--AAGTCACCCAGGTTTT--GTA
+s simRat_chr6.simRat.chr6        316904  49 +  647215 CCAGAAGTCTCACTGATTACACATTGTG-----GT--AAGTCACGCAGGTTTT--GTA
+
+a
+s Anc0.Anc0refChr2                10672  15 +  269145 AGATTAATGCTAAGC
+s Anc1.Anc1refChr1                19110  15 +  296994 AGATTAATGCTAAGC
+s Anc2.Anc2refChr4                10242  15 +   16800 AGATTAATGCTAAGC
+s mr.mrrefChr3                   176497  13 +  296991 ATAATAGTGATT--C
+s simCow_chr6.simCow.chr6        301393  15 +  602619 AGAGCAACAGTAAAC
+s simDog_chr6.simDog.chr6        287739  15 +  593897 AAGTTGATGCAAAGC
+s simHuman_chr6.simHuman.chr6    311664  14 +  601863 AGATTAATGCTAAG-
+s simMouse_chr6.simMouse.chr6    325572  13 +  636262 ATAATAGTGATT--C
+s simRat_chr6.simRat.chr6        316954  13 +  647215 ATAATGGTGATT--C
+
+a
+s Anc0.Anc0refChr2                10687  2 +  269145 TT
+s Anc1.Anc1refChr1                19125  2 +  296994 TT
+s Anc2.Anc2refChr4                10258  2 +   16800 TT
+s mr.mrrefChr3                   176510  2 +  296991 TT
+s simCow_chr6.simCow.chr6        301409  2 +  602619 TT
+s simDog_chr6.simDog.chr6        287755  2 +  593897 TA
+s simMouse_chr6.simMouse.chr6    325585  2 +  636262 TT
+s simRat_chr6.simRat.chr6        316967  2 +  647215 TT
+
+a
+s Anc0.Anc0refChr2                10689  5 +  269145 TAGTT
+s Anc1.Anc1refChr1                19127  5 +  296994 TAGTT
+s Anc2.Anc2refChr4                10261  5 +   16800 TAGTT
+s mr.mrrefChr3                   176512  5 +  296991 TAGTT
+s simCow_chr6.simCow.chr6        301412  5 +  602619 TAGTT
+s simDog_chr6.simDog.chr6        287758  5 +  593897 TAGTT
+s simMouse_chr6.simMouse.chr6    325587  5 +  636262 TAGTT
+s simRat_chr6.simRat.chr6        316969  5 +  647215 GAGTT
+
+a
+s Anc0.Anc0refChr2                10694  20 +  269145 TAATGTATGCTTTATGGTTG
+s Anc1.Anc1refChr1                19132  20 +  296994 TAATGTATGCTTTATGGTTG
+s Anc2.Anc2refChr4                10274  20 +   16800 TAATCTATGCTTCATGGTTG
+s mr.mrrefChr3                   176517  20 +  296991 TAATGTCTGCTTTATGGCTG
+s simCow_chr6.simCow.chr6        301425  20 +  602619 TAACCTTTGCTTCATGGCTG
+s simDog_chr6.simDog.chr6        287771  20 +  593897 TAATCTATGCTTCATGGTTG
+s simHuman_chr6.simHuman.chr6    311678  11 +  601863 ---TGT------TATGGTAG
+s simMouse_chr6.simMouse.chr6    325592  20 +  636262 TAATGTCTGCTTTATGGCTG
+s simRat_chr6.simRat.chr6        316974  20 +  647215 TAACCTCTGCTTTATGGCTG
+
+a
+s Anc0.Anc0refChr2                10714  2 +  269145 CA
+s Anc1.Anc1refChr1                19153  2 +  296994 CA
+s Anc2.Anc2refChr4                10294  2 +   16800 CA
+s mr.mrrefChr3                   176538  2 +  296991 CA
+s simCow_chr6.simCow.chr6        301445  2 +  602619 CA
+s simDog_chr6.simDog.chr6        287791  2 +  593897 CA
+s simMouse_chr6.simMouse.chr6    325613  2 +  636262 CA
+s simRat_chr6.simRat.chr6        316995  2 +  647215 CA
+
+a
+s Anc0.Anc0refChr2                10716  1 +  269145 T
+s Anc1.Anc1refChr1                19155  1 +  296994 T
+s Anc2.Anc2refChr4                10296  1 +   16800 T
+s mr.mrrefChr3                   176540  1 +  296991 T
+s simCow_chr6.simCow.chr6        301463  1 +  602619 T
+s simDog_chr6.simDog.chr6        287793  1 +  593897 T
+s simMouse_chr6.simMouse.chr6    325615  1 +  636262 T
+s simRat_chr6.simRat.chr6        316997  1 +  647215 T
+
+a
+s Anc0.Anc0refChr2                10717  1 +  269145 G
+s Anc1.Anc1refChr1                19156  1 +  296994 G
+s Anc2.Anc2refChr4                10297  1 +   16800 G
+s mr.mrrefChr3                   176549  1 +  296991 G
+s simCow_chr6.simCow.chr6        301464  1 +  602619 G
+s simDog_chr6.simDog.chr6        287794  1 +  593897 G
+s simMouse_chr6.simMouse.chr6    325624  1 +  636262 G
+s simRat_chr6.simRat.chr6        317006  1 +  647215 G
+
+a
+s Anc0.Anc0refChr2                10718  1 +  269145 G
+s Anc1.Anc1refChr1                19157  1 +  296994 G
+s Anc2.Anc2refChr4                10298  1 +   16800 G
+s mr.mrrefChr3                   176550  1 +  296991 T
+s simCow_chr6.simCow.chr6        301468  1 +  602619 G
+s simDog_chr6.simDog.chr6        287795  1 +  593897 G
+s simMouse_chr6.simMouse.chr6    325625  1 +  636262 T
+s simRat_chr6.simRat.chr6        317007  1 +  647215 T
+
+a
+s Anc0.Anc0refChr2                10719  43 +  269145 GTAGAAAATGTGGGTAACAAGGGCCTATAGCCCTACTTGCACT
+s Anc1.Anc1refChr1                19158  43 +  296994 GTAGAAAATGTGGGTAACAAGGGCCTATAGCCCTACTTGCACT
+s Anc2.Anc2refChr4                10299  43 +   16800 GTAGAAAGTGTGGGCAACAAGGGCCTATAGCCCTCCTTTCACT
+s mr.mrrefChr3                   176551  43 +  296991 GTAGACAATATGGATACTAAAGGCTCATGGCCCTACTTGCACT
+s simCow_chr6.simCow.chr6        301470  43 +  602619 GTAGACAGTGTGAACAACAAGGGCCTATCACCCTCCTGACACT
+s simDog_chr6.simDog.chr6        287796  43 +  593897 GTAGAAAGTGTGGGCAACACGGGCCTATAGCCATACTTTCACT
+s simHuman_chr6.simHuman.chr6    311690  23 +  601863 ------AATGT---TCACAAG-----------CTACTTGCACT
+s simMouse_chr6.simMouse.chr6    325626  43 +  636262 GTAGACAATATGGACGCTAAAGGATCATGGCCCTGCTTGCACA
+s simRat_chr6.simRat.chr6        317008  43 +  647215 GTAGACAATGTGGATACTAAAGGCCCATGGCCCTACTTGCACT
+
+a
+s Anc0.Anc0refChr2                10762  28 +  269145 TGCAGTTTATCTGAAATGTAACTATAGG
+s Anc1.Anc1refChr1                19201  28 +  296994 TGCAGTTTATCTGAAATGTAACTATAGG
+s Anc2.Anc2refChr4                10342  28 +   16800 TGGGGTTCATCCAAAATGTAACTATAGG
+s mr.mrrefChr3                   176594  16 +  296991 TACATTTTATCTGAA------------G
+s simCow_chr6.simCow.chr6        301513  28 +  602619 TAGAGTTCATCCAAAATGTAACTTTAGG
+s simDog_chr6.simDog.chr6        287925  28 +  593897 TGGGGTTCATCCAAAACTCAACTATAGG
+s simHuman_chr6.simHuman.chr6    311713  28 +  601863 CGCACTTTACCTGAAGCTAAAGTGTAAG
+s simMouse_chr6.simMouse.chr6    325669  16 +  636262 TACATTTTATCTAAA------------G
+s simRat_chr6.simRat.chr6        317051  16 +  647215 TACATTTTATCTGAA------------G
+
+a
+s Anc0.Anc0refChr2                10790  37 +  269145 CCCATATGGGCTGTGACTTATCTCAGTACTTGGGGAT
+s Anc1.Anc1refChr1                19229  37 +  296994 CCCATATGGGCTGTGACTTATCTCAGTACTTGGGGAT
+s Anc2.Anc2refChr4                10370  37 +   16800 CCCATATGGGCTGTGACTTATCTCAGTACTTGGGGAC
+s mr.mrrefChr3                   176610  28 +  296991 C------G---TGTGATCTATTGCAGTACTTGGTGAT
+s simCow_chr6.simCow.chr6        301541  35 +  602619 CCCATACAGGCTGTGACTTATC--AGTACTTGGGGAC
+s simDog_chr6.simDog.chr6        287953  37 +  593897 CCCGTATGGGCTGTGACATATCTCAGCACCTGGGGAC
+s simHuman_chr6.simHuman.chr6    311742  37 +  601863 CCCATATGGGCTGTGACTTATCTCAGTATTCGGAGAT
+s simMouse_chr6.simMouse.chr6    325685  28 +  636262 C------G---TGTGATCTATTGCAGTACTTGGTGAT
+s simRat_chr6.simRat.chr6        317067  26 +  647215 C-----------GTGATCTCTTGCAGTACTTGGTGAT
+
+a
+s Anc0.Anc0refChr2                10827  3 +  269145 AAG
+s Anc1.Anc1refChr1                19266  3 +  296994 AAG
+s Anc2.Anc2refChr4                10407  3 +   16800 AAG
+s mr.mrrefChr3                   176638  2 +  296991 AA-
+s simCow_chr6.simCow.chr6        301576  2 +  602619 T-G
+s simDog_chr6.simDog.chr6        287990  3 +  593897 AAG
+s simHuman_chr6.simHuman.chr6    311784  3 +  601863 AAG
+s simMouse_chr6.simMouse.chr6    325713  2 +  636262 AA-
+s simRat_chr6.simRat.chr6        317093  2 +  647215 AA-
+
+a
+s Anc0.Anc0refChr2                10830  1 +  269145 A
+s Anc1.Anc1refChr1                19269  1 +  296994 A
+s Anc2.Anc2refChr4                10410  1 +   16800 A
+s mr.mrrefChr3                   176640  1 +  296991 A
+s simCow_chr6.simCow.chr6        301578  1 +  602619 A
+s simDog_chr6.simDog.chr6        287993  1 +  593897 A
+s simHuman_chr6.simHuman.chr6    311788  1 +  601863 A
+s simMouse_chr6.simMouse.chr6    325715  1 +  636262 A
+s simRat_chr6.simRat.chr6        317095  1 +  647215 A
+
+a
+s Anc0.Anc0refChr2                10831  34 +  269145 GTCATCTAACAAGGATGCTACCAGCATCACTCTA
+s Anc1.Anc1refChr1                19270  34 +  296994 GTCATCTAACAAGGATGCTACCAGCATCACTCTA
+s Anc2.Anc2refChr4                10411  34 +   16800 GTCATCTAACAAGGGTGCTACCACCATCACTCTA
+s mr.mrrefChr3                   176641  34 +  296991 CTCAACTAAAAACAATGCTTCTAGTAATAGTCTG
+s simCow_chr6.simCow.chr6        301579  34 +  602619 GTCATCTAACAAGGGTTCTCCCACCATCAATCTA
+s simDog_chr6.simDog.chr6        287994  34 +  593897 TTCATCTAACTAGGGTGCTACCACCATCACTCTA
+s simHuman_chr6.simHuman.chr6    311797  34 +  601863 GTCATCTAACATGGATGCTGCCAGCACAATTCTA
+s simMouse_chr6.simMouse.chr6    325716  34 +  636262 CTCAACTAAAAACAGTGCTTTTATTAATAGGCTG
+s simRat_chr6.simRat.chr6        317096  34 +  647215 TTGACCTGAAAACAATACTTCTAGTAATACTCTG
+
+a
+s Anc0.Anc0refChr2                10865  32 +  269145 TTTTCCAGGTCTGAAGAATGTAGATTGGGATG
+s Anc1.Anc1refChr1                19304  32 +  296994 TTTTCCAGGTCTGAAGAATGTAGATTGGGATG
+s Anc2.Anc2refChr4                10445  32 +   16800 TTTTCCAGGTCTGAAGAATGTAGATCAGGATG
+s mr.mrrefChr3                   176675  32 +  296991 TTTTACAGGTCCAAGGAGAGTCAATTGAGATG
+s simCow_chr6.simCow.chr6        301613  32 +  602619 TTTTCTAGGTCTGACGAATGTAGATCAGGATG
+s simDog_chr6.simDog.chr6        288028  32 +  593897 TATTCCAGGTCTGAAGAGTGTAGATCAGCAAG
+s simHuman_chr6.simHuman.chr6    311831  32 +  601863 TTTTCCATGTCTGATGAATGTAGATTGGGATG
+s simMouse_chr6.simMouse.chr6    325750  23 +  636262 TTGTACAGGTC---------TCAAATGAGATG
+s simRat_chr6.simRat.chr6        317131  32 +  647215 TTTTACAGGGCCAAGGAGAGTCCATTAAGATC
+
+a
+s Anc0.Anc0refChr2                10897  15 +  269145 GCTATCAGATTTTTT
+s Anc1.Anc1refChr1                19336  15 +  296994 GCTATCAGATTTTTT
+s Anc2.Anc2refChr4                10477  15 +   16800 TTTATCAGATTTTTG
+s mr.mrrefChr3                   176707  15 +  296991 GCTACCAACTTTTTT
+s simCow_chr6.simCow.chr6        301645  15 +  602619 CTGATCAGACTTTTG
+s simDog_chr6.simDog.chr6        288060  15 +  593897 TTTATCAGATATTTG
+s simHuman_chr6.simHuman.chr6    311864  15 +  601863 GCATTCAGATTTTTT
+s simMouse_chr6.simMouse.chr6    325773  15 +  636262 GCTACCAACTTTTTT
+s simRat_chr6.simRat.chr6        317163  15 +  647215 GCTAGCAACTTTTTT
+
+a
+s Anc0.Anc0refChr2                10912  2 +  269145 AA
+s Anc1.Anc1refChr1                19351  2 +  296994 AA
+s Anc2.Anc2refChr4                10492  2 +   16800 AA
+s mr.mrrefChr3                   176722  2 +  296991 AG
+s simCow_chr6.simCow.chr6        301660  2 +  602619 AA
+s simDog_chr6.simDog.chr6        288075  2 +  593897 GA
+s simHuman_chr6.simHuman.chr6    311881  2 +  601863 AA
+s simMouse_chr6.simMouse.chr6    325788  2 +  636262 AG
+s simRat_chr6.simRat.chr6        317178  2 +  647215 AG
+
+a
+s Anc0.Anc0refChr2                10914  12 +  269145 AAAAGATCCAAA
+s Anc1.Anc1refChr1                19353  12 +  296994 AAAAGATCCAAA
+s Anc2.Anc2refChr4                10495  12 +   16800 AAAAGATCCAAA
+s mr.mrrefChr3                   176724  12 +  296991 AAAAGCTTCAAA
+s simCow_chr6.simCow.chr6        301663  12 +  602619 AAAAGATTCACA
+s simDog_chr6.simDog.chr6        288078  12 +  593897 AAAAGACCCAAA
+s simHuman_chr6.simHuman.chr6    311883  12 +  601863 AAAAGGTCCAAA
+s simMouse_chr6.simMouse.chr6    325792  12 +  636262 AAAAGCTTCAAA
+s simRat_chr6.simRat.chr6        317180  12 +  647215 AAGAGCTTCAAA
+
+a
+s Anc0.Anc0refChr2                10926  46 +  269145 TTTGTTGACAGTATCTAACTCTTATTATTGATTGCATTAACCTGCT
+s Anc1.Anc1refChr1                19365  46 +  296994 TTTGTTGACAGTATCTAACTCTTATTATTGATTGCATTAACCTGCT
+s Anc2.Anc2refChr4                10513  46 +   16800 TTTGTTGTCAGTATCTAACTTTTATTGTTCATAGCATTAACCTGCT
+s mr.mrrefChr3                   176736  46 +  296991 TTTGTTGACAATGTCTAACTCCTAGTATTGATTGCATTAATCTGCT
+s simCow_chr6.simCow.chr6        301681  46 +  602619 TTTGTTGTCAGTATCCGACTTTTGCTGCCTATCTCAGTAACCTGCT
+s simDog_chr6.simDog.chr6        288096  46 +  593897 TTTGTTGTTAGTAGCTAACTTCTATTGTTCATAGCATTAACCTGCG
+s simHuman_chr6.simHuman.chr6    311895  46 +  601863 TTTGTTGACAGTATCTAGCTCTTATCATTGATTATATTAACCTGCT
+s simMouse_chr6.simMouse.chr6    325804  46 +  636262 TTTGTTGACAATGTCTAACTCCTAGTATTGATAGCATTAATCTGCT
+s simRat_chr6.simRat.chr6        317192  46 +  647215 TTTGTTGACAATGTCTAACTCCTGGTATCCACTGCATTAATCTGCC
+
+a
+s Anc0.Anc0refChr2                10972  1 +  269145 A
+s Anc1.Anc1refChr1                19416  1 +  296994 A
+s Anc2.Anc2refChr4                10559  1 +   16800 A
+s mr.mrrefChr3                   176787  1 +  296991 A
+s simCow_chr6.simCow.chr6        301727  1 +  602619 C
+s simDog_chr6.simDog.chr6        288142  1 +  593897 A
+s simHuman_chr6.simHuman.chr6    311953  1 +  601863 A
+s simMouse_chr6.simMouse.chr6    325855  1 +  636262 A
+s simRat_chr6.simRat.chr6        317242  1 +  647215 A
+
+a
+s Anc0.Anc0refChr2                10973  2 +  269145 AC
+s Anc1.Anc1refChr1                19417  2 +  296994 AC
+s Anc2.Anc2refChr4                10560  2 +   16800 AC
+s mr.mrrefChr3                   176788  2 +  296991 AC
+s simCow_chr6.simCow.chr6        301728  2 +  602619 AC
+s simDog_chr6.simDog.chr6        288143  2 +  593897 AC
+s simHuman_chr6.simHuman.chr6    311955  2 +  601863 AC
+s simMouse_chr6.simMouse.chr6    325856  2 +  636262 AC
+s simRat_chr6.simRat.chr6        317243  2 +  647215 AC
+
+a
+s Anc0.Anc0refChr2                10975  1 +  269145 C
+s Anc1.Anc1refChr1                19419  1 +  296994 C
+s Anc2.Anc2refChr4                10562  1 +   16800 A
+s mr.mrrefChr3                   176790  1 +  296991 C
+s simCow_chr6.simCow.chr6        301730  1 +  602619 A
+s simDog_chr6.simDog.chr6        288145  1 +  593897 A
+s simHuman_chr6.simHuman.chr6    311963  1 +  601863 C
+s simMouse_chr6.simMouse.chr6    325858  1 +  636262 C
+s simRat_chr6.simRat.chr6        317245  1 +  647215 C
+
+a
+s Anc0.Anc0refChr2                10976  1 +  269145 A
+s Anc1.Anc1refChr1                19421  1 +  296994 A
+s Anc2.Anc2refChr4                10563  1 +   16800 A
+s mr.mrrefChr3                   176792  1 +  296991 A
+s simCow_chr6.simCow.chr6        301731  1 +  602619 A
+s simDog_chr6.simDog.chr6        288146  1 +  593897 A
+s simHuman_chr6.simHuman.chr6    311965  1 +  601863 A
+s simMouse_chr6.simMouse.chr6    325860  1 +  636262 A
+s simRat_chr6.simRat.chr6        317247  1 +  647215 A
+
+a
+s Anc0.Anc0refChr2                10977  18 +  269145 GATGTTTACACACCTTGA
+s Anc1.Anc1refChr1                19426  18 +  296994 GATGTTTACACACCTTGA
+s Anc2.Anc2refChr4                10564  18 +   16800 TATGCTTACACACCTTGA
+s mr.mrrefChr3                   176797  18 +  296991 GGTGTTTATACACCTTGA
+s simCow_chr6.simCow.chr6        301732  18 +  602619 TATGCTTACGCACCTTGA
+s simDog_chr6.simDog.chr6        288147  18 +  593897 TATGCTTACACACTTTGA
+s simHuman_chr6.simHuman.chr6    311970  18 +  601863 GATGTCTCCACACCTTGA
+s simMouse_chr6.simMouse.chr6    325865  18 +  636262 GGTGTTTATACACCTTGA
+s simRat_chr6.simRat.chr6        317252  17 +  647215 -GTGTTTATACACCTTGA
+
+a
+s Anc0.Anc0refChr2                10995  4 +  269145 TGAT
+s Anc1.Anc1refChr1                19445  4 +  296994 TGAT
+s Anc2.Anc2refChr4                10582  4 +   16800 TGAT
+s mr.mrrefChr3                   176816  4 +  296991 TGAT
+s simCow_chr6.simCow.chr6        301750  4 +  602619 TGAT
+s simDog_chr6.simDog.chr6        288165  4 +  593897 TGAT
+s simHuman_chr6.simHuman.chr6    311989  3 +  601863 -GAT
+s simMouse_chr6.simMouse.chr6    325884  4 +  636262 TGAT
+s simRat_chr6.simRat.chr6        317270  4 +  647215 TGAT
+
+a
+s Anc0.Anc0refChr2                10999  21 +  269145 CTGAGCCTAAATATGCGTGAT
+s Anc1.Anc1refChr1                19449  21 +  296994 CTGAGCCTAAATATGCGTGAT
+s Anc2.Anc2refChr4                10586  21 +   16800 CTGGGCCTAAATATGCATGAT
+s mr.mrrefChr3                   176823  21 +  296991 CTGAACCTAAATAGGCGTGAT
+s simCow_chr6.simCow.chr6        301754  21 +  602619 CTGGGCCTAACTAGGCATGAT
+s simDog_chr6.simDog.chr6        288169  21 +  593897 CTGGCCCTAGAAATGTATGGG
+s simHuman_chr6.simHuman.chr6    311992  21 +  601863 ATCAGCTTAAATATGCGTGAT
+s simMouse_chr6.simMouse.chr6    325891  21 +  636262 CTGAACCCAAATAGGCGTGAT
+s simRat_chr6.simRat.chr6        317277  21 +  647215 CTGAACCTGAGTTGACACGAC
+
+a
+s Anc0.Anc0refChr2                11020  68 +  269145 GGCCTAAATAGTTATGATCAGTCTGACACCAATTAATGTGGCCTCAACCACAACTAATTGCTGGGCTA
+s Anc1.Anc1refChr1                19470  68 +  296994 GGCCTAAATAGTTATGATCAGTCTGACACCAATTAATGTGGCCTCAACCACAACTAATTGCTGGGCTA
+s Anc2.Anc2refChr4                10607  68 +   16800 GGCCTAAATAGTTATGATCAGTCTGACACCAATTAATGTGGCCTCAACCAGAACTGATTGCTAGGCTA
+s mr.mrrefChr3                   176846  62 +  296991 -GACTAGA-----ATGCATGATATCACTGCAATCATTTACATCTCAAAGACACCTAATTGATGGGCTT
+s simCow_chr6.simCow.chr6        301775  58 +  602619 GGC-----TAGTTATGGTCAGTCTAACATCTATTAATGTGGCCTCAACGAGAA-T-ATT---AGGCTA
+s simDog_chr6.simDog.chr6        288190  68 +  593897 GGCCTAAATAGTTATGATCAGTCTGACACCAATTAATGTGGCCTCAACCAGCACTGATTGCTAGTCTA
+s simHuman_chr6.simHuman.chr6    312015  68 +  601863 GGCCTAAATAGGCATGATAAGTTTGACACCATTTAATGTGGCCTCAACAACAACTAATTGTTGGGCTA
+s simMouse_chr6.simMouse.chr6    325914  62 +  636262 -GAATAGA-----ATGCATGATATCACTACAATCATCTGCATCTCAAAGACACCTAATTGATGGGCTT
+s simRat_chr6.simRat.chr6        317300  62 +  647215 -GTCTAGA-----ATGCATGATATCACTGCAATAAATTACATCTCAAAGACACCTAATTGAGGGGCTT
+
+a score=0 mafExtractor_splicedBlock=true splice_id=2005_0
+s Anc0.Anc0refChr2                11088  25 +  269145 CATGATGTCCCTCAGTGTGGCACAG
+s Anc1.Anc1refChr1                19538  25 +  296994 CATGATGTCCCTCAGTGTGGCACAG
+s Anc2.Anc2refChr4                10675  25 +   16800 CATGATGTCCCTCAGTGTGGCACAG
+s mr.mrrefChr3                   176908  25 +  296991 TATGATTTCCCTCAGTTTGAGACAG
+s simCow_chr6.simCow.chr6        301833  25 +  602619 CATGATGTCCCTCAGAGTGGTGCAG
+s simDog_chr6.simDog.chr6        288258  25 +  593897 CATCATGTCCCTCAGTATGGCACAG
+s simHuman_chr6.simHuman.chr6    312083  25 +  601863 AATGATGTCCCTCAGTGTGGCACAG
+s simMouse_chr6.simMouse.chr6    325977  25 +  636262 TATTATTTCCCTCAGTTGGAGACAG
+s simRat_chr6.simRat.chr6        317362  25 +  647215 TATGATTTCCCTCAGTCTGAGACAG
+

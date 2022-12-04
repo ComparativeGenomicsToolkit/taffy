@@ -67,8 +67,22 @@ dataSetsPath=/Users/benedictpaten/Dropbox/Documents/work/myPapers/genomeCactusPa
 
 inclDirs = taffy/inc taffy/submodules/sonLib/C/inc taffy/submodules/sonLib/externalTools/cutest
 
-CFLAGS += ${inclDirs:%=-I${rootPath}/%} -I${LIBDIR} -I${rootPath}/include
-CXXFLAGS += ${inclDirs:%=-I${rootPath}/%} -I${LIBDIR} -I${rootPath}/include
+# htslib will be used only if it can be found via pkg-config
+# without it, taf won't support bgzipped input (but is otherwise the same)
+HAVE_HTSLIB = $(shell pkg-config --exists htslib; echo $$?)
+ifeq (${HAVE_HTSLIB},0)
+	HTSLIB_CFLAGS = $(shell pkg-config htslib --cflags) -DUSE_HTSLIB
+	ifdef TAF_STATIC
+		HTSLIB_LIBS = $(shell pkg-config htslib --libs --static) -llzma
+	else
+		HTSLIB_LIBS = $(shell pkg-config htslib --libs)
+	endif
+endif
+
+CFLAGS += ${inclDirs:%=-I${rootPath}/%} -I${LIBDIR} -I${rootPath}/include  ${HTSLIB_CFLAGS}
+CXXFLAGS += ${inclDirs:%=-I${rootPath}/%} -I${LIBDIR} -I${rootPath}/include ${HTSLIB_CFLAGS}
+
+LDLIBS += ${HTSLIB_LIBS}
 
 # libraries can't be added until they are build, so add as to LDLIBS until needed
 sonLibLibs = ${sonLibDir}/sonLib.a ${sonLibDir}/cuTest.a
@@ -96,5 +110,4 @@ endif
 
 # note: the CACTUS_STATIC_LINK_FLAGS below can generally be empty -- it's used by the static builder script only
 LDLIBS += ${sonLibLibs} ${LIBS} -L${rootPath}/lib -Wl,-rpath,${rootPath}/lib -lz -lbz2 -lpthread -lm -lstdc++ -lm ${CACTUS_STATIC_LINK_FLAGS}
-LIBDEPENDS = ${sonLibDir}/sonLib.a ${sonLibDir}/cuTest.a
 
