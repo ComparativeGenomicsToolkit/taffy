@@ -211,6 +211,55 @@ For example, to normalize a maf file do the following:
 unaligned sequences between maf blocks and `taffy norm` then merges together the blocks. The 
 `-k` option causes the output to be in maf format.
 
+# Referenced-based TAF and Indexing
+
+Neither format specification requires it, but *in practice* TAF, like MAF, is used to specify alignments
+along a single reference genome.  For instance, MAF files from both MultiZ and Cactus (via hal2maf)
+are **referenced-based**, and have the following properties:
+
+* The first row of each alignment block consists of a sequence from the reference genome.
+* The first row is on the forward (+) strand
+* The alignment blocks are ordered (in increasing order) by the coordinates of the sequences on the first row.
+* The intervals on the first row of each block do not overlap
+
+An **anchor line** in TAF is a column from which all sequence coordinates can be deduced without scanning
+backwards to previous lines in the file. In other words, each coordinate must be specified with either
+an `s` or `i` operation. If a TAF is reference-based and the lowest coordinate of each first-row
+sequence is specified on an anchor line, then the TAF file is **indexable**.
+
+A TAF file produced from a reference-based MAF file using `taf view` will be reference-based and indexable.
+
+Indexable TAF files can be indexed for random-access using `taffy index`:
+
+    taffy index -i TAF_FILE
+
+This command will create `TAF_FILE.tai`, which is a list mapping sequence names (first column) and
+start positions (second column) to offsets in the TAF file (third column). If two consecutive
+lines index the same sequence, the second one will be relative to the first (and the first column
+will be `*`). The `-b` option specifies the interval length in the index.  But only anchor
+lines (whose frequency is controlled by `taffy view -s` can ever be indexed.  Smaller index
+intervals will result in faster lookup times at the cost of the index itself being slower
+to load.
+
+Tuning this is a work in progress.
+
+An indexed TAF file can be accessed using `taffy view -r` to quickly pull out a subregion. For
+example, `taffy view -r hg38.chr10:550000-600000` will extract the 50000bp (0-based, open-ended)
+interval on `hg38.chr10` in either TAF (default) or MAF (add `-m) format. This works only if
+the TAF is referenced on hg38.
+
+Notes:
+
+* The sequence names do not need to be ordered for TAF indexing (ie chr2 could come before chr1
+in the file). Just the positions within each sequence must be in order
+
+* The index could further be generalized to support out-of-order (but still non-overlapping!)
+intervals without (I think) any changes to the interface or format. Instead of the
+simple seek + extend approach used when querying now, it would need to recheck and
+potentially re-seek after extending though any subsequent intervals.  This could potentially
+allow indexing non-reference intervals, but the effiency will degrade with the number of
+out-of-order intervals. 
+
 # Using C Library
 
 There is also a simple C library for working with taf/maf files. See taf.h in the
