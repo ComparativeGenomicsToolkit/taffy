@@ -245,7 +245,7 @@ Tuning this is a work in progress.
 
 An indexed TAF file can be accessed using `taffy view -r` to quickly pull out a subregion. For
 example, `taffy view -r hg38.chr10:550000-600000` will extract the 50000bp (0-based, open-ended)
-interval on `hg38.chr10` in either TAF (default) or MAF (add `-m) format. This works only if
+interval on `hg38.chr10` in either TAF (default) or MAF (add `-m`) format. This works only if
 the TAF is referenced on hg38.
 
 Notes:
