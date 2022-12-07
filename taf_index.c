@@ -13,7 +13,7 @@ static void usage() {
     fprintf(stderr, "taf_index [options]\n");
     fprintf(stderr, "Index a TAF file, output goes in <file>.tai\n");
     fprintf(stderr, "-i --inputFile : Input taf file to invert [REQUIRED]\n");
-    fprintf(stderr, "-b --blockSize : Write an index line for intervals of this many bp [default:1000000]\n");
+    fprintf(stderr, "-b --blockSize : Write an index line for intervals of this many bp [default:10000]\n");
     fprintf(stderr, "-l --logLevel : Set the log level\n");
     fprintf(stderr, "-h --help : Print this help message\n");
 }
@@ -26,7 +26,7 @@ int taf_index_main(int argc, char *argv[]) {
      */
     char *logLevelString = NULL;
     char *taf_fn = NULL;
-    int64_t block_size = 1000000;
+    int64_t block_size = 10000;
 
     ///////////////////////////////////////////////////////////////////////////
     // Parse the inputs

@@ -3,6 +3,7 @@
 #include "htslib/bgzf.h"
 #include "htslib/kstring.h"
 #include <ctype.h>
+#include <time.h>
 
 char *tai_path(const char *taf_path) {
     char *ret = (char*)st_calloc(strlen(taf_path) + 5, sizeof(char));
@@ -271,6 +272,7 @@ void tai_destruct(Tai* tai) {
 }
 
 Tai *tai_load(FILE* idx_fh) {
+    time_t start_time = time(NULL);
     Tai *tai = tai_construct();
     LI* li = LI_construct(idx_fh);
     char *line;
@@ -302,11 +304,12 @@ Tai *tai_load(FILE* idx_fh) {
         prev_rec = rec;
     }
     LI_destruct(li);
+    st_logInfo("Loaded .tai index in %" PRIi64 " seconds\n", time(NULL) - start_time);
     return tai;
 }
 
 TaiIt *tai_iterator(Tai* tai, LI *li, bool run_length_encode_bases, const char *contig, int64_t start, int64_t length) {
-
+    time_t start_time = time(NULL);
     TaiIt *tai_it = st_calloc(1, sizeof(TaiIt));
 
     // parse the region into the iterator
@@ -332,12 +335,15 @@ TaiIt *tai_iterator(Tai* tai, LI *li, bool run_length_encode_bases, const char *
     // sorted set doesn't let us iterate, so we use a second lookup to get
     // the next record
     TaiRec *tair_2 = stSortedSet_searchGreaterThan(tai->idx, &qr);
+    st_logInfo("Queried the in-memory .tai index in %" PRIi64 " seconds\n", time(NULL) - start_time);
 
     // now we know that the start of our region is somewhere in [tair_1, tair_2)
     // (with the possibility of tair_2 not existing)
 
     // move to the first record in our file
+    start_time = time(NULL);
     LI_seek(li, tair_1->file_pos);
+    st_logInfo("Seeked to the queried anchor position with taf file in %" PRIi64 " seconds\n", time(NULL) - start_time);
     LI_get_next_line(li);
 
     // force taf to start a new alignment at our current file position by making
@@ -347,12 +353,15 @@ TaiIt *tai_iterator(Tai* tai, LI *li, bool run_length_encode_bases, const char *
     // now we have to scan forward until we overlap actually the region
     // TODO: this will surely need speeding up with binary search for giant files...
     //       but i think that's best done once tests are set up based on the simpler version
+    start_time = time(NULL);
+    size_t scan_block_count = 0;
     tai_it->alignment = NULL;
     tai_it->p_alignment = NULL;
     Alignment *alignment = NULL;
     Alignment *p_alignment = NULL;
     int64_t file_pos = LI_tell(li);
     while((alignment = taf_read_block(p_alignment, tai_it->run_length_encode_bases, li)) != NULL) {
+        ++scan_block_count;
         if (tair_2 && file_pos >= tair_2->file_pos) {
             // we've gone past our query region: there's no hope
             alignment_destruct(alignment, true);
@@ -395,8 +404,11 @@ TaiIt *tai_iterator(Tai* tai, LI *li, bool run_length_encode_bases, const char *
             alignment_destruct(tai_it->p_alignment, true);
         }
         tai_iterator_destruct(tai_it);
+        st_logInfo("Scanned %" PRIi64 " blocks to NOT find region start in %" PRIi64 " seconds\n", scan_block_count, time(NULL) - start_time);
         return NULL;
     }
+
+    st_logInfo("Scanned %" PRIi64 " blocks to find region start in %" PRIi64 " seconds\n", scan_block_count, time(NULL) - start_time);
     
     return tai_it;
 }
