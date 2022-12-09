@@ -110,7 +110,7 @@ int taf_index_main(int argc, char *argv[]) {
 
     LI_destruct(li);
     
-    st_logInfo("taf_index is done, %" PRIi64 " seconds have elapsed\n", time(NULL) - startTime);
+    st_logInfo("taffy index is done, %" PRIi64 " seconds have elapsed\n", time(NULL) - startTime);
 
     return 0;
 }

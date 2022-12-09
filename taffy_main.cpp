@@ -9,6 +9,7 @@ extern "C" {
 extern int taf_norm_main(int argc, char *argv[]);
 extern int taf_index_main(int argc, char *argv[]);
 extern int taf_view_main(int argc, char *argv[]);
+extern int taf_stats_main(int argc, char *argv[]);
 }
 
 extern int taf_add_gap_bases_main(int argc, char *argv[]);
@@ -20,7 +21,9 @@ void usage() {
     fprintf(stderr, "    view           MAF / TAF conversion and region extraction\n");
     fprintf(stderr, "    norm           normalize TAF blocks\n");
     fprintf(stderr, "    add-gap-bases  add sequences from HAL or FASTA files into TAF gaps\n");
-    fprintf(stderr, "    index          create a .tai index (required for region extraction)\n\n");
+    fprintf(stderr, "    index          create a .tai index (required for region extraction)\n");
+    fprintf(stderr, "    stats          print statistics of a TAF file\n");
+    fprintf(stderr, "\n");
 
 #ifdef USE_HTSLIB
     fprintf(stderr, "all commands accept uncompressed or bgzipped TAF input\n");
@@ -44,6 +47,8 @@ int main(int argc, char *argv[]) {
         return taf_add_gap_bases_main(argc - 1, argv + 1);
     } else if (strcmp(argv[1], "index") == 0) {
         return taf_index_main(argc - 1, argv + 1);
+    } else if (strcmp(argv[1], "stats") == 0) {
+        return taf_stats_main(argc - 1, argv + 1);
     } else {
         fprintf(stderr, "%s is not a valid taffy command\n", argv[1]);
         usage();

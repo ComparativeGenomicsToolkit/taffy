@@ -74,4 +74,9 @@ Alignment *tai_next(TaiIt *tai_it, LI *li);
  */
 void tai_iterator_destruct(TaiIt *tai_it);
 
+/**
+ * Return a map of Sequence name to Length. Only reference (ie indexed) sequences are returned
+ */
+stHash *tai_sequence_lengths(Tai *idx, LI *li);
+
 #endif

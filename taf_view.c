@@ -25,25 +25,6 @@ static void usage() {
     fprintf(stderr, "-h --help : Print this help message\n");
 }
 
-// sniff format
-// 0: taf
-// 1: maf
-// 2: unknown
-static int check_input_format(const char *line) {
-    int ret = 2;
-    assert(line != NULL);
-    stList *tokens = stString_split(line);
-    if (stList_length(tokens) > 0) {
-        if (strcmp(stList_get(tokens, 0), "#taf") == 0) {
-            ret = 0;
-        } else if (strcmp(stList_get(tokens, 0), "##maf") == 0) {
-            ret = 1;
-        }
-    }            
-    stList_destruct(tokens);
-    return ret;
-}
-
 int taf_view_main(int argc, char *argv[]) {
     time_t startTime = time(NULL);
 
@@ -122,7 +103,16 @@ int taf_view_main(int argc, char *argv[]) {
     //////////////////////////////////////////////
 
     FILE *input = inputFile == NULL ? stdin : fopen(inputFile, "r");
+    if (input == NULL) {
+        fprintf(stderr, "Unable to open input file: %s\n", inputFile);
+        return 1;
+    }
+
     FILE *output = outputFile == NULL ? stdout : fopen(outputFile, "w");
+    if (output == NULL) {
+        fprintf(stderr, "Unable to open output file: %s\n", outputFile);
+        return 1;
+    }
     LI *li = LI_construct(input);
 
     // sniff the format
@@ -264,7 +254,7 @@ int taf_view_main(int argc, char *argv[]) {
         fclose(output);
     }
 
-    st_logInfo("taf view is done, %" PRIi64 " seconds have elapsed\n", time(NULL) - startTime);
+    st_logInfo("taffy view is done, %" PRIi64 " seconds have elapsed\n", time(NULL) - startTime);
 
     return 0;
 }

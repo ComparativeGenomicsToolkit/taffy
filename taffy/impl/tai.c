@@ -142,7 +142,7 @@ static void change_s_coordinates_to_i(char *line) {
             j++; // the row index;
             assert(strlen(op_type) == 1); // Must be a single character in length
             if(op_type[0] == 'i' || op_type[0] == 's') { // We have coordinates!
-                found_s = op_type[0] == 's';
+                found_s = found_s || op_type[0] == 's';
                 op_type[0] = 'i';
                 // only parse to increment j (would rather use api than just add 4)
                 parse_coordinates(&j, tokens, &dummy_int, &dummy_bool, &dummy_int);
@@ -549,7 +549,56 @@ Alignment *tai_next(TaiIt *tai_it, LI *li) {
     
     return tai_it->p_alignment;
 }
+
 void tai_iterator_destruct(TaiIt *tai_it) {
     free(tai_it->name);
     free(tai_it);
+}
+
+stHash *tai_sequence_lengths(Tai *tai, LI *li) {
+    // read the header
+    LI_seek(li, 0);
+    LI_get_next_line(li);
+    bool run_length_encode_bases = 0;
+    Tag *tag = taf_read_header(li);
+    Tag *t = tag_find(tag, "run_length_encode_bases");
+    if(t != NULL && strcmp(t->value, "1") == 0) {
+        run_length_encode_bases = 1;
+    }
+    tag_destruct(tag);
+
+    stHash *seq_to_len = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, free, NULL);
+
+    // dummy record for querying the set
+    TaiRec qr;
+    qr.seq_pos = 0;
+
+    // the index keeps a set of sequence names, which is handy here
+    // we iterate that, using the position index to hook into the first occurrence of
+    // each name.  but we add every sequence name we can find for each block, not just reference
+    for (int64_t i = 0; i < stList_length(tai->names); ++i) {
+        char *seq = (char*)stList_get(tai->names, i);
+        if (stHash_search(seq_to_len, seq) == NULL) {
+            qr.name = seq;
+            TaiRec *tair = stSortedSet_searchGreaterThanOrEqual(tai->idx, &qr);
+            assert(tair != NULL);
+            LI_seek(li, tair->file_pos);
+            LI_get_next_line(li);
+            
+            // force taf to start a new alignment at our current file position by making
+            // sure all coordinates are expressed as insertions
+            change_s_coordinates_to_i(LI_peek_at_next_line(li));
+            
+            Alignment *alignment = taf_read_block(NULL, run_length_encode_bases, li);
+            assert(alignment != NULL);
+
+            Alignment_Row *row = alignment->row;
+            assert(row != NULL);
+            assert(strcmp(row->sequence_name, seq) == 0);
+            stHash_insert(seq_to_len, stString_copy(row->sequence_name), (void*)row->sequence_length);
+        }
+    }
+
+    assert(stHash_size(seq_to_len) == stList_length(tai->names));
+    return seq_to_len;
 }

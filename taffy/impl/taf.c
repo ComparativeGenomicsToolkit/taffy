@@ -398,3 +398,18 @@ void taf_write_block(Alignment *p_alignment, Alignment *alignment, bool run_leng
 void taf_write_header(Tag *tag, FILE *fh) {
     write_header(tag, fh, "#taf", ":", "\n");
 }
+
+int check_input_format(const char *header_line) {
+    int ret = 2;
+    assert(header_line != NULL);
+    stList *tokens = stString_split(header_line);
+    if (stList_length(tokens) > 0) {
+        if (strcmp(stList_get(tokens, 0), "#taf") == 0) {
+            ret = 0;
+        } else if (strcmp(stList_get(tokens, 0), "##maf") == 0) {
+            ret = 1;
+        }
+    }            
+    stList_destruct(tokens);
+    return ret;
+}
