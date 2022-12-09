@@ -302,7 +302,7 @@ int taf_add_gap_bases_main(int argc, char *argv[]) {
         stSet_destruct(hal_species);
     }
 
-    st_logInfo("taf_add_gap_bases is done, %" PRIi64 " seconds have elapsed\n", time(NULL) - startTime);
+    st_logInfo("taffy add-gap-bases is done, %" PRIi64 " seconds have elapsed\n", time(NULL) - startTime);
 
     //while(1);
     //assert(0);
