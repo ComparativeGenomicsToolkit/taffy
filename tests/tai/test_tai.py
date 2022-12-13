@@ -88,7 +88,9 @@ def test_tai(regions_path, taf_path, bgzip, block_size):
     sys.stderr.write("\t\t\tOK\n")    
     
 sys.stderr.write("Running tai tests...\n")
-maf_path = './tests/evolverMammals.maf'
+maf_path_in = './tests/evolverMammals.maf'
+maf_path = './tests/tai/evolverMammals.maf'
+subprocess.check_call(['cp', maf_path_in, maf_path])
 taf_path = './tests/tai/evolverMammals.taf'
 sys.stderr.write(" * creating evolver taf {}".format(taf_path))
 subprocess.check_call(['./bin/taffy', 'view', '-i', maf_path, '-o', taf_path])
@@ -103,5 +105,7 @@ test_tai(regions_path, taf_path, False, 111)
 test_tai(regions_path, taf_path, True, 200)
 test_tai(regions_path, taf_rle_path, False, 111)
 test_tai(regions_path, taf_rle_path, True, 200)
+test_tai(regions_path, maf_path, False, 111)
+test_tai(regions_path, maf_path, True, 200)
 
-subprocess.check_call(['rm', '-f', taf_path, taf_rle_path])
+subprocess.check_call(['rm', '-f', taf_path, taf_rle_path, maf_path])

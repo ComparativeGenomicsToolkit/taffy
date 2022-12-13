@@ -211,7 +211,7 @@ For example, to normalize a maf file do the following:
 unaligned sequences between maf blocks and `taffy norm` then merges together the blocks. The 
 `-k` option causes the output to be in maf format.
 
-# Referenced-based TAF and Indexing
+# Referenced-based MAF/TAF and Indexing
 
 Neither format specification requires it, but *in practice* TAF, like MAF, is used to specify alignments
 along a single reference genome.  For instance, MAF files from both MultiZ and Cactus (via hal2maf)
@@ -229,9 +229,9 @@ sequence is specified on an anchor line, then the TAF file is **indexable**.
 
 A TAF file produced from a reference-based MAF file using `taf view` will be reference-based and indexable.
 
-Indexable TAF files can be indexed for random-access using `taffy index`:
+Indexable TAF files and reference-based MAF files can be indexed for random-access using `taffy index`:
 
-    taffy index -i TAF_FILE
+    taffy index -i TAF_FILE (or MAF_FILE)
 
 This command will create `TAF_FILE.tai`, which is a list mapping sequence names (first column) and
 start positions (second column) to offsets in the TAF file (third column). If two consecutive
@@ -241,16 +241,14 @@ lines (whose frequency is controlled by `taffy view -s` can ever be indexed.  Sm
 intervals will result in faster lookup times at the cost of the index itself being slower
 to load.
 
-Tuning this is a work in progress.
-
-An indexed TAF file can be accessed using `taffy view -r` to quickly pull out a subregion. For
+An indexed TAF or MAF file can be accessed using `taffy view -r` to quickly pull out a subregion. For
 example, `taffy view -r hg38.chr10:550000-600000` will extract the 50000bp (0-based, open-ended)
 interval on `hg38.chr10` in either TAF (default) or MAF (add `-m`) format. This works only if
-the TAF is referenced on hg38.
+the TAF/MAF is referenced on hg38.
 
 Notes:
 
-* The sequence names do not need to be ordered for TAF indexing (ie chr2 could come before chr1
+* The sequence names do not need to be ordered for TAF/MAF indexing (ie chr2 could come before chr1
 in the file). Just the positions within each sequence must be in order
 
 * The index could further be generalized to support out-of-order (but still non-overlapping!)

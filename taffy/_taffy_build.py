@@ -193,7 +193,7 @@ ffibuilder.cdef("""
     /*
      * Load the index from disk
      */
-    Tai *tai_load(FILE* idx_fh);
+    Tai *tai_load(FILE* idx_fh, bool maf);
     
     /*
      * Free the index
