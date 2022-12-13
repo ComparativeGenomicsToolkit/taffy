@@ -125,11 +125,6 @@ int taf_view_main(int argc, char *argv[]) {
     bool taf_input = !maf_input;
     bool taf_output = !maf_output;
 
-    if (maf_input == true && region != NULL) {
-        fprintf(stderr, "-r only supported on (indexed) TAF input\n");
-        return 1;
-    }
-
     // Parse the header
     Tag *tag = maf_input ? maf_read_header(li) : taf_read_header(li);
     if (maf_input && !maf_output) {
@@ -153,79 +148,78 @@ int taf_view_main(int argc, char *argv[]) {
     }
     tag_destruct(tag);
 
-    if (taf_input == true) {
-        if (region) {
-            int64_t region_start;
-            int64_t region_length;
-            char *region_seq = tai_parse_region(region, &region_start, &region_length);
-            if (region_seq == NULL) {
-                fprintf(stderr, "Invalid region: %s\n", region);
-                return 1;
-            }
-            st_logInfo("Region: contig=%s start=%" PRIi64 " length=%" PRIi64 "\n", region_seq, region_start, region_length);
-        
-            char *tai_fn = tai_path(inputFile);        
-            FILE *tai_fh = fopen(tai_fn, "r");
-        
-            if (tai_fh == NULL) {
-                fprintf(stderr, "Index %s not found. Please run taffy index first\n", tai_fn);
-                return 1;
-            }
-
-            Tai* tai = tai_load(tai_fh);
-
-            TaiIt *tai_it = tai_iterator(tai, li, run_length_encode_bases, region_seq, region_start, region_length);
-            if (tai_it == NULL) {
-                fprintf(stderr, "Region %s not found in taffy index\n", region);
-                return 1;
-            }
-            Alignment *alignment = NULL;
-            Alignment *p_alignment = NULL;
-
-            while ((alignment = tai_next(tai_it, li)) != NULL) {
-                if (taf_output) {
-                    taf_write_block(p_alignment, alignment, run_length_encode_bases, repeat_coordinates_every_n_columns, output);
-                } else {
-                    maf_write_block(alignment, output);
-                }            
-                if (p_alignment) {
-                    alignment_destruct(p_alignment, true);
-                }
-                p_alignment = alignment;
-            }
-            if (p_alignment) {
-                alignment_destruct(p_alignment, true);
-            }
-
-            tai_destruct(tai);
-
-            if(tai_fh != NULL) {
-                fclose(tai_fh);
-            }
-            free(tai_fn);        
-        } else {
-            Alignment *alignment = NULL;
-            Alignment *p_alignment = NULL;
-        
-            while((alignment = taf_read_block(p_alignment, run_length_encode_bases, li)) != NULL) {
-                if (taf_output) {
-                    taf_write_block(p_alignment, alignment, run_length_encode_bases, repeat_coordinates_every_n_columns, output);
-                } else {
-                    maf_write_block(alignment, output);
-                }
-                if (p_alignment) {
-                    alignment_destruct(p_alignment, true);
-                }
-                p_alignment = alignment;
-            }
-            if (p_alignment) {
-                alignment_destruct(p_alignment, true);
-            }            
+    // three cases below:
+    // 1) generic maf/taf index lookup if (region)
+    // 2) scan whole taf
+    // 3) scan whole maf    
+    if (region) {
+        int64_t region_start;
+        int64_t region_length;
+        char *region_seq = tai_parse_region(region, &region_start, &region_length);
+        if (region_seq == NULL) {
+            fprintf(stderr, "Invalid region: %s\n", region);
+            return 1;
         }
+        st_logInfo("Region: contig=%s start=%" PRIi64 " length=%" PRIi64 "\n", region_seq, region_start, region_length);
+        
+        char *tai_fn = tai_path(inputFile);        
+        FILE *tai_fh = fopen(tai_fn, "r");
+        
+        if (tai_fh == NULL) {
+            fprintf(stderr, "Index %s not found. Please run taffy index first\n", tai_fn);
+            return 1;
+        }
+
+        Tai* tai = tai_load(tai_fh, !taf_input);
+
+        TaiIt *tai_it = tai_iterator(tai, li, run_length_encode_bases, region_seq, region_start, region_length);
+        if (tai_it == NULL) {
+            fprintf(stderr, "Region %s not found in taffy index\n", region);
+            return 1;
+        }
+        Alignment *alignment = NULL;
+        Alignment *p_alignment = NULL;
+
+        while ((alignment = tai_next(tai_it, li)) != NULL) {
+            if (taf_output) {
+                taf_write_block(p_alignment, alignment, run_length_encode_bases, repeat_coordinates_every_n_columns, output);
+            } else {
+                maf_write_block(alignment, output);
+            }            
+            if (p_alignment) {
+                alignment_destruct(p_alignment, true);
+            }
+            p_alignment = alignment;
+        }
+        if (p_alignment) {
+            alignment_destruct(p_alignment, true);
+        }
+
+        tai_destruct(tai);
+
+        if(tai_fh != NULL) {
+            fclose(tai_fh);
+        }
+        free(tai_fn);        
+    } else if (taf_input) {
+        Alignment *alignment = NULL;
+        Alignment *p_alignment = NULL;        
+        while((alignment = taf_read_block(p_alignment, run_length_encode_bases, li)) != NULL) {
+            if (taf_output) {
+                taf_write_block(p_alignment, alignment, run_length_encode_bases, repeat_coordinates_every_n_columns, output);
+            } else {
+                maf_write_block(alignment, output);
+            }
+            if (p_alignment) {
+                alignment_destruct(p_alignment, true);
+            }
+            p_alignment = alignment;
+        }
+        if (p_alignment) {
+            alignment_destruct(p_alignment, true);
+        }            
     } else {
         assert(maf_input == true);
-
-        // Now read in the maf blocks and write the alignment
         Alignment *alignment, *p_alignment = NULL;
         while((alignment = maf_read_block(li)) != NULL) {
             if(p_alignment != NULL) {

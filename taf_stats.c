@@ -12,9 +12,9 @@
 
 static void usage() {
     fprintf(stderr, "taf stats [options]\n");
-    fprintf(stderr, "Print statitstics from a TAF file\n");
-    fprintf(stderr, "-i --inputFile : Input TAF file. If not specified reads from stdin\n");
-    fprintf(stderr, "-s --sequenceLengths : Print length of each *reference* sequence in the (indexed TAF) alignment\n");
+    fprintf(stderr, "Print statitstics from a TAF or MAF file\n");
+    fprintf(stderr, "-i --inputFile : Input TAF or MAF file. If not specified reads from stdin\n");
+    fprintf(stderr, "-s --sequenceLengths : Print length of each *reference* sequence in the (indexed) alignment\n");
     fprintf(stderr, "-l --logLevel : Set the log level\n");
     fprintf(stderr, "-h --help : Print this help message\n");
 }
@@ -95,10 +95,6 @@ int taf_stats_main(int argc, char *argv[]) {
         fprintf(stderr, "Input not supported: unable to detect ##maf or #taf header\n");
         return 1;
     }
-    if (input_format == 1) {
-        fprintf(stderr, "taffy stats does not (yet) support maf input\n");
-        return 1;
-    }
 
     // load the index if it's required by the given options
     bool index_required = seq_lengths;
@@ -112,7 +108,7 @@ int taf_stats_main(int argc, char *argv[]) {
             fprintf(stderr, "Required index %s not found. Please run taffy index first\n", tai_fn);
             return 1;
         }
-        tai = tai_load(tai_fh);
+        tai = tai_load(tai_fh, input_format == 1);
     }
 
     // do the stats
