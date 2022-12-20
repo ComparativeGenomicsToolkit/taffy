@@ -55,6 +55,92 @@ static Alignment *get_next_taf_block(LI *li, bool run_length_encode_bases) {
     return block;
 }
 
+// prototype logic to try to reduce the gap delta by greedily filtering out
+// dupes with the biggest gaps.  if it doesn't find enough dupes to remove
+// to cover gap_delta, it returns false and does nothing.  otherwise it returns
+// true and removes the rows. 
+static bool greedy_prune_by_gap(Alignment *alignment, int64_t maximum_gap_length) {
+
+    // map to sample name, using everything up to first "." of sequence name
+    // (which is quite hacky but not sure there's a choice)
+    stList *sample_names = stList_construct3(alignment->row_number, free);
+    // hash sample name to number of rows with the sample
+    stHash *sample_to_count = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, NULL, free);
+    int64_t i = 0;
+    for (Alignment_Row *row = alignment->row; row != NULL; row = row->n_row, ++i) {
+        char *dot = strchr(row->sequence_name, '.');
+        char *sample_name = NULL;
+        if (dot != NULL) {
+            sample_name = stString_getSubString(row->sequence_name, 0, dot - row->sequence_name);
+        } else {
+            sample_name = stString_copy(row->sequence_name);
+        }
+        stList_set(sample_names, i, sample_name);
+        
+        int64_t *count = stHash_search(sample_to_count, sample_name);
+        if (count == NULL) {
+            count = (int64_t*)malloc(sizeof(int64_t));
+            *count = 1;
+            stHash_insert(sample_to_count, sample_name, count);
+        } else {
+            ++(*count);
+        }
+    }
+
+    // check that all rows with gaps > max_gap are dupes, ie we can merge a pruned alignment
+    i = 0;
+    bool can_prune = true;
+    // all rows that are dupes exceeding gap length are stored here
+    stList *to_prune = stList_construct();
+    for (Alignment_Row *row = alignment->row; row != NULL && can_prune; row = row->n_row, ++i) {
+        int64_t gap = 0;
+        if (row->l_row != NULL && alignment_row_is_predecessor(row->l_row, row)) {
+            gap = row->start - (row->l_row->start + row->l_row->length);
+        }
+        if (gap > maximum_gap_length) {
+            char *sample_name = (char*)stList_get(sample_names, i); 
+            int64_t *count = stHash_search(sample_to_count, sample_name);            
+            if (*count > 1 && row != alignment->row) {
+                stList_append(to_prune, row);
+            } else {
+                can_prune = false;
+            }
+        }
+    }
+
+    if (can_prune) {
+        // remove the rows
+        assert(stList_length(to_prune) > 0);
+        Alignment_Row *p_row = NULL;
+        int64_t to_prune_idx = 0;
+        Alignment_Row *row_to_prune = stList_get(to_prune, to_prune_idx);
+        for (Alignment_Row *row = alignment->row; row != NULL && row_to_prune != NULL; row = row->n_row, ++i) {
+            if (row == row_to_prune) {
+                assert(p_row != NULL);
+                p_row->n_row = row->n_row;
+                if (row->l_row) {
+                    row->l_row->r_row = NULL;
+                }
+                if (row->r_row) {
+                    row->r_row->l_row = NULL;
+                }
+                alignment_row_destruct(row);
+                ++to_prune_idx;
+                row_to_prune = to_prune_idx < stList_length(to_prune) ? stList_get(to_prune, to_prune_idx) : NULL;
+            } else {
+                p_row = row;
+            }
+        }
+        alignment->row_number -= stList_length(to_prune);
+    }
+
+    stList_destruct(sample_names);
+    stHash_destruct(sample_to_count);
+    stList_destruct(to_prune);
+    
+    return can_prune;
+}
+
 int taf_norm_main(int argc, char *argv[]) {
     time_t startTime = time(NULL);
 
@@ -165,14 +251,19 @@ int taf_norm_main(int argc, char *argv[]) {
     Alignment *alignment, *p_alignment = NULL, *p_p_alignment = NULL;
     while((alignment = get_next_taf_block(li, run_length_encode_bases)) != NULL) {
         if(p_alignment != NULL) {
+            bool merged = false;
             int64_t common_rows = alignment_number_of_common_rows(p_alignment, alignment);
             int64_t total_rows = alignment->row_number + p_alignment->row_number - common_rows;
             if (common_rows >= total_rows * fraction_shared_rows &&
                 (alignment_length(p_alignment) <= maximum_block_length_to_merge ||
-                 alignment_length(alignment) <= maximum_block_length_to_merge) &&
-                 alignment_total_gap_length(p_alignment) <= maximum_gap_length) {
-                p_alignment = alignment_merge_adjacent(p_alignment, alignment);
-            } else {
+                 alignment_length(alignment) <= maximum_block_length_to_merge)) {
+                int64_t total_gap = alignment_total_gap_length(p_alignment);
+                if (total_gap <= maximum_gap_length || greedy_prune_by_gap(alignment, maximum_gap_length)) {
+                    p_alignment = alignment_merge_adjacent(p_alignment, alignment);
+                    merged = true;
+                }
+            }
+            if (!merged) {
                 output_maf ? maf_write_block(p_alignment, output) : taf_write_block(p_p_alignment, p_alignment, run_length_encode_bases, repeat_coordinates_every_n_columns, output); // Write the maf block
                 if(p_p_alignment != NULL) {
                     alignment_destruct(p_p_alignment, 1); // Clean up the left-most block
