@@ -411,5 +411,12 @@ int check_input_format(const char *header_line) {
         }
     }            
     stList_destruct(tokens);
+#ifndef USE_HTSLIB   
+    if (ret == 2 && strlen(header_line) >= 2 &&
+        (unsigned char)header_line[0] == 0x1f && (unsigned char)header_line[1] == 0x8b) {
+        fprintf(stderr, "(b)gzipped input support disabled: please build TAFFY with htslib\n");
+        exit(1);
+    }     
+#endif
     return ret;
 }
