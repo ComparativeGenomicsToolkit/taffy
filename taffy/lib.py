@@ -1,4 +1,5 @@
 from taffy._taffy_cffi import ffi, lib
+import numpy as np
 
 
 def _to_py_string(s):
@@ -83,6 +84,15 @@ class Alignment:
         lib.free(column)  # Free C string
         return column_string
 
+    def get_column_sequences(self):
+        """ Get the names of the sequences in the alignment in order as an array """
+        row = self.first_row()
+        sequence_names = np.empty(self.row_number(), dtype=object)
+        for i in range(self.row_number()):
+            sequence_names[i] = row.sequence_name()
+            row = row.next_row()
+        return sequence_names
+
     def __del__(self):
         lib.alignment_destruct(self._c_alignment, 0)  # Cleans up the underlying C alignment structure
 
@@ -156,7 +166,7 @@ class TafIndex:
         lib.tai_destruct(self._c_taf_index)  # Clean up the underlying C
 
 
-class AlignmentParser:
+class AlignmentReader:
     """ Taf or maf alignment parser.
     """
     def __init__(self, file,
@@ -176,6 +186,11 @@ class AlignmentParser:
         Use the file_string_not_handle to determine if file is a file_handle (if file_string_not_handle=False) or
         a file name. Handing in the file name is much faster as it avoids using a Python file object. If using
         with a file name remember to close the file, either the with keyword or with the close method.
+
+        If file is compressed with zip or bgzip will automatically detect that the file is compressed and read it okay.
+
+        Use the taf_index and sequence_name, start and length if you want to extract a region from a taf file using
+        a taf index. Also works with compressed files.
         """
         self.taf_not_maf = taf_not_maf
         self.use_run_length_encoding = use_run_length_encoding
@@ -205,6 +220,7 @@ class AlignmentParser:
         return p_tags
 
     def __next__(self):
+        """ Get the next alignment block """
         # Read a taf/maf block
         if self.taf_not_maf:  # Is a taf block
             # Use the taf index if present
@@ -238,7 +254,7 @@ class AlignmentParser:
 
             # Connect the row object to the chain of row objects for the block
             if p_py_row is not None:
-                p_py_row._n_row = py_row
+                 p_py_row._n_row = py_row
 
             p_py_row = py_row  # Update the previous python row object
             c_row = c_row.n_row  # Move to the next row
@@ -268,6 +284,19 @@ class AlignmentParser:
 
     def __exit__(self, exc_type, exc_value, exc_traceback):
         self.close()
+
+
+def get_column_iterator(alignment_reader):
+    """ Create an alignment column iterator which returns successive
+    columns from the alignment from an AlignmentReader object.
+
+    Each is returned as an array of sequence names and a string representing the bases
+    in the column
+    """
+    for alignment in alignment_reader:  # For each alignment block
+        sequence_names = alignment.get_column_sequences()
+        for i in range(alignment.column_number()):  # For each column
+            yield sequence_names, alignment.get_column(i)
 
 
 def write_taf_index_file(taf_file, index_file,

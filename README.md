@@ -257,6 +257,8 @@ taffy.lib.
 
 # Installing Python Library From Source
 
+To build the Python library you must first install [htslib](http://www.htslib.org/) for bgzip support.
+
 If you are building the C library from source you can also build the Python library as follows:
 
 ```

@@ -9,10 +9,14 @@ ffibuilder.cdef("""
     FILE *fopen(const char *filename, const char *mode);
     
     int fclose(FILE *stream);
+    
+    typedef struct BGZF BGZF;
 
     typedef struct _LI {
-        FILE *fh;
+        BGZF *bgzf;
         char *line;
+        int64_t prev_pos; // position before reading the current buffer
+        int64_t pos;      // position after reading the curent buffer    
     } LI;
     
     LI *LI_construct(FILE *fh);
@@ -226,7 +230,9 @@ ffibuilder.set_source("taffy._taffy_cffi",
                       """
                            #include <stdio.h>
                            #include <stdlib.h>
-                           #include "taf.h" // the C header of the library
+                           #include "htslib/bgzf.h"
+                           #include "htslib/kstring.h"
+                           #include "taf.h" 
                            #include "line_iterator.h" 
                            #include "tai.h"
                       """,
@@ -252,7 +258,10 @@ ffibuilder.set_source("taffy._taffy_cffi",
                                "taffy/impl/maf.c",
                                "taffy/impl/ond.c",
                                "taffy/impl/taf.c",
-                               "taffy/impl/tai.c"],
+                               "taffy/impl/tai.c",
+                               ],
+                      extra_compile_args=["-DUSE_HTSLIB"],
+                      libraries=["hts"],
                       )
 
 if __name__ == "__main__":

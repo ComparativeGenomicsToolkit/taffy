@@ -4,7 +4,7 @@
 
 static char *get_random_tags() {
     stList *tags = stList_construct3(0, free);
-    while(st_random() > 0.5) {
+    while(st_random() > 0.9) {
         stList_append(tags, stString_print("%f:%f", st_random(), st_random()));
     }
     char *tag_string = stString_join2(" ", tags);
@@ -64,6 +64,11 @@ static void test_taf(CuTest *testCase) {
     fclose(file);
     fclose(out_file);
     LI_destruct(li_maf);
+
+#ifdef USE_HTSLIB // Compress the temporary copy to show reading from a compressed version
+    st_system("gzip -f %s", temp_copy); // Compress the temporary copy
+    temp_copy = stString_print("%s.gz", temp_copy); // Use the compressed copy
+#endif
 
     // Now parse the taf
     file = fopen(example_file, "r");
