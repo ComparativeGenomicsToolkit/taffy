@@ -118,7 +118,7 @@ class TafTest(unittest.TestCase):
         with AlignmentReader(self.test_maf_file, taf_not_maf=False) as mp:
             maf_header_tags = mp.get_header()  # Get the maf header tags
 
-            with AlignmentWriter(self.test_taf_file, header_tags=maf_header_tags) as tw:
+            with AlignmentWriter(self.test_taf_file, header_tags=maf_header_tags, use_compression=compress_file) as tw:
                 tw.write_header()  # Write the header
 
                 for a in mp:  # For each alignment block in input
@@ -128,11 +128,6 @@ class TafTest(unittest.TestCase):
                         a.set_column_tags(i, column_tags[-1])
 
                     tw.write_alignment(a)  # Write a corresponding output block
-
-        # Compress the file
-        if compress_file:
-            subprocess.run(["gzip", "-f", self.test_taf_file])
-            self.test_taf_file = f"{self.test_taf_file}.gz"
 
         # Now read back the taf file and check it is equivalent to the maf
         column_index = 0  # Used to track where in the list of columns we are
@@ -175,15 +170,10 @@ class TafTest(unittest.TestCase):
         # Convert MAF to TAF
         with AlignmentReader(self.test_maf_file, taf_not_maf=False) as mp:
             maf_header_tags = mp.get_header()  # Get the maf header tags
-            with AlignmentWriter(self.test_taf_file, header_tags=maf_header_tags) as tw:
+            with AlignmentWriter(self.test_taf_file, header_tags=maf_header_tags, use_compression=compress_file) as tw:
                 tw.write_header()  # Write the header
                 for a in mp:  # For each alignment block in input
                     tw.write_alignment(a)  # Write a corresponding output block
-
-        # Compress the file
-        if compress_file:
-            subprocess.run(["gzip", "-f", self.test_taf_file])
-            self.test_taf_file = f"{self.test_taf_file}.gz"
 
         # Write the index file
         write_taf_index_file(taf_file=self.test_taf_file, index_file=self.test_index_file)

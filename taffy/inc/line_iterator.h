@@ -70,12 +70,14 @@ typedef struct _LW {
 #endif
 } LW;
 
+/*
+ * Make a LW object. If use_compression is true and compiled with htslib will use bgzf compression on the stream.
+ */
 LW *LW_construct(FILE *fh, bool use_compression);
 
 void LW_destruct(LW *lw, bool clean_up_file_handle);
 
 int LW_write(LW *lw, const char *string, ...);
-
 
 #endif /* STLINE_ITERATOR_H_ */
 

@@ -320,25 +320,28 @@ class AlignmentWriter:
     """
     def __init__(self, file, taf_not_maf=True, header_tags=None,
                  repeat_coordinates_every_n_columns=-1,
-                 file_string_not_handle=True):
+                 file_string_not_handle=True,
+                 use_compression=False):
         """ Use taf_not_maf to switch between MAF or TAF writing. Set use_run_length_encoding to determine how
         to encode taf columns.
 
         Use the file_string_not_handle to determine if file is a file_handle (if file_string_not_handle=False) or
         a file name. Handing in the file name is much faster as it avoids using a Python file object. If using
-        with a file name remember to close the file, either the with keyword or with the close method. """
+        with a file name remember to close the file, either the with keyword or with the close method.
+
+        If use_compression is True then will use bgzf compression on output."""
         self.taf_not_maf = taf_not_maf
         self.header_tags = {} if header_tags is None else header_tags
         self.p_py_alignment = None  # The previous alignment
-        self.c_file_handle = _get_c_file_handle(file, file_string_not_handle, "w")
+        self.c_lw_handle = lib.LW_construct(_get_c_file_handle(file, file_string_not_handle, "w"), use_compression)
         self.file_string_not_handle = file_string_not_handle
         self.repeat_coordinates_every_n_columns = repeat_coordinates_every_n_columns
 
     def write_header(self):
         """ Write the header line """
         c_tag = _dictionary_to_c_tags(self.header_tags)
-        lib.taf_write_header(c_tag, self.c_file_handle) if self.taf_not_maf else \
-            lib.maf_write_header(c_tag, self.c_file_handle)
+        lib.taf_write_header(c_tag, self.c_lw_handle) if self.taf_not_maf else \
+            lib.maf_write_header(c_tag, self.c_lw_handle)
         lib.tag_destruct(c_tag)
 
     def write_alignment(self, alignment):
@@ -349,16 +352,15 @@ class AlignmentWriter:
                                 "run_length_encode_bases" in self.header_tags and
                                 int(self.header_tags["run_length_encode_bases"]),
                                 self.repeat_coordinates_every_n_columns,
-                                self.c_file_handle)
+                                self.c_lw_handle)
         else:
             lib.maf_write_block(alignment._c_alignment,
-                                self.c_file_handle)
+                                self.c_lw_handle)
         self.p_py_alignment = alignment
 
     def close(self):
         """ Close any associated file """
-        if self.file_string_not_handle:  # Close the underlying file handle
-            lib.fclose(self.c_file_handle)
+        lib.LW_destruct(self.c_lw_handle, self.file_string_not_handle)
 
     def __enter__(self):
         return self

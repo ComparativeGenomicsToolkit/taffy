@@ -2,14 +2,14 @@
 #include "taf.h"
 #include "sonLib.h"
 
-static void test_maf(CuTest *testCase) {
+static void test_maf(CuTest *testCase, bool use_compression) {
     // Example maf file
     char *example_file = "./tests/evolverMammals.maf";
-    char *temp_copy = "./tests/evolverMammals_copy.maf.gz";
+    char *temp_copy = "./tests/evolverMammals_copy.maf";
 
     // Read a maf and write a copy of it
     FILE *file = fopen(example_file, "r");
-    LW *lw = LW_construct(fopen(temp_copy, "w"), 1);
+    LW *lw = LW_construct(fopen(temp_copy, "w"), 0);
     Alignment *alignment;
     LI *li = LI_construct(file);
     while((alignment = maf_read_block(li)) != NULL) {
@@ -26,6 +26,7 @@ static void test_maf(CuTest *testCase) {
     FILE *file_copy = fopen(temp_copy, "r");
     Alignment *alignment2;
     li = LI_construct(file);
+    //st_uglyf("Before\n");
     LI *li_copy = LI_construct(file_copy);
     while((alignment = maf_read_block(li)) != NULL) {
         alignment2 = maf_read_block(li_copy);
@@ -55,8 +56,17 @@ static void test_maf(CuTest *testCase) {
     fclose(file);
 }
 
+static void test_maf_with_compression(CuTest *testCase) {
+    test_maf(testCase, 1);
+}
+
+static void test_maf_without_compression(CuTest *testCase) {
+    test_maf(testCase, 0);
+}
+
 CuSuite* maf_test_suite(void) {
     CuSuite* suite = CuSuiteNew();
-    SUITE_ADD_TEST(suite, test_maf);
+    SUITE_ADD_TEST(suite, test_maf_with_compression);
+    SUITE_ADD_TEST(suite, test_maf_without_compression);
     return suite;
 }
