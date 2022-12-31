@@ -5,21 +5,21 @@
 static void test_maf(CuTest *testCase) {
     // Example maf file
     char *example_file = "./tests/evolverMammals.maf";
-    char *temp_copy = "./tests/evolverMammals_copy.maf";
+    char *temp_copy = "./tests/evolverMammals_copy.maf.gz";
 
     // Read a maf and write a copy of it
     FILE *file = fopen(example_file, "r");
-    FILE *out_file = fopen(temp_copy, "w");
+    LW *lw = LW_construct(fopen(temp_copy, "w"), 1);
     Alignment *alignment;
     LI *li = LI_construct(file);
     while((alignment = maf_read_block(li)) != NULL) {
         //maf_write_block(alignment, stdout);
-        maf_write_block(alignment, out_file);
+        maf_write_block(alignment, lw);
         alignment_destruct(alignment, 1);
     }
     fclose(file);
-    fclose(out_file);
     LI_destruct(li);
+    LW_destruct(lw, 1);
 
     // Now check that all the maf blocks are the same
     file = fopen(example_file, "r");

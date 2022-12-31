@@ -2,6 +2,11 @@
 #include "taf.h"
 #include "sonLib.h"
 
+#ifdef USE_HTSLIB
+    #include "htslib/bgzf.h"
+    #include "htslib/kstring.h"
+#endif
+
 static char *get_random_tags() {
     stList *tags = stList_construct3(0, free);
     while(st_random() > 0.9) {
@@ -28,13 +33,13 @@ void check_tags(CuTest *testCase, Tag *t, Tag *j) {
 static void test_taf(CuTest *testCase) {
     // Example maf file
     char *example_file = "./tests/evolverMammals.maf"; // "./tests/chr2_KI270776v1_alt.maf.1"; // "./tests/chr2_KI270893v1_alt.maf"; //"./tests/chr2_KI270776v1_alt.maf";
-    char *temp_copy = "./tests/evolverMammals.taf"; //"./tests/chr2_KI270776v1_alt.taf.1"; // "./tests/chr2_KI270893v1_alt.taf"; //"./tests/chr2_KI270776v1_alt.taf";
+    char *temp_copy = "./tests/evolverMammals.taf.gz"; //"./tests/chr2_KI270776v1_alt.taf.1"; // "./tests/chr2_KI270893v1_alt.taf"; //"./tests/chr2_KI270776v1_alt.taf";
     bool run_length_encode_bases = 0;
     stList *column_tags = stList_construct3(0, (void (*)(void *))tag_destruct);
 
     // Write out the taf file
     FILE *file = fopen(example_file, "r");
-    FILE *out_file = fopen(temp_copy, "w");
+    LW *lw = LW_construct(fopen(temp_copy, "w"), 1);
     Alignment *alignment, *p_alignment = NULL;
     LI *li_maf = LI_construct(file);
     while((alignment = maf_read_block(li_maf)) != NULL) {
@@ -52,7 +57,7 @@ static void test_taf(CuTest *testCase) {
             stList_destruct(tokens);
         }
 
-        taf_write_block(p_alignment, alignment, run_length_encode_bases, 1000, out_file);
+        taf_write_block(p_alignment, alignment, run_length_encode_bases, 1000, lw);
         if(p_alignment != NULL) {
             alignment_destruct(p_alignment, 1);
         }
@@ -62,13 +67,8 @@ static void test_taf(CuTest *testCase) {
         alignment_destruct(p_alignment, 1);
     }
     fclose(file);
-    fclose(out_file);
+    LW_destruct(lw, 1);
     LI_destruct(li_maf);
-
-#ifdef USE_HTSLIB // Compress the temporary copy to show reading from a compressed version
-    st_system("gzip -f %s", temp_copy); // Compress the temporary copy
-    temp_copy = stString_print("%s.gz", temp_copy); // Use the compressed copy
-#endif
 
     // Now parse the taf
     file = fopen(example_file, "r");

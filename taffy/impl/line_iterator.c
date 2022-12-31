@@ -80,3 +80,68 @@ void LI_seek(LI *li, int64_t position) {
 int64_t LI_tell(LI *li) {
     return li->prev_pos;
 }
+
+
+LW *LW_construct(FILE *fh, bool use_compression) {
+    LW *lw = st_calloc(1, sizeof(LW));
+    lw->fh = fh;
+    if(use_compression) {
+#ifdef USE_HTSLIB
+        lw->bgzf = bgzf_dopen(fileno(fh), "w");
+        assert(lw->bgzf != NULL);
+        assert(bgzf_compression(lw->bgzf) == 2);
+        //if (bgzf_index_build_init(lw->bgzf) != 0) {
+        //    assert(false);
+        //}
+#endif
+    }
+    return lw;
+}
+
+void LW_destruct(LW *lw, bool clean_up_file_handle) {
+#ifdef USE_HTSLIB
+    if(lw->bgzf) {
+        if(bgzf_flush(lw->bgzf)) {
+            assert(0); // Flush failed
+        }
+        if(bgzf_close(lw->bgzf)) {
+            assert(0); // Close failed
+        }
+    }
+#endif
+    if(clean_up_file_handle) {
+        fclose(lw->fh);
+    }
+    free(lw);
+}
+
+int LW_write(LW *lw, const char *string, ...) {
+#ifdef USE_HTSLIB
+    va_list ap;
+    va_start(ap, string);
+    int i = vsnprintf(NULL, 0, string, ap), j;
+    assert(i >= 0);
+    va_end(ap);
+
+    va_start(ap, string);
+    if(lw->bgzf) {
+        char ret[i];
+        j = vsnprintf(ret, i, string, ap);
+        assert(i == j);
+        j = bgzf_write(lw->bgzf, ret, i);
+    }
+    else {
+        j = vfprintf(lw->fh, string, ap);
+    }
+    assert(i == j);
+    va_end(ap);
+    return i;
+#else
+    va_list ap;
+    va_start(ap, string);
+    int i = vfprintf(lw->fh, string, ap);
+    va_end(ap);
+    return i;
+#endif
+}
+

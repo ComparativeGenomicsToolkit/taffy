@@ -25,6 +25,7 @@ static void usage() {
     fprintf(stderr, "-n --maximumGapLength : Only merge together two adjacent blocks if the total number of unaligned bases between the blocks is less than this many bases, by default: %" PRIi64 "\n", maximum_gap_length);
     fprintf(stderr, "-q --fractionSharedRows : The fraction of rows between two blocks that need to be shared for a merge, default: %f\n", fraction_shared_rows);
     fprintf(stderr, "-s --repeatCoordinatesEveryNColumns : Repeat coordinates of each sequence at least every n columns. By default: %" PRIi64 "\n", repeat_coordinates_every_n_columns);
+    fprintf(stderr, "-c --useCompression : Write the output using bgzip compression.\n");
     fprintf(stderr, "-h --help : Print this help message\n");
 }
 
@@ -65,6 +66,7 @@ int taf_norm_main(int argc, char *argv[]) {
     char *outputFile = NULL;
     bool run_length_encode_bases = 0;
     bool output_maf = 0;
+    bool use_compression = 0;
 
     ///////////////////////////////////////////////////////////////////////////
     // Parse the inputs
@@ -80,10 +82,11 @@ int taf_norm_main(int argc, char *argv[]) {
                                                 { "maximumGapLength", required_argument, 0, 'n' },
                                                 { "fractionSharedRows", required_argument, 0, 'q' },
                                                 { "repeatCoordinatesEveryNColumns", required_argument, 0, 's' },
+                                                { "useCompression", no_argument, 0, 'c' },
                                                 { 0, 0, 0, 0 } };
 
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:o:hm:n:kq:s:", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:o:hcm:n:kq:s:", long_options, &option_index);
         if (key == -1) {
             break;
         }
@@ -113,6 +116,9 @@ int taf_norm_main(int argc, char *argv[]) {
             case 'q':
                 fraction_shared_rows = atof(optarg);
                 break;
+            case 'c':
+                use_compression = 1;
+                break;
             case 's':
                 repeat_coordinates_every_n_columns = atol(optarg);
                 break;
@@ -134,13 +140,14 @@ int taf_norm_main(int argc, char *argv[]) {
     st_logInfo("Output maf : %s\n", output_maf ? "true" : "false");
     st_logInfo("Repeat coordinates every n bases : %" PRIi64 "\n", repeat_coordinates_every_n_columns);
     st_logInfo("Fraction shared rows to merge adjacent blocks : %f\n", fraction_shared_rows);
+    st_logInfo("Write compressed output : %s\n", use_compression ? "true" : "false");
 
     //////////////////////////////////////////////
     // Read in the taf blocks and merge blocks that are sufficiently small
     //////////////////////////////////////////////
 
     FILE *input = inputFile == NULL ? stdin : fopen(inputFile, "r");
-    FILE *output = outputFile == NULL ? stdout : fopen(outputFile, "w");
+    LW *output = LW_construct(outputFile == NULL ? stdout : fopen(outputFile, "w"), use_compression);
     LI *li = LI_construct(input);
 
     // Pass the header line to determine parameters and write the updated taf header
@@ -193,9 +200,7 @@ int taf_norm_main(int argc, char *argv[]) {
     if(inputFile != NULL) {
         fclose(input);
     }
-    if(outputFile != NULL) {
-        fclose(output);
-    }
+    LW_destruct(output, outputFile != NULL);
 
     st_logInfo("taf_norm is done, %" PRIi64 " seconds have elapsed\n", time(NULL) - startTime);
 

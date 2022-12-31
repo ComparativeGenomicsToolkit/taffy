@@ -79,21 +79,21 @@ Tag *maf_read_header(LI *li) {
     return tag;
 }
 
-void maf_write_block(Alignment *alignment, FILE *fh) {
-    fprintf(fh, "a\n");
+void maf_write_block(Alignment *alignment, LW *lw) {
+    LW_write(lw, "a\n");
     Alignment_Row *row = alignment->row;
     while(row != NULL) {
-        fprintf(fh, "s\t%s\t%" PRIi64 "\t%" PRIi64 "\t%s\t%" PRIi64 "\t%s\n", row->sequence_name, row->start, row->length,
+        LW_write(lw, "s\t%s\t%" PRIi64 "\t%" PRIi64 "\t%s\t%" PRIi64 "\t%s\n", row->sequence_name, row->start, row->length,
                 row->strand ? "+" : "-", row->sequence_length, row->bases);
         row = row->n_row;
     }
-    fprintf(fh, "\n"); // Add a blank line at the end of the block
+    LW_write(lw, "\n"); // Add a blank line at the end of the block
 }
 
-void write_header(Tag *tag, FILE *fh, char *header_prefix, char *delimiter, char *end);
+void write_header(Tag *tag, LW *lw, char *header_prefix, char *delimiter, char *end);
 
-void maf_write_header(Tag *tag, FILE *fh) {
-    write_header(tag, fh, "##maf", "=", "\n\n");
+void maf_write_header(Tag *tag, LW *lw) {
+    write_header(tag, lw, "##maf", "=", "\n\n");
 }
 
 

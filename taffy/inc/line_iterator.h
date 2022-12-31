@@ -58,5 +58,24 @@ void LI_seek(LI *li, int64_t position);
  */
 int64_t LI_tell(LI *li);
 
+
+/*
+ * Writer for maf and taf block and header writing
+ */
+
+typedef struct _LW {
+    FILE *fh;
+#ifdef USE_HTSLIB
+    BGZF *bgzf;
+#endif
+} LW;
+
+LW *LW_construct(FILE *fh, bool use_compression);
+
+void LW_destruct(LW *lw, bool clean_up_file_handle);
+
+int LW_write(LW *lw, const char *string, ...);
+
+
 #endif /* STLINE_ITERATOR_H_ */
 
