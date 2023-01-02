@@ -188,5 +188,14 @@ bool has_coordinates(stList *tokens, int64_t *j);
 char *parse_coordinates(int64_t *j, stList *tokens, int64_t *start, bool *strand,
                         int64_t *sequence_length);
 
+/**
+ * Sniff file format from header line.  returns:
+ *  0: taf
+ *  1: maf
+ *  2: unknown
+ */
+int check_input_format(const char *header_line);
+
+
 #endif /* STTAF_H_ */
 

@@ -3,6 +3,7 @@
 #include "htslib/bgzf.h"
 #include "htslib/kstring.h"
 #include <ctype.h>
+#include <time.h>
 
 char *tai_path(const char *taf_path) {
     char *ret = (char*)st_calloc(strlen(taf_path) + 5, sizeof(char));
@@ -141,7 +142,7 @@ static void change_s_coordinates_to_i(char *line) {
             j++; // the row index;
             assert(strlen(op_type) == 1); // Must be a single character in length
             if(op_type[0] == 'i' || op_type[0] == 's') { // We have coordinates!
-                found_s = op_type[0] == 's';
+                found_s = found_s || op_type[0] == 's';
                 op_type[0] = 'i';
                 // only parse to increment j (would rather use api than just add 4)
                 parse_coordinates(&j, tokens, &dummy_int, &dummy_bool, &dummy_int);
@@ -187,19 +188,10 @@ static void change_s_coordinates_to_i(char *line) {
     stList_destruct(tokens);
 }
 
-int tai_create(LI *li, FILE* idx_fh, int64_t index_block_size){
+static int tai_create_taf(LI *li, FILE *idx_fh, int64_t index_block_size, bool run_length_encode_bases) {
     char *prev_ref = NULL;
     int64_t prev_pos = 0;
     int64_t prev_file_pos = 0;
-    
-    // read the TAF header
-    bool run_length_encode_bases = 0;
-    Tag *tag = taf_read_header(li);
-    Tag *t = tag_find(tag, "run_length_encode_bases");
-    if(t != NULL && strcmp(t->value, "1") == 0) {
-        run_length_encode_bases = 1;
-    }
-    tag_destruct(tag);
 
     // scan the taf line by line
     for (char *line = LI_get_next_line(li); line != NULL; line = LI_get_next_line(li)) {
@@ -236,6 +228,79 @@ int tai_create(LI *li, FILE* idx_fh, int64_t index_block_size){
     return 0;
 }
 
+static int tai_create_maf(LI *li, FILE *idx_fh, int64_t index_block_size) {
+    char *prev_ref = NULL;
+    int64_t prev_pos = 0;
+    int64_t prev_file_pos = 0;
+
+    // scan the maf block by block line by line
+    Alignment *alignment, *p_alignment = NULL;
+    int64_t file_pos = LI_tell(li);
+    while((alignment = maf_read_block(li)) != NULL) {
+        if(p_alignment != NULL) {
+            alignment_link_adjacent(p_alignment, alignment, 1);
+        }
+        if (alignment->row->strand != 1) {
+            fprintf(stderr, "Can't index maf because reference (row 0) sequence found on negative strand\n");
+            exit(1);
+        }
+        // todo: error message when out of order
+        bool same_ref = prev_ref && strcmp(alignment->row->sequence_name, prev_ref) == 0;
+        int64_t pos = alignment->row->start;
+        char *ref = alignment->row->sequence_name;
+        if (!same_ref || pos - prev_pos >= index_block_size) {
+            if (same_ref) {
+                // save a little space by writing relative coordinates
+                fprintf(idx_fh, "*\t%" PRIi64 "\t%" PRIi64 "\n", pos-prev_pos, file_pos-prev_file_pos);
+            } else {
+                fprintf(idx_fh, "%s\t%" PRIi64 "\t%" PRIi64 "\n", ref, pos, file_pos);
+            }
+            free(prev_ref);
+            prev_ref = stString_copy(ref);
+            prev_pos = pos;
+            prev_file_pos = file_pos;
+        }
+        if(p_alignment != NULL) {
+            alignment_destruct(p_alignment, 1);
+        }
+        p_alignment = alignment;
+        file_pos = LI_tell(li);                    
+    }
+    if(p_alignment != NULL) {
+        alignment_destruct(p_alignment, 1);
+    }
+    free(prev_ref);
+    return 0;
+}
+    
+int tai_create(LI *li, FILE* idx_fh, int64_t index_block_size){
+
+    int input_format = check_input_format(LI_peek_at_next_line(li));
+    assert(input_format == 0 || input_format == 1);
+    
+    // read the TAF header
+    bool run_length_encode_bases = 0;
+    Tag *tag = NULL;
+    if (input_format == 0) {
+        tag = taf_read_header(li);
+        Tag *t = tag_find(tag, "run_length_encode_bases");
+        if(t != NULL && strcmp(t->value, "1") == 0) {
+            run_length_encode_bases = 1;
+        }
+    } else {
+        tag = maf_read_header(li);
+    }
+    tag_destruct(tag);
+
+    if (input_format == 0) {
+        return tai_create_taf(li, idx_fh, index_block_size, run_length_encode_bases);
+    } else {
+        return tai_create_maf(li, idx_fh, index_block_size);
+    }
+
+    return -1;
+}
+
 // basically all the information in the index file
 typedef struct _TaiRec {
     char *name;
@@ -270,8 +335,10 @@ void tai_destruct(Tai* tai) {
     free(tai);
 }
 
-Tai *tai_load(FILE* idx_fh) {
+Tai *tai_load(FILE* idx_fh, bool maf) {
+    time_t start_time = time(NULL);
     Tai *tai = tai_construct();
+    tai->maf = maf;
     LI* li = LI_construct(idx_fh);
     char *line;
     TaiRec *prev_rec = NULL;
@@ -302,12 +369,24 @@ Tai *tai_load(FILE* idx_fh) {
         prev_rec = rec;
     }
     LI_destruct(li);
+    st_logInfo("Loaded .tai index in %" PRIi64 " seconds\n", time(NULL) - start_time);
     return tai;
 }
 
-TaiIt *tai_iterator(Tai* tai, LI *li, bool run_length_encode_bases, const char *contig, int64_t start, int64_t length) {
+// dummy function to let us toggle between maf/taf reading at runtime (by providing a
+// maf reader with same interface as taf reader)
+static Alignment *maf_read_block_3(Alignment *p_block, bool run_length_encode_bases, LI *li) {
+    Alignment *alignment = maf_read_block(li);
+    if(p_block != NULL) {
+        alignment_link_adjacent(p_block, alignment, 1);
+    }
+    return alignment;
+}
 
+TaiIt *tai_iterator(Tai* tai, LI *li, bool run_length_encode_bases, const char *contig, int64_t start, int64_t length) {
+    time_t start_time = time(NULL);
     TaiIt *tai_it = st_calloc(1, sizeof(TaiIt));
+    tai_it->maf = tai->maf;
 
     // parse the region into the iterator
     tai_it->name = stString_copy(contig);
@@ -332,27 +411,38 @@ TaiIt *tai_iterator(Tai* tai, LI *li, bool run_length_encode_bases, const char *
     // sorted set doesn't let us iterate, so we use a second lookup to get
     // the next record
     TaiRec *tair_2 = stSortedSet_searchGreaterThan(tai->idx, &qr);
+    st_logInfo("Queried the in-memory .tai index in %" PRIi64 " seconds\n", time(NULL) - start_time);
 
     // now we know that the start of our region is somewhere in [tair_1, tair_2)
     // (with the possibility of tair_2 not existing)
 
     // move to the first record in our file
+    start_time = time(NULL);
     LI_seek(li, tair_1->file_pos);
+    st_logInfo("Seeked to the queried anchor position with taf file in %" PRIi64 " seconds\n", time(NULL) - start_time);
     LI_get_next_line(li);
 
-    // force taf to start a new alignment at our current file position by making
-    // sure all coordinates are expressed as insertions
-    change_s_coordinates_to_i(LI_peek_at_next_line(li));
+    // all maf / taf logic toggling is handled right here
+    Alignment* (*maftaf_read_block)(Alignment*, bool, LI*) = maf_read_block_3;
+    if (!tai_it->maf) {
+        maftaf_read_block = taf_read_block;
+        // force taf to start a new alignment at our current file position by making
+        // sure all coordinates are expressed as insertions
+        change_s_coordinates_to_i(LI_peek_at_next_line(li));
+    }
     
     // now we have to scan forward until we overlap actually the region
     // TODO: this will surely need speeding up with binary search for giant files...
     //       but i think that's best done once tests are set up based on the simpler version
+    start_time = time(NULL);
+    size_t scan_block_count = 0;
     tai_it->alignment = NULL;
     tai_it->p_alignment = NULL;
     Alignment *alignment = NULL;
     Alignment *p_alignment = NULL;
     int64_t file_pos = LI_tell(li);
-    while((alignment = taf_read_block(p_alignment, tai_it->run_length_encode_bases, li)) != NULL) {
+    while((alignment = maftaf_read_block(p_alignment, tai_it->run_length_encode_bases, li)) != NULL) {
+        ++scan_block_count;
         if (tair_2 && file_pos >= tair_2->file_pos) {
             // we've gone past our query region: there's no hope
             alignment_destruct(alignment, true);
@@ -378,7 +468,6 @@ TaiIt *tai_iterator(Tai* tai, LI *li, bool run_length_encode_bases, const char *
                 tai_it->alignment = alignment;
                 p_alignment = NULL;
                 break;
-                
             }
         }
         file_pos = LI_tell(li);
@@ -395,8 +484,11 @@ TaiIt *tai_iterator(Tai* tai, LI *li, bool run_length_encode_bases, const char *
             alignment_destruct(tai_it->p_alignment, true);
         }
         tai_iterator_destruct(tai_it);
+        st_logInfo("Scanned %" PRIi64 " blocks to NOT find region start in %" PRIi64 " seconds\n", scan_block_count, time(NULL) - start_time);
         return NULL;
     }
+
+    st_logInfo("Scanned %" PRIi64 " blocks to find region start in %" PRIi64 " seconds\n", scan_block_count, time(NULL) - start_time);
     
     return tai_it;
 }
@@ -522,11 +614,16 @@ Alignment *tai_next(TaiIt *tai_it, LI *li) {
     // save this alignment, it's what we're gonna return
     tai_it->p_alignment = tai_it->alignment;
 
+    Alignment* (*maftaf_read_block)(Alignment*, bool, LI*) = maf_read_block_3;
+    if (!tai_it->maf) {
+        maftaf_read_block = taf_read_block;
+    }
+    
     // scan forward
     if (ret & 1) {
         tai_it->alignment = NULL;
     } else {
-        tai_it->alignment = taf_read_block(tai_it->p_alignment, tai_it->run_length_encode_bases, li);
+        tai_it->alignment = maftaf_read_block(tai_it->p_alignment, tai_it->run_length_encode_bases, li);
         if (tai_it->alignment != NULL &&
             (strcmp(tai_it->alignment->row->sequence_name, tai_it->name) != 0 ||
              tai_it->alignment->row->start >= tai_it->end)) {
@@ -537,7 +634,71 @@ Alignment *tai_next(TaiIt *tai_it, LI *li) {
     
     return tai_it->p_alignment;
 }
+
 void tai_iterator_destruct(TaiIt *tai_it) {
     free(tai_it->name);
     free(tai_it);
+}
+
+stHash *tai_sequence_lengths(Tai *tai, LI *li) {
+    // read the header
+    LI_seek(li, 0);
+    LI_get_next_line(li);
+    int input_format = check_input_format(LI_peek_at_next_line(li));
+    assert(input_format == 0 || input_format == 1);
+    assert((input_format == 1) == tai->maf);
+    bool run_length_encode_bases = 0;
+    Tag *tag = NULL;
+    if (tai->maf == 0) {
+        tag = taf_read_header(li);
+        Tag *t = tag_find(tag, "run_length_encode_bases");
+        if(t != NULL && strcmp(t->value, "1") == 0) {
+            run_length_encode_bases = 1;
+        }
+    } else {
+        tag = maf_read_header(li);
+    }
+    tag_destruct(tag);
+
+    Alignment* (*maftaf_read_block)(Alignment*, bool, LI*) = maf_read_block_3;
+    if (!tai->maf) {
+        maftaf_read_block = taf_read_block;
+    }
+    
+    stHash *seq_to_len = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, free, NULL);
+
+    // dummy record for querying the set
+    TaiRec qr;
+    qr.seq_pos = 0;
+
+    // the index keeps a set of sequence names, which is handy here
+    // we iterate that, using the position index to hook into the first occurrence of
+    // each name.  but we add every sequence name we can find for each block, not just reference
+    for (int64_t i = 0; i < stList_length(tai->names); ++i) {
+        char *seq = (char*)stList_get(tai->names, i);
+        if (stHash_search(seq_to_len, seq) == NULL) {
+            qr.name = seq;
+            TaiRec *tair = stSortedSet_searchGreaterThanOrEqual(tai->idx, &qr);
+            assert(tair != NULL);
+            LI_seek(li, tair->file_pos);
+            LI_get_next_line(li);
+
+            if (!tai->maf) {
+                // force taf to start a new alignment at our current file position by making
+                // sure all coordinates are expressed as insertions
+                change_s_coordinates_to_i(LI_peek_at_next_line(li));
+            }
+            
+            Alignment *alignment = maftaf_read_block(NULL, run_length_encode_bases, li);
+            assert(alignment != NULL);
+
+            Alignment_Row *row = alignment->row;
+            assert(row != NULL);
+            assert(strcmp(row->sequence_name, seq) == 0);
+            stHash_insert(seq_to_len, stString_copy(row->sequence_name), (void*)row->sequence_length);
+        }
+    }
+
+    assert(stHash_size(seq_to_len) == stList_length(tai->names));
+    return seq_to_len;
 }

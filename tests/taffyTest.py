@@ -179,7 +179,7 @@ class TafTest(unittest.TestCase):
         write_taf_index_file(taf_file=self.test_taf_file, index_file=self.test_index_file)
 
         # Make the Taf Index object
-        taf_index = TafIndex(self.test_index_file)
+        taf_index = TafIndex(self.test_index_file, False)
 
         # Create a taf reader
         with AlignmentReader(self.test_taf_file,

@@ -155,10 +155,10 @@ class Row:
 class TafIndex:
     """ Taf Index (.tai)
     """
-    def __init__(self, file, file_string_not_handle=True):
+    def __init__(self, file, is_maf, file_string_not_handle=True):
         """ Load from a file. Can be a file name or a Python file handle """
         c_file_handle = _get_c_file_handle(file, file_string_not_handle)
-        self._c_taf_index = lib.tai_load(c_file_handle)
+        self._c_taf_index = lib.tai_load(c_file_handle, is_maf)
         if file_string_not_handle:  # Close the underlying file handle if opened
             lib.fclose(c_file_handle)
 

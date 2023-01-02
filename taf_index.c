@@ -1,5 +1,5 @@
 /*
- * taf_index: Make a .tai index from a TAF file (which can be bgzipped or uncompressed)
+ * taf_index: Make a .tai index from a TAF or MAF file (which can be bgzipped or uncompressed)
  *
  *  Released under the MIT license, see LICENSE.txt
 */
@@ -11,9 +11,9 @@
 
 static void usage() {
     fprintf(stderr, "taf_index [options]\n");
-    fprintf(stderr, "Index a TAF file, output goes in <file>.tai\n");
-    fprintf(stderr, "-i --inputFile : Input taf file to invert [REQUIRED]\n");
-    fprintf(stderr, "-b --blockSize : Write an index line for intervals of this many bp [default:1000000]\n");
+    fprintf(stderr, "Index a TAF or MAF file, output goes in <file>.tai\n");
+    fprintf(stderr, "-i --inputFile : Input taf or maf file [REQUIRED]\n");
+    fprintf(stderr, "-b --blockSize : Write an index line for intervals of this many bp [default:10000]\n");
     fprintf(stderr, "-l --logLevel : Set the log level\n");
     fprintf(stderr, "-h --help : Print this help message\n");
 }
@@ -26,7 +26,7 @@ int taf_index_main(int argc, char *argv[]) {
      */
     char *logLevelString = NULL;
     char *taf_fn = NULL;
-    int64_t block_size = 1000000;
+    int64_t block_size = 10000;
 
     ///////////////////////////////////////////////////////////////////////////
     // Parse the inputs
@@ -82,7 +82,7 @@ int taf_index_main(int argc, char *argv[]) {
     }
     FILE *taf_fh = fopen(taf_fn, "r");
     if (taf_fh == NULL) {
-        fprintf(stderr, "Unable to open input TAF file: %s\n", taf_fn);
+        fprintf(stderr, "Unable to open input file: %s\n", taf_fn);
         return 1;
     }
     char *tai_fn = tai_path(taf_fn);
@@ -90,7 +90,7 @@ int taf_index_main(int argc, char *argv[]) {
     FILE *tai_fh = fopen(tai_fn, "w");    
     LI *li = LI_construct(taf_fh);
     if (!LI_indexable(li)) {
-        fprintf(stderr, "Input TAF file must be either uncompressed or bgzipped: gzip not supported: %s\n", taf_fn);
+        fprintf(stderr, "Input file must be either uncompressed or bgzipped: gzip not supported: %s\n", taf_fn);
         return 1;
     }
 
@@ -110,7 +110,7 @@ int taf_index_main(int argc, char *argv[]) {
 
     LI_destruct(li);
     
-    st_logInfo("taf_index is done, %" PRIi64 " seconds have elapsed\n", time(NULL) - startTime);
+    st_logInfo("taffy index is done, %" PRIi64 " seconds have elapsed\n", time(NULL) - startTime);
 
     return 0;
 }

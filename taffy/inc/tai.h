@@ -14,6 +14,7 @@
 typedef struct _Tai {
     stSortedSet *idx;
     stList *names; // just to keep track of memory -- we only keep one instance of each sequence name
+    bool maf;
 } Tai;
 
 typedef struct _TaiIt {
@@ -24,6 +25,7 @@ typedef struct _TaiIt {
     Alignment *alignment;
     Alignment *p_alignment;
     bool run_length_encode_bases;
+    bool maf;
 } TaiIt;
 
 
@@ -50,7 +52,7 @@ int tai_create(LI *li, FILE* idx_fh, int64_t index_block_size);
 /*
  * Load the index from disk
  */
-Tai *tai_load(FILE* idx_fh);
+Tai *tai_load(FILE* idx_fh, bool maf);
 
 /*
  * Free the index
@@ -73,5 +75,10 @@ Alignment *tai_next(TaiIt *tai_it, LI *li);
  * Free a tai iterator
  */
 void tai_iterator_destruct(TaiIt *tai_it);
+
+/**
+ * Return a map of Sequence name to Length. Only reference (ie indexed) sequences are returned
+ */
+stHash *tai_sequence_lengths(Tai *idx, LI *li);
 
 #endif

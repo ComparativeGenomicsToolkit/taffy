@@ -52,8 +52,8 @@ ${srcDir}/tai.o : ${srcDir}/tai.c ${libHeaders}
 ${BINDIR}/stTafTests : ${libTests} ${LIBDIR}/libstTaf.a ${stTafDependencies}
 	${CC} ${CFLAGS} ${LDFLAGS} -o ${BINDIR}/stTafTests ${libTests} ${LIBDIR}/libstTaf.a ${LDLIBS}
 
-${BINDIR}/taffy : taf_norm.o taf_add_gap_bases.o taf_index.o taf_view.o taffy_main.o ${LIBDIR}/libstTaf.a ${libHeaders} ${stTafDependencies}
-	${CXX} ${CPPFLAGS} ${CXXFLAGS} taf_norm.o taf_add_gap_bases.o taf_index.o taf_view.o taffy_main.o -o ${BINDIR}/taffy ${LIBDIR}/libstTaf.a ${LDLIBS}
+${BINDIR}/taffy : taf_norm.o taf_add_gap_bases.o taf_index.o taf_view.o taf_stats.o taffy_main.o ${LIBDIR}/libstTaf.a ${libHeaders} ${stTafDependencies}
+	${CXX} ${CPPFLAGS} ${CXXFLAGS} taf_norm.o taf_add_gap_bases.o taf_index.o taf_view.o taf_stats.o taffy_main.o -o ${BINDIR}/taffy ${LIBDIR}/libstTaf.a ${LDLIBS}
 
 taffy_main.o : taffy_main.cpp ${stTafDependencies} ${libHeaders}
 	${CXX} ${CPPFLAGS} ${CXXFLAGS} -o taffy_main.o -c taffy_main.cpp
@@ -69,6 +69,9 @@ taf_index.o : taf_index.c ${stTafDependencies} ${libHeaders}
 
 taf_view.o : taf_view.c ${stTafDependencies} ${libHeaders}
 	${CC} ${CFLAGS} ${CFLAGS} -o taf_view.o -c taf_view.c
+
+taf_stats.o : taf_stats.c ${stTafDependencies} ${libHeaders}
+	${CC} ${CFLAGS} ${CFLAGS} -o taf_stats.o -c taf_stats.c
 
 test : all ${BINDIR}/stTafTests
 	${BINDIR}/stTafTests

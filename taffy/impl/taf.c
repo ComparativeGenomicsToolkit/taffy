@@ -398,3 +398,25 @@ void taf_write_block(Alignment *p_alignment, Alignment *alignment, bool run_leng
 void taf_write_header(Tag *tag, LW *lw) {
     write_header(tag, lw, "#taf", ":", "\n");
 }
+
+int check_input_format(const char *header_line) {
+    int ret = 2;
+    assert(header_line != NULL);
+    stList *tokens = stString_split(header_line);
+    if (stList_length(tokens) > 0) {
+        if (strcmp(stList_get(tokens, 0), "#taf") == 0) {
+            ret = 0;
+        } else if (strcmp(stList_get(tokens, 0), "##maf") == 0) {
+            ret = 1;
+        }
+    }            
+    stList_destruct(tokens);
+#ifndef USE_HTSLIB   
+    if (ret == 2 && strlen(header_line) >= 2 &&
+        (unsigned char)header_line[0] == 0x1f && (unsigned char)header_line[1] == 0x8b) {
+        fprintf(stderr, "(b)gzipped input support disabled: please build TAFFY with htslib\n");
+        exit(1);
+    }     
+#endif
+    return ret;
+}
