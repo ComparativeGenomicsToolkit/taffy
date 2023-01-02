@@ -17,7 +17,7 @@ static char *make_row_string(Alignment_Row *row) {
 static void test_normalize(CuTest *testCase) {
     // Example maf file
     char *example_file = "./tests/evolverMammals.maf";
-    // Read a maf and write a copy of it
+    // Read a maf and normalize it
     FILE *file = fopen(example_file, "r");
     LI *li = LI_construct(file);
     Alignment *alignment, *p_alignment = NULL;

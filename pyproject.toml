@@ -13,7 +13,7 @@ description = "For manipulating taf and maf format alignments"
 readme = "README.md"
 requires-python = ">=3.7"
 dependencies = [
-    "cffi>=1.0.0",
+    "cffi>=1.0.0", "numpy", "torch"
 ]
 classifiers = [
     "Programming Language :: Python :: 3",

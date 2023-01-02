@@ -4,6 +4,19 @@ ffibuilder = FFI()
 # cdef() expects a single string declaring the C types, functions and
 # globals needed to use the shared object. It must be in valid C syntax.
 ffibuilder.cdef("""
+    typedef struct BGZF BGZF;
+
+    typedef struct _LW {
+        FILE *fh;
+        BGZF *bgzf;
+    } LW;
+    
+    LW *LW_construct(FILE *fh, bool use_compression);
+    
+    void LW_destruct(LW *lw, bool clean_up_file_handle);
+    
+    int LW_write(LW *lw, const char *string, ...);
+
     void free(void *ptr);
 
     FILE *fopen(const char *filename, const char *mode);
@@ -11,8 +24,10 @@ ffibuilder.cdef("""
     int fclose(FILE *stream);
 
     typedef struct _LI {
-        FILE *fh;
+        BGZF *bgzf;
         char *line;
+        int64_t prev_pos; // position before reading the current buffer
+        int64_t pos;      // position after reading the curent buffer    
     } LI;
     
     LI *LI_construct(FILE *fh);
@@ -147,12 +162,12 @@ ffibuilder.cdef("""
     /*
      * Write a maf header line
      */
-    void maf_write_header(Tag *tag, FILE *fh);
+    void maf_write_header(Tag *tag, LW *lw);
     
     /*
      * Write a maf block
      */
-    void maf_write_block(Alignment *alignment, FILE *fh);
+    void maf_write_block(Alignment *alignment, LW *lw);
     
     
     /*
@@ -169,13 +184,13 @@ ffibuilder.cdef("""
     /*
      * Write a taf header line
      */
-    void taf_write_header(Tag *tag, FILE *fh);
+    void taf_write_header(Tag *tag, LW *lw);
     
     /*
      * Write a taf block.
      */
     void taf_write_block(Alignment *p_alignment, Alignment *alignment, bool run_length_encode_bases,
-                         int64_t repeat_coordinates_every_n_columns, FILE *fh);
+                         int64_t repeat_coordinates_every_n_columns, LW *lw);
                          
 
    typedef struct _Tai Tai;
@@ -226,7 +241,9 @@ ffibuilder.set_source("taffy._taffy_cffi",
                       """
                            #include <stdio.h>
                            #include <stdlib.h>
-                           #include "taf.h" // the C header of the library
+                           #include "htslib/bgzf.h"
+                           #include "htslib/kstring.h"
+                           #include "taf.h" 
                            #include "line_iterator.h" 
                            #include "tai.h"
                       """,
@@ -252,7 +269,10 @@ ffibuilder.set_source("taffy._taffy_cffi",
                                "taffy/impl/maf.c",
                                "taffy/impl/ond.c",
                                "taffy/impl/taf.c",
-                               "taffy/impl/tai.c"],
+                               "taffy/impl/tai.c",
+                               ],
+                      extra_compile_args=["-DUSE_HTSLIB"],
+                      libraries=["hts"],
                       )
 
 if __name__ == "__main__":

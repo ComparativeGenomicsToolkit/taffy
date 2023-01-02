@@ -268,7 +268,7 @@ Tag *taf_read_header(LI *li) {
     return tag;
 }
 
-void write_column(Alignment_Row *row, int64_t column, FILE *fh, bool run_length_encode_bases) {
+void write_column(Alignment_Row *row, int64_t column, LW *lw, bool run_length_encode_bases) {
     char base = '\0';
     int64_t base_count = 0;
     while(row != NULL) {
@@ -278,11 +278,11 @@ void write_column(Alignment_Row *row, int64_t column, FILE *fh, bool run_length_
         else {
             if(base != '\0') {
                 if(run_length_encode_bases) {
-                    fprintf(fh, "%c %" PRIi64 " ", base, base_count);
+                    LW_write(lw, "%c %" PRIi64 " ", base, base_count);
                 }
                 else {
                     for (int64_t i = 0; i < base_count; i++) {
-                        fprintf(fh, "%c", base);
+                        LW_write(lw, "%c", base);
                     }
                 }
             }
@@ -293,22 +293,22 @@ void write_column(Alignment_Row *row, int64_t column, FILE *fh, bool run_length_
     }
     if(base != '\0') {
         if(run_length_encode_bases) {
-            fprintf(fh, "%c %" PRIi64 " ", base, base_count);
+            LW_write(lw, "%c %" PRIi64 " ", base, base_count);
         }
         else {
             for (int64_t i = 0; i < base_count; i++) {
-                fprintf(fh, "%c", base);
+                LW_write(lw, "%c", base);
             }
         }
     }
 }
 
-void write_coordinates(Alignment_Row *p_row, Alignment_Row *row, int64_t repeat_coordinates_every_n_columns, FILE *fh) {
+void write_coordinates(Alignment_Row *p_row, Alignment_Row *row, int64_t repeat_coordinates_every_n_columns, LW *lw) {
     int64_t i = 0;
-    fprintf(fh, " ;");
+    LW_write(lw, " ;");
     while(p_row != NULL) { // Write any row deletions
         if(p_row->r_row == NULL) { // if the row is deleted
-            fprintf(fh, " d %" PRIi64 "", i);
+            LW_write(lw, " d %" PRIi64 "", i);
         }
         else { // Only update the index is the row is not deleted
             i++;
@@ -324,7 +324,7 @@ void write_coordinates(Alignment_Row *p_row, Alignment_Row *row, int64_t repeat_
     bool report_everything = false; 
     while(row != NULL) { // Now write the new rows
         if(row->l_row == NULL) { // if the row is inserted
-            fprintf(fh, " i %" PRIi64 " %s %" PRIi64 " %c %" PRIi64 "",
+            LW_write(lw, " i %" PRIi64 " %s %" PRIi64 " %c %" PRIi64 "",
                     i, row->sequence_name, row->start, row->strand ? '+' : '-', row->sequence_length);
             row->bases_since_coordinates_reported = 0;
             if (i == 0) {
@@ -342,7 +342,7 @@ void write_coordinates(Alignment_Row *p_row, Alignment_Row *row, int64_t repeat_
                    row->bases_since_coordinates_reported > repeat_coordinates_every_n_columns)) { // Report the coordinates again
                     // so they are easy to find
                     row->bases_since_coordinates_reported = 0;
-                    fprintf(fh, " s %" PRIi64 " %s %" PRIi64 " %c %" PRIi64 "",
+                    LW_write(lw, " s %" PRIi64 " %s %" PRIi64 " %c %" PRIi64 "",
                             i, row->sequence_name, row->start, row->strand ? '+' : '-', row->sequence_length);
                     if (i == 0) {
                         report_everything = true;
@@ -353,17 +353,17 @@ void write_coordinates(Alignment_Row *p_row, Alignment_Row *row, int64_t repeat_
                     if(gap_length > 0) { // if there is an indel
                         if(row->left_gap_sequence != NULL) {
                             assert(strlen(row->left_gap_sequence) == gap_length);
-                            fprintf(fh, " G %" PRIi64 " %s", i, row->left_gap_sequence);
+                            LW_write(lw, " G %" PRIi64 " %s", i, row->left_gap_sequence);
                         }
                         else {
-                            fprintf(fh, " g %" PRIi64 " %" PRIi64 "", i, gap_length);
+                            LW_write(lw, " g %" PRIi64 " %" PRIi64 "", i, gap_length);
                         }
                     }
                 }
             }
             else { // Substitute one row for another
                 row->bases_since_coordinates_reported = 0;
-                fprintf(fh, " s %" PRIi64 " %s %" PRIi64 " %c %" PRIi64 "",
+                LW_write(lw, " s %" PRIi64 " %s %" PRIi64 " %c %" PRIi64 "",
                         i, row->sequence_name, row->start, row->strand ? '+' : '-', row->sequence_length);
             }
         }
@@ -371,32 +371,32 @@ void write_coordinates(Alignment_Row *p_row, Alignment_Row *row, int64_t repeat_
     }
 }
 
-void write_header(Tag *tag, FILE *fh, char *header_prefix, char *delimiter, char *end);
+void write_header(Tag *tag, LW *lw, char *header_prefix, char *delimiter, char *end);
 
 void taf_write_block(Alignment *p_alignment, Alignment *alignment, bool run_length_encode_bases,
-                     int64_t repeat_coordinates_every_n_columns, FILE *fh) {
+                     int64_t repeat_coordinates_every_n_columns, LW *lw) {
     Alignment_Row *row = alignment->row;
     if(row != NULL) {
         int64_t column_no = strlen(row->bases);
         assert(column_no > 0);
-        write_column(row, 0, fh, run_length_encode_bases);
-        write_coordinates(p_alignment != NULL ? p_alignment->row : NULL, row, repeat_coordinates_every_n_columns, fh);
+        write_column(row, 0, lw, run_length_encode_bases);
+        write_coordinates(p_alignment != NULL ? p_alignment->row : NULL, row, repeat_coordinates_every_n_columns, lw);
         if(alignment->column_tags != NULL && alignment->column_tags[0] != NULL) {
-            write_header(alignment->column_tags[0], fh, " #", ":", "");
+            write_header(alignment->column_tags[0], lw, " #", ":", "");
         }
-        fprintf(fh, "\n");
+        LW_write(lw, "\n");
         for(int64_t i=1; i<column_no; i++) {
-            write_column(row, i, fh, run_length_encode_bases);
+            write_column(row, i, lw, run_length_encode_bases);
             if(alignment->column_tags != NULL && alignment->column_tags[i] != NULL) {
-                write_header(alignment->column_tags[i], fh, " #", ":", "");
+                write_header(alignment->column_tags[i], lw, " #", ":", "");
             }
-            fprintf(fh, "\n");
+            LW_write(lw, "\n");
         }
     }
 }
 
-void taf_write_header(Tag *tag, FILE *fh) {
-    write_header(tag, fh, "#taf", ":", "\n");
+void taf_write_header(Tag *tag, LW *lw) {
+    write_header(tag, lw, "#taf", ":", "\n");
 }
 
 int check_input_format(const char *header_line) {

@@ -80,3 +80,72 @@ void LI_seek(LI *li, int64_t position) {
 int64_t LI_tell(LI *li) {
     return li->prev_pos;
 }
+
+LW *LW_construct(FILE *fh, bool use_compression) {
+    LW *lw = st_calloc(1, sizeof(LW));
+    lw->fh = fh;
+    if(use_compression) {
+#ifdef USE_HTSLIB
+        lw->bgzf = bgzf_dopen(fileno(fh), "w");
+        assert(lw->bgzf);
+        assert(bgzf_compression(lw->bgzf) == 2);
+        if (bgzf_index_build_init(lw->bgzf) != 0) {
+            assert(false);
+        }
+#endif
+    }
+    return lw;
+}
+
+void LW_destruct(LW *lw, bool clean_up_file_handle) {
+#ifdef USE_HTSLIB
+    if(lw->bgzf) {
+        if(bgzf_flush(lw->bgzf)) {
+            assert(0); // Flush failed
+        }
+        if(bgzf_close(lw->bgzf)) {
+            assert(0); // Close failed
+        }
+    }
+#endif
+    if(clean_up_file_handle) {
+        fclose(lw->fh);
+    }
+    free(lw);
+}
+
+int LW_write(LW *lw, const char *string, ...) {
+#ifdef USE_HTSLIB
+    int i;
+    va_list ap;
+    if(lw->bgzf) { // Use bgzf compression
+        // Figure out how long the string is to build the buffer
+        va_start(ap, string);
+        int j = vsnprintf(NULL, 0, string, ap)+1;
+        assert(j >= 0);
+        va_end(ap);
+        // Now write the string into the buffer
+        va_start(ap, string);
+        char ret[j];
+        i = vsnprintf(ret, j, string, ap);
+        assert(ret[i] == '\0');
+        // Finally, write the buffer to the bgzf stream
+        i = bgzf_write(lw->bgzf, ret, i);
+        assert(i+1 == j);
+        va_end(ap);
+    }
+    else { // No compression, just fprintf to the stream
+        va_start(ap, string);
+        i = vfprintf(lw->fh, string, ap);
+        va_end(ap);
+    }
+    return i;
+#else
+    va_list ap;
+    va_start(ap, string);
+    int i = vfprintf(lw->fh, string, ap);
+    va_end(ap);
+    return i;
+#endif
+}
+

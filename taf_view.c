@@ -21,6 +21,7 @@ static void usage() {
     fprintf(stderr, "-r --region  : Print only SEQ:START-END, where SEQ is a row-0 sequence name, and START-END are 0-based open-ended like BED\n");
     fprintf(stderr, "-s --repeatCoordinatesEveryNColumns : Repeat TAF coordinates of each sequence at least every n columns. By default: %" PRIi64 "\n", repeat_coordinates_every_n_columns);
     fprintf(stderr, "-u --runLengthEncodeBases : Run length encode bases in TAF\n");
+    fprintf(stderr, "-c --useCompression : Write the output using bgzip compression.\n");
     fprintf(stderr, "-l --logLevel : Set the log level\n");
     fprintf(stderr, "-h --help : Print this help message\n");
 }
@@ -37,6 +38,7 @@ int taf_view_main(int argc, char *argv[]) {
     bool run_length_encode_bases = 0;
     bool maf_output = false;
     char *region = NULL;
+    bool use_compression = 0;
 
     ///////////////////////////////////////////////////////////////////////////
     // Parse the inputs
@@ -49,12 +51,13 @@ int taf_view_main(int argc, char *argv[]) {
                                                 { "maf", no_argument, 0, 'm' },                                                
                                                 { "runLengthEncodeBases", no_argument, 0, 'u' },
                                                 { "repeatCoordinatesEveryNColumns", required_argument, 0, 's' },
-                                                { "region", required_argument, 0, 'r' },                                                
+                                                { "region", required_argument, 0, 'r' },
+                                                { "useCompression", no_argument, 0, 'c' },
                                                 { "help", no_argument, 0, 'h' },
                                                 { 0, 0, 0, 0 } };
 
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:o:mus:r:h", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:o:mucs:r:h", long_options, &option_index);
         if (key == -1) {
             break;
         }
@@ -81,6 +84,9 @@ int taf_view_main(int argc, char *argv[]) {
             case 'r':
                 region = optarg;
                 break;
+            case 'c':
+                use_compression = 1;
+                break;
             case 'h':
                 usage();
                 return 0;
@@ -97,6 +103,7 @@ int taf_view_main(int argc, char *argv[]) {
     st_setLogLevelFromString(logLevelString);
     st_logInfo("Input file string : %s\n", inputFile);
     st_logInfo("Output file string : %s\n", outputFile);
+    st_logInfo("Write compressed output : %s\n", use_compression ? "true" : "false");
 
     //////////////////////////////////////////////
     // Read in the taf/maf blocks and convert to sequence of taf/maf blocks
@@ -108,11 +115,13 @@ int taf_view_main(int argc, char *argv[]) {
         return 1;
     }
 
-    FILE *output = outputFile == NULL ? stdout : fopen(outputFile, "w");
-    if (output == NULL) {
+    FILE *output_fh = outputFile == NULL ? stdout : fopen(outputFile, "w");
+    if (output_fh == NULL) {
         fprintf(stderr, "Unable to open output file: %s\n", outputFile);
         return 1;
     }
+    
+    LW *output = LW_construct(outputFile == NULL ? stdout : fopen(outputFile, "w"), use_compression);
     LI *li = LI_construct(input);
 
     // sniff the format
@@ -244,9 +253,7 @@ int taf_view_main(int argc, char *argv[]) {
     if(inputFile != NULL) {
         fclose(input);
     }
-    if(outputFile != NULL) {
-        fclose(output);
-    }
+    LW_destruct(output, outputFile != NULL);
 
     st_logInfo("taffy view is done, %" PRIi64 " seconds have elapsed\n", time(NULL) - startTime);
 

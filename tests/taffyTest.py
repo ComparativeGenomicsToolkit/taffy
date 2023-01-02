@@ -1,7 +1,8 @@
 import unittest
 import pathlib
+import subprocess
 from random import randint
-from taffy.lib import AlignmentParser, AlignmentWriter, TafIndex, write_taf_index_file
+from taffy.lib import AlignmentReader, AlignmentWriter, TafIndex, write_taf_index_file, get_column_iterator
 
 
 class TafTest(unittest.TestCase):
@@ -10,9 +11,9 @@ class TafTest(unittest.TestCase):
         self.test_taf_file = (pathlib.Path().absolute() / "../tests/evolverMammals.taf").as_posix()
         self.test_index_file = (pathlib.Path().absolute() / "../tests/evolverMammals.tai").as_posix()
 
-    def test_maf_parser(self):
+    def test_maf_reader(self):
         """ Manually test the first couple blocks from the maf file """
-        with AlignmentParser(self.test_maf_file, taf_not_maf=False) as mp:
+        with AlignmentReader(self.test_maf_file, taf_not_maf=False) as mp:
             # Check the header is as expected
             header = mp.get_header()
             self.assertEqual(header, {"version": "1", "scoring": "N/A"})
@@ -80,18 +81,44 @@ class TafTest(unittest.TestCase):
             self.assertEqual(b.get_column(0), "AAAATAAAA")
             self.assertEqual(b.get_column(-1), "AAAATAAAA")
 
-    def test_maf_to_taf(self):
-        """ Read a maf file, write a taf file and then read it back and check
+    def test_column_iterator(self):
+        """ Manually test the column iterator """
+        with AlignmentReader(self.test_maf_file, taf_not_maf=False) as mp:
+            column_it = get_column_iterator(mp)
+            s = ["Anc0.Anc0refChr0", "Anc1.Anc1refChr1", "Anc2.Anc2refChr1", "mr.mrrefChr1",
+                 "simCow_chr6.simCow.chr6", "simDog_chr6.simDog.chr6", "simHuman_chr6.simHuman.chr6",
+                 "simMouse_chr6.simMouse.chr6", "simRat_chr6.simRat.chr6"]
+            # First column
+            sequence_names, column = next(column_it)
+            self.assertEqual(s, list(sequence_names))
+            self.assertEqual(column, "GGGGGGGGG")
+
+            # Second column
+            sequence_names, column = next(column_it)
+            self.assertEqual(s, list(sequence_names))
+            self.assertEqual(column, "TTTTTTTTT")
+
+            # Third column
+            sequence_names, column = next(column_it)
+            self.assertEqual(s, list(sequence_names))
+            self.assertEqual(column, "CCCCGCCCC")
+
+            # Check it works
+            for sequence_names, column in column_it:
+                pass
+
+    def test_maf_to_taf(self, compress_file=False):
+        """ Read a maf file, write a taf file, compress it with gzip and then read it back and check
         they are equal. Tests round trip read and write. Writes in random tags to the taf to test tag writing """
         def make_random_tags():  # Fn to make random tags
             return {str(randint(0, 1000)): str(randint(0, 1000)) for i in range(randint(0, 5))}
         column_tags = []  # List of tags per column
 
         # First read from the maf file and write the taf file
-        with AlignmentParser(self.test_maf_file, taf_not_maf=False) as mp:
+        with AlignmentReader(self.test_maf_file, taf_not_maf=False) as mp:
             maf_header_tags = mp.get_header()  # Get the maf header tags
 
-            with AlignmentWriter(self.test_taf_file, header_tags=maf_header_tags) as tw:
+            with AlignmentWriter(self.test_taf_file, header_tags=maf_header_tags, use_compression=compress_file) as tw:
                 tw.write_header()  # Write the header
 
                 for a in mp:  # For each alignment block in input
@@ -104,9 +131,8 @@ class TafTest(unittest.TestCase):
 
         # Now read back the taf file and check it is equivalent to the maf
         column_index = 0  # Used to track where in the list of columns we are
-        with AlignmentParser(self.test_taf_file) as tp:
-
-            with AlignmentParser(self.test_maf_file, taf_not_maf=False) as mp:
+        with AlignmentReader(self.test_taf_file) as tp:
+            with AlignmentReader(self.test_maf_file, taf_not_maf=False) as mp:
                 self.assertEqual(mp.get_header(), tp.get_header())  # Check headers are equivalent
 
                 for ma, ta in zip(mp, tp):  # For each of the two alignment blocks
@@ -135,13 +161,16 @@ class TafTest(unittest.TestCase):
                         tr = tr.next_row()
                     self.assertTrue(not tr)
 
-    def test_taf_index(self):
+    def test_maf_to_taf_compressed(self):
+        self.test_maf_to_taf(compress_file=True)
+
+    def test_taf_index(self, compress_file=False):
         """ Index a taf file then load a portion of the file with the
-         AlignmentParser """
+         AlignmentReader """
         # Convert MAF to TAF
-        with AlignmentParser(self.test_maf_file, taf_not_maf=False) as mp:
+        with AlignmentReader(self.test_maf_file, taf_not_maf=False) as mp:
             maf_header_tags = mp.get_header()  # Get the maf header tags
-            with AlignmentWriter(self.test_taf_file, header_tags=maf_header_tags) as tw:
+            with AlignmentWriter(self.test_taf_file, header_tags=maf_header_tags, use_compression=compress_file) as tw:
                 tw.write_header()  # Write the header
                 for a in mp:  # For each alignment block in input
                     tw.write_alignment(a)  # Write a corresponding output block
@@ -153,7 +182,7 @@ class TafTest(unittest.TestCase):
         taf_index = TafIndex(self.test_index_file, False)
 
         # Create a taf reader
-        with AlignmentParser(self.test_taf_file,
+        with AlignmentReader(self.test_taf_file,
                              taf_index=taf_index,
                              sequence_name="Anc0.Anc0refChr0",
                              start=100,
@@ -164,6 +193,9 @@ class TafTest(unittest.TestCase):
                 self.assertEqual(ref_row.sequence_name(), "Anc0.Anc0refChr0")
                 self.assertTrue(ref_row.start() >= 100)
                 self.assertTrue(ref_row.start() + ref_row.length() <= 600)
+
+    def test_taf_index_compression(self):
+        self.test_taf_index(compress_file=True)
 
 
 if __name__ == '__main__':

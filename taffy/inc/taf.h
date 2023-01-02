@@ -139,12 +139,12 @@ Alignment *maf_read_block(LI *li);
 /*
  * Write a maf header line
  */
-void maf_write_header(Tag *tag, FILE *fh);
+void maf_write_header(Tag *tag, LW *lw);
 
 /*
  * Write a maf block
  */
-void maf_write_block(Alignment *alignment, FILE *fh);
+void maf_write_block(Alignment *alignment, LW *lw);
 
 
 /*
@@ -161,13 +161,13 @@ Alignment *taf_read_block(Alignment *p_block, bool run_length_encode_bases, LI *
 /*
  * Write a taf header line
  */
-void taf_write_header(Tag *tag, FILE *fh);
+void taf_write_header(Tag *tag, LW *lw);
 
 /*
  * Write a taf block.
  */
 void taf_write_block(Alignment *p_alignment, Alignment *alignment, bool run_length_encode_bases,
-                     int64_t repeat_coordinates_every_n_columns, FILE *fh);
+                     int64_t repeat_coordinates_every_n_columns, LW *lw);
 
 
 // the following are low-level functions used in indexing.  they could

@@ -27,6 +27,7 @@ static void usage() {
             maximum_gap_string_length);
     fprintf(stderr, "-l --logLevel : Set the log level\n");
     fprintf(stderr, "-s --repeatCoordinatesEveryNColumns : Repeat coordinates of each sequence at least every n columns. By default: %" PRIi64 "\n", repeat_coordinates_every_n_columns);
+    fprintf(stderr, "-c --useCompression : Write the output using bgzip compression.\n");
     fprintf(stderr, "-h --help : Print this help message\n");
 }
 
@@ -141,6 +142,7 @@ int taf_add_gap_bases_main(int argc, char *argv[]) {
     char *outputFile = NULL;
     char *hal_file = NULL;
     bool run_length_encode_bases = 0;
+    bool use_compression = 0;
 
     ///////////////////////////////////////////////////////////////////////////
     // Parse the inputs
@@ -154,10 +156,11 @@ int taf_add_gap_bases_main(int argc, char *argv[]) {
                                                 { "help", no_argument, 0, 'h' },
                                                 { "maximumGapStringLength", required_argument, 0, 'm' },
                                                 { "repeatCoordinatesEveryNColumns", required_argument, 0, 's' },
+                                                { "useCompression", no_argument, 0, 'c' },
                                                 { 0, 0, 0, 0 } };
 
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:o:a:hm:s:", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:o:a:hm:s:c", long_options, &option_index);
         if (key == -1) {
             break;
         }
@@ -183,6 +186,9 @@ int taf_add_gap_bases_main(int argc, char *argv[]) {
                 break;
             case 'm':
                 maximum_gap_string_length = atol(optarg);
+                break;
+            case 'c':
+                use_compression = 1;
                 break;
             default:
                 usage();
@@ -215,10 +221,12 @@ int taf_add_gap_bases_main(int argc, char *argv[]) {
     }            
     st_logInfo("Maximum maximum gap string length : %" PRIi64 "\n", maximum_gap_string_length);
     st_logInfo("Repeat coordinates every n bases : %" PRIi64 "\n", repeat_coordinates_every_n_columns);
+    st_logInfo("Write compressed output : %s\n", use_compression ? "true" : "false");
 
     //////////////////////////////////////////////
     // Read in the sequence files
     //////////////////////////////////////////////
+
     stHash *fastas = NULL;
     stSet *hal_species = NULL;
     int hal_handle = -1;
@@ -251,7 +259,7 @@ int taf_add_gap_bases_main(int argc, char *argv[]) {
     //////////////////////////////////////////////
 
     FILE *input = inputFile == NULL ? stdin : fopen(inputFile, "r");
-    FILE *output = outputFile == NULL ? stdout : fopen(outputFile, "w");
+    LW *output = LW_construct(outputFile == NULL ? stdout : fopen(outputFile, "w"), use_compression);
     LI *li = LI_construct(input);
 
     // Pass the header line to determine parameters and write the updated taf header
@@ -291,9 +299,7 @@ int taf_add_gap_bases_main(int argc, char *argv[]) {
     if(inputFile != NULL) {
         fclose(input);
     }
-    if(outputFile != NULL) {
-        fclose(output);
-    }
+    LW_destruct(output, outputFile != NULL);
 
     if (fastas) {
         stHash_destruct(fastas);

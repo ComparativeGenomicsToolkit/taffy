@@ -194,13 +194,13 @@ Tag *parse_header(stList *tokens, char *header_prefix, char *delimiter) {
     return parse_tags(tokens, 1, delimiter);
 }
 
-void write_header(Tag *tag, FILE *fh, char *header_prefix, char *delimiter, char *end) {
-    fprintf(fh, "%s", header_prefix);
+void write_header(Tag *tag, LW *lw, char *header_prefix, char *delimiter, char *end) {
+    LW_write(lw, "%s", header_prefix);
     while(tag != NULL) {
-        fprintf(fh, " %s%s%s", tag->key, delimiter, tag->value);
+        LW_write(lw, " %s%s%s", tag->key, delimiter, tag->value);
         tag = tag->n_tag;
     }
-    fprintf(fh, "%s", end);
+    LW_write(lw, "%s", end);
 }
 
 int64_t alignment_number_of_common_rows(Alignment *left_alignment, Alignment *right_alignment) {
