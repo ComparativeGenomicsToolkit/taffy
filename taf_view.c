@@ -121,7 +121,7 @@ int taf_view_main(int argc, char *argv[]) {
         return 1;
     }
     
-    LW *output = LW_construct(outputFile == NULL ? stdout : fopen(outputFile, "w"), use_compression);
+    LW *output = LW_construct(output_fh, use_compression);
     LI *li = LI_construct(input);
 
     // sniff the format
