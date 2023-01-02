@@ -174,10 +174,25 @@ static void test_maf_norm(CuTest *testCase) {
     CuAssertIntEquals(testCase, 0, i); // return value should be zero
 }
 
+static void test_dupe_filter(CuTest *testCase) {
+    /*
+     * Run taf_norm -d on really simple test maf to make sure that it drops a gap-causing dupe
+     */
+    char *input_file = "./tests/dupe_test.maf";
+    char *output_file = "./tests/dupe_test_out.maf";
+    int i = st_system("./bin/taffy view -i %s | ./bin/taffy norm -d | ./bin/taffy view -m > %s",
+                      input_file, output_file);
+    CuAssertIntEquals(testCase, 0, i); // return value should be zero        
+    char *truth_file = "./tests/dupe_test_truth.maf";
+    int diff_ret = st_system("diff %s %s", output_file, truth_file);
+    CuAssertIntEquals(testCase, 0, diff_ret); // return value should be zero if files sames
+}
+
 CuSuite* normalize_test_suite(void) {
     CuSuite* suite = CuSuiteNew();
     SUITE_ADD_TEST(suite, test_normalize);
     SUITE_ADD_TEST(suite, test_maf_norm);
     SUITE_ADD_TEST(suite, test_maf_norm_to_maf);
+    SUITE_ADD_TEST(suite, test_dupe_filter);
     return suite;
 }
