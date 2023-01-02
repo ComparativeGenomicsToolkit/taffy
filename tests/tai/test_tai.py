@@ -79,7 +79,7 @@ def test_tai(regions_path, taf_path, bgzip, block_size):
             contig, start, end = line.split()[:3]
             test_region(taf_path, contig, start, end)
 
-    seq_stats = subprocess.check_output('taffy stats -s -i {} | sort -k1'.format(taf_path), shell=True).decode('utf-8')
+    seq_stats = subprocess.check_output('./bin/taffy stats -s -i {} | sort -k1'.format(taf_path), shell=True).decode('utf-8')
     check_anc0_stats(seq_stats)
 
     if bgzip:
