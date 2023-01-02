@@ -2,6 +2,3 @@
 [submodule "taffy/submodules/sonLib"]
 	path = taffy/submodules/sonLib
 	url = https://github.com/ComparativeGenomicsToolkit/sonLib
-[submodule "taffy/submodules/htslib"]
-	path = taffy/submodules/htslib
-	url = https://github.com/samtools/htslib.git
