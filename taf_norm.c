@@ -24,6 +24,7 @@ static void usage() {
     fprintf(stderr, "-m --maximumBlockLengthToMerge : Only merge together any two adjacent blocks if one or both is less than this many bases long, by default: %" PRIi64 "\n", maximum_block_length_to_merge);
     fprintf(stderr, "-n --maximumGapLength : Only merge together two adjacent blocks if the total number of unaligned bases between the blocks is less than this many bases, by default: %" PRIi64 "\n", maximum_gap_length);
     fprintf(stderr, "-q --fractionSharedRows : The fraction of rows between two blocks that need to be shared for a merge, default: %f\n", fraction_shared_rows);
+    fprintf(stderr, "-d --filterGapCausingDupes : Reduce the number of MAF blocks by filtering out rows that induce gaps > maximumGapLength. Rows are only filtered out if they are duplications (contig of same name appears elsewhere in block, or contig with same prefix up to \".\" appears in the same block).\n");
     fprintf(stderr, "-s --repeatCoordinatesEveryNColumns : Repeat coordinates of each sequence at least every n columns. By default: %" PRIi64 "\n", repeat_coordinates_every_n_columns);
     fprintf(stderr, "-c --useCompression : Write the output using bgzip compression.\n");
     fprintf(stderr, "-h --help : Print this help message\n");
@@ -153,6 +154,7 @@ int taf_norm_main(int argc, char *argv[]) {
     bool run_length_encode_bases = 0;
     bool output_maf = 0;
     bool use_compression = 0;
+    bool filter_gap_causing_dupes = 0;
 
     ///////////////////////////////////////////////////////////////////////////
     // Parse the inputs
@@ -167,12 +169,13 @@ int taf_norm_main(int argc, char *argv[]) {
                                                 { "maximumBlockLengthToMerge", required_argument, 0, 'm' },
                                                 { "maximumGapLength", required_argument, 0, 'n' },
                                                 { "fractionSharedRows", required_argument, 0, 'q' },
+                                                { "filterGapCausingDupes", no_argument, 0, 'd' },
                                                 { "repeatCoordinatesEveryNColumns", required_argument, 0, 's' },
                                                 { "useCompression", no_argument, 0, 'c' },
                                                 { 0, 0, 0, 0 } };
 
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:o:hcm:n:kq:s:", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:o:hcm:n:dkq:s:", long_options, &option_index);
         if (key == -1) {
             break;
         }
@@ -199,6 +202,9 @@ int taf_norm_main(int argc, char *argv[]) {
             case 'n':
                 maximum_gap_length = atol(optarg);
                 break;
+            case 'd':
+                filter_gap_causing_dupes = 1;
+                break;
             case 'q':
                 fraction_shared_rows = atof(optarg);
                 break;
@@ -223,6 +229,7 @@ int taf_norm_main(int argc, char *argv[]) {
     st_logInfo("Output file string : %s\n", outputFile);
     st_logInfo("Maximum block length to merge : %" PRIi64 "\n", maximum_block_length_to_merge);
     st_logInfo("Maximum gap length : %" PRIi64 "\n", maximum_gap_length);
+    st_logInfo("Filter gap-causing dupes : %d\n", (int)filter_gap_causing_dupes);
     st_logInfo("Output maf : %s\n", output_maf ? "true" : "false");
     st_logInfo("Repeat coordinates every n bases : %" PRIi64 "\n", repeat_coordinates_every_n_columns);
     st_logInfo("Fraction shared rows to merge adjacent blocks : %f\n", fraction_shared_rows);
@@ -258,7 +265,8 @@ int taf_norm_main(int argc, char *argv[]) {
                 (alignment_length(p_alignment) <= maximum_block_length_to_merge ||
                  alignment_length(alignment) <= maximum_block_length_to_merge)) {
                 int64_t total_gap = alignment_total_gap_length(p_alignment);
-                if (total_gap <= maximum_gap_length || greedy_prune_by_gap(alignment, maximum_gap_length)) {
+                if (total_gap <= maximum_gap_length ||
+                    (filter_gap_causing_dupes && greedy_prune_by_gap(alignment, maximum_gap_length))) {
                     p_alignment = alignment_merge_adjacent(p_alignment, alignment);
                     merged = true;
                 }
