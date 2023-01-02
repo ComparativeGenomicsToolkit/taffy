@@ -46,6 +46,7 @@ static void add_to_hash(void *fastas, const char *fasta_header, const char *sequ
 // so this function uses knowloedge of the genome names to greedily scan for a prefix ending in "."
 // that corresponds to a genome name in the hal. the extracted genome name is returned if found
 // (it must be freed)
+#ifdef USE_HAL
 static char *extract_genome_name(const char *sequence_name, stSet *hal_species) {
     const char *dot = NULL;
     int64_t offset = 0;
@@ -70,6 +71,7 @@ static char *extract_genome_name(const char *sequence_name, stSet *hal_species) 
     st_errAbort(msg);
     return NULL;
 }
+#endif
 
 // get a dna interval either from the fastas hash file or from the hal_handle
 // note the string returned needs to be freed
