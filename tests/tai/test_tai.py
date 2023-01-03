@@ -63,7 +63,11 @@ Anc0.Anc0refChr6	22717
 Anc0.Anc0refChr7	1851
 Anc0.Anc0refChr8	111467
 Anc0.Anc0refChr9	4824'''
-    assert(stats_string.strip() == true_string)
+    stats_string = '\n'.join(sorted(stats_string.strip().split('\n')))
+    true_string = '\n'.join(sorted(true_string.strip().split('\n')))
+    if stats_string != true_string:
+        sys.stderr.write('\n    found stats:\n{}\n    different from true stats:\n{}\n'.format(stats_string, true_string))
+    assert(stats_string == true_string)
     
 def test_tai(regions_path, taf_path, bgzip, block_size):
     sys.stderr.write(" * running indexing/extraction tests on {} with bzgip={} and blocksize={}".format(taf_path, bgzip, block_size))
@@ -79,7 +83,7 @@ def test_tai(regions_path, taf_path, bgzip, block_size):
             contig, start, end = line.split()[:3]
             test_region(taf_path, contig, start, end)
 
-    seq_stats = subprocess.check_output('./bin/taffy stats -s -i {} | sort -k1'.format(taf_path), shell=True).decode('utf-8')
+    seq_stats = subprocess.check_output(['./bin/taffy', 'stats', '-s', '-i', taf_path]).decode('utf-8')
     check_anc0_stats(seq_stats)
 
     if bgzip:
