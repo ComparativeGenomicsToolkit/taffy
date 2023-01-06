@@ -188,119 +188,6 @@ static void change_s_coordinates_to_i(char *line) {
     stList_destruct(tokens);
 }
 
-static int tai_create_taf(LI *li, FILE *idx_fh, int64_t index_block_size, bool run_length_encode_bases) {
-    char *prev_ref = NULL;
-    int64_t prev_pos = 0;
-    int64_t prev_file_pos = 0;
-
-    // scan the taf line by line
-    for (char *line = LI_get_next_line(li); line != NULL; line = LI_get_next_line(li)) {
-        stList* tokens = stString_split(line);
-        int64_t pos;
-        assert(sizeof(int64_t) == sizeof(off_t));
-        bool strand;
-        char *ref = parse_coordinates_line(tokens, &pos, &strand, run_length_encode_bases);
-        if (ref != NULL) {
-            // shouldn't need to handle negative strand on reference, right?
-            assert(strand == true);
-
-            // we need to update our index if we're on a new reference contig
-            // or we're on the same contig but >= index_block_size bases away
-            bool same_ref = prev_ref && strcmp(ref, prev_ref) == 0;
-            if (!same_ref || pos - prev_pos >= index_block_size) {
-                int64_t file_pos = LI_tell(li);
-                if (same_ref) {
-                    // save a little space by writing relative coordinates
-                    fprintf(idx_fh, "*\t%" PRIi64 "\t%" PRIi64 "\n", pos-prev_pos, file_pos-prev_file_pos);
-                } else {
-                    fprintf(idx_fh, "%s\t%" PRIi64 "\t%" PRIi64 "\n", ref, pos, file_pos);
-                }
-                free(prev_ref);
-                prev_ref = ref;
-                prev_pos = pos;
-                prev_file_pos = file_pos;
-            }
-        }
-        stList_destruct(tokens);
-        free(line);
-    }
-    free(prev_ref);
-    return 0;
-}
-
-static int tai_create_maf(LI *li, FILE *idx_fh, int64_t index_block_size) {
-    char *prev_ref = NULL;
-    int64_t prev_pos = 0;
-    int64_t prev_file_pos = 0;
-
-    // scan the maf block by block line by line
-    Alignment *alignment, *p_alignment = NULL;
-    int64_t file_pos = LI_tell(li);
-    while((alignment = maf_read_block(li)) != NULL) {
-        if(p_alignment != NULL) {
-            alignment_link_adjacent(p_alignment, alignment, 1);
-        }
-        if (alignment->row->strand != 1) {
-            fprintf(stderr, "Can't index maf because reference (row 0) sequence found on negative strand\n");
-            exit(1);
-        }
-        // todo: error message when out of order
-        bool same_ref = prev_ref && strcmp(alignment->row->sequence_name, prev_ref) == 0;
-        int64_t pos = alignment->row->start;
-        char *ref = alignment->row->sequence_name;
-        if (!same_ref || pos - prev_pos >= index_block_size) {
-            if (same_ref) {
-                // save a little space by writing relative coordinates
-                fprintf(idx_fh, "*\t%" PRIi64 "\t%" PRIi64 "\n", pos-prev_pos, file_pos-prev_file_pos);
-            } else {
-                fprintf(idx_fh, "%s\t%" PRIi64 "\t%" PRIi64 "\n", ref, pos, file_pos);
-            }
-            free(prev_ref);
-            prev_ref = stString_copy(ref);
-            prev_pos = pos;
-            prev_file_pos = file_pos;
-        }
-        if(p_alignment != NULL) {
-            alignment_destruct(p_alignment, 1);
-        }
-        p_alignment = alignment;
-        file_pos = LI_tell(li);                    
-    }
-    if(p_alignment != NULL) {
-        alignment_destruct(p_alignment, 1);
-    }
-    free(prev_ref);
-    return 0;
-}
-    
-int tai_create(LI *li, FILE* idx_fh, int64_t index_block_size){
-
-    int input_format = check_input_format(LI_peek_at_next_line(li));
-    assert(input_format == 0 || input_format == 1);
-    
-    // read the TAF header
-    bool run_length_encode_bases = 0;
-    Tag *tag = NULL;
-    if (input_format == 0) {
-        tag = taf_read_header(li);
-        Tag *t = tag_find(tag, "run_length_encode_bases");
-        if(t != NULL && strcmp(t->value, "1") == 0) {
-            run_length_encode_bases = 1;
-        }
-    } else {
-        tag = maf_read_header(li);
-    }
-    tag_destruct(tag);
-
-    if (input_format == 0) {
-        return tai_create_taf(li, idx_fh, index_block_size, run_length_encode_bases);
-    } else {
-        return tai_create_maf(li, idx_fh, index_block_size);
-    }
-
-    return -1;
-}
-
 // basically all the information in the index file
 typedef struct _TaiRec {
     char *name;
@@ -333,6 +220,127 @@ void tai_destruct(Tai* tai) {
     stSortedSet_destruct(tai->idx);
     stList_destruct(tai->names);
     free(tai);
+}
+
+static void tai_create_taf(LI *li, Tai *tai, int64_t index_block_size, bool run_length_encode_bases) {
+    char *prev_ref = NULL;
+    int64_t prev_pos = 0;
+
+    // scan the taf line by line
+    for (char *line = LI_get_next_line(li); line != NULL; line = LI_get_next_line(li)) {
+        stList* tokens = stString_split(line);
+        int64_t pos;
+        assert(sizeof(int64_t) == sizeof(off_t));
+        bool strand;
+        char *ref = parse_coordinates_line(tokens, &pos, &strand, run_length_encode_bases);
+        if (ref != NULL) {
+            // shouldn't need to handle negative strand on reference, right?
+            assert(strand == true);
+
+            // we need to update our index if we're on a new reference contig
+            // or we're on the same contig but >= index_block_size bases away
+            bool same_ref = prev_ref && strcmp(ref, prev_ref) == 0;
+            if (!same_ref || pos - prev_pos >= index_block_size) {
+                int64_t file_pos = LI_tell(li);
+                // insert a new record
+                TaiRec* rec = (TaiRec*)st_calloc(1, sizeof(TaiRec));
+                if (!same_ref) {
+                    rec->name = stString_copy(ref);
+                    stList_append(tai->names, rec->name);
+                } else {
+                    rec->name = stList_peek(tai->names);
+                }
+                rec->seq_pos = pos;
+                rec->file_pos = file_pos;
+                stSortedSet_insert(tai->idx, rec);
+                
+                free(prev_ref);
+                prev_ref = ref;
+                prev_pos = pos;
+            }
+        }
+        stList_destruct(tokens);
+        free(line);
+    }
+    free(prev_ref);
+}
+
+static void tai_create_maf(LI *li, Tai *tai, int64_t index_block_size) {
+    char *prev_ref = NULL;
+    int64_t prev_pos = 0;
+
+    // scan the maf block by block line by line
+    Alignment *alignment, *p_alignment = NULL;
+    int64_t file_pos = LI_tell(li);
+    while((alignment = maf_read_block(li)) != NULL) {
+        if(p_alignment != NULL) {
+            alignment_link_adjacent(p_alignment, alignment, 1);
+        }
+        if (alignment->row->strand != 1) {
+            fprintf(stderr, "Can't index maf because reference (row 0) sequence found on negative strand\n");
+            exit(1);
+        }
+        // todo: error message when out of order
+        bool same_ref = prev_ref && strcmp(alignment->row->sequence_name, prev_ref) == 0;
+        int64_t pos = alignment->row->start;
+        char *ref = alignment->row->sequence_name;
+        if (!same_ref || pos - prev_pos >= index_block_size) {
+            // insert a new record
+            TaiRec* rec = (TaiRec*)st_calloc(1, sizeof(TaiRec));
+            if (!same_ref) {
+                rec->name = stString_copy(ref);
+                stList_append(tai->names, rec->name);
+            } else {
+                rec->name = stList_peek(tai->names);
+            }
+            rec->seq_pos = pos;
+            rec->file_pos = file_pos;
+            stSortedSet_insert(tai->idx, rec);
+                
+            free(prev_ref);
+            prev_ref = stString_copy(ref);
+            prev_pos = pos;
+        }
+        if(p_alignment != NULL) {
+            alignment_destruct(p_alignment, 1);
+        }
+        p_alignment = alignment;
+        file_pos = LI_tell(li);                    
+    }
+    if(p_alignment != NULL) {
+        alignment_destruct(p_alignment, 1);
+    }
+    free(prev_ref);
+}
+    
+Tai *tai_create(LI *li, int64_t index_block_size){
+
+    int input_format = check_input_format(LI_peek_at_next_line(li));
+    assert(input_format == 0 || input_format == 1);
+    
+    // read the TAF header
+    bool run_length_encode_bases = 0;
+    Tag *tag = NULL;
+    if (input_format == 0) {
+        tag = taf_read_header(li);
+        Tag *t = tag_find(tag, "run_length_encode_bases");
+        if(t != NULL && strcmp(t->value, "1") == 0) {
+            run_length_encode_bases = 1;
+        }
+    } else {
+        tag = maf_read_header(li);
+    }
+    tag_destruct(tag);
+
+    Tai *tai = tai_construct();
+    
+    if (input_format == 0) {
+        tai_create_taf(li, tai, index_block_size, run_length_encode_bases);
+    } else {
+        tai_create_maf(li, tai, index_block_size);
+    }
+
+    return tai;
 }
 
 Tai *tai_load(FILE* idx_fh, bool maf) {
@@ -371,6 +379,27 @@ Tai *tai_load(FILE* idx_fh, bool maf) {
     LI_destruct(li);
     st_logInfo("Loaded .tai index in %" PRIi64 " seconds\n", time(NULL) - start_time);
     return tai;
+}
+
+void tai_save(Tai *tai, FILE *idx_fh) {
+    stSortedSetIterator *it = stSortedSet_getIterator(tai->idx);
+    char *prev_ref = NULL;
+    int64_t prev_pos = -1;
+    int64_t prev_file_pos = -1;
+    TaiRec *rec;
+    while ((rec = (TaiRec*)stSortedSet_getNext(it)) != NULL) {
+        if (prev_ref != NULL && strcmp(rec->name, prev_ref) == 0) {
+            // save a little space by writing relative coordinates
+            fprintf(idx_fh, "*\t%" PRIi64 "\t%" PRIi64 "\n", rec->seq_pos-prev_pos, rec->file_pos-prev_file_pos);
+        } else {
+            fprintf(idx_fh, "%s\t%" PRIi64 "\t%" PRIi64 "\n", rec->name, rec->seq_pos, rec->file_pos);
+        }
+
+        prev_ref = rec->name;
+        prev_pos = rec->seq_pos;
+        prev_file_pos = rec->file_pos;
+    }
+    stSortedSet_destructIterator(it);
 }
 
 // dummy function to let us toggle between maf/taf reading at runtime (by providing a

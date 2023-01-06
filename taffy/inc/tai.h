@@ -42,17 +42,22 @@ char *tai_path(const char *taf_path);
 char *tai_parse_region(const char* region, int64_t *start, int64_t *length);
 
 /*
- * Make an index of a TAF in "idx_fh" 
+ * Make an index of a TAF 
  * The index is made on the "reference" first contig of each block
- * For each such contig, the index will have one line for each index_block_size
+ * For each such contig, the index will have one record for each index_block_size
  * region of it found in the TAF. 
  */
-int tai_create(LI *li, FILE* idx_fh, int64_t index_block_size);
+Tai *tai_create(LI *li, int64_t index_block_size);
 
 /*
  * Load the index from disk
  */
 Tai *tai_load(FILE* idx_fh, bool maf);
+
+/*
+ * Write the index to disk
+ */
+void tai_save(Tai *idx, FILE* idx_fh);
 
 /*
  * Free the index

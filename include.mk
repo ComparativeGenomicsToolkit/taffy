@@ -38,8 +38,10 @@ endif
 # Hack to include openmp on os x after "brew install lomp
 ifeq ($(TARGETOS), Darwin)
 	CFLAGS+= -Xpreprocessor -fopenmp -lomp
+	CXXFLAGS+= -Xpreprocessor -fopenmp -lomp
 else
 	CFLAGS+= -fopenmp
+	CXXFLAGS+= -fopenmp
 endif
 
 # Hack in ARM support

@@ -8,12 +8,14 @@
 #include "tai.h"
 #include <getopt.h>
 #include <time.h>
+#include <omp.h>
 
 static void usage() {
     fprintf(stderr, "taf_index [options]\n");
     fprintf(stderr, "Index a TAF or MAF file, output goes in <file>.tai\n");
     fprintf(stderr, "-i --inputFile : Input taf or maf file [REQUIRED]\n");
     fprintf(stderr, "-b --blockSize : Write an index line for intervals of this many bp [default:10000]\n");
+    fprintf(stderr, "-t --threads : Specify the number of threads to use [default:all available]\n");
     fprintf(stderr, "-l --logLevel : Set the log level\n");
     fprintf(stderr, "-h --help : Print this help message\n");
 }
@@ -36,6 +38,7 @@ int taf_index_main(int argc, char *argv[]) {
         static struct option long_options[] = { { "logLevel", required_argument, 0, 'l' },
                                                 { "inputFile", required_argument, 0, 'i' },
                                                 { "blockSize", required_argument, 0, 'b' },
+                                                { "threads", required_argument, 0, 't' },
                                                 { "help", no_argument, 0, 'h' },
                                                 { 0, 0, 0, 0 } };
 
@@ -55,6 +58,9 @@ int taf_index_main(int argc, char *argv[]) {
             case 'b':
                 block_size = atoi(optarg);
                 break;
+            case 't':
+                omp_set_num_threads(atoi(optarg));
+                break;
             case 'h':
                 usage();
                 return 0;
@@ -71,6 +77,7 @@ int taf_index_main(int argc, char *argv[]) {
     st_setLogLevelFromString(logLevelString);
     st_logInfo("Input file string : %s\n", taf_fn);
     st_logInfo("Block size : %" PRIi64 "\n", block_size);
+    st_logInfo("Thread count : %d\n", omp_get_num_threads());
     
     //////////////////////////////////////////////
     // Make the .tai index
@@ -94,7 +101,9 @@ int taf_index_main(int argc, char *argv[]) {
         return 1;
     }
 
-    tai_create(li, tai_fh, block_size);
+    Tai *tai = tai_create(li, block_size);
+    tai_save(tai, tai_fh);
+    
 
     //////////////////////////////////////////////
     // Cleanup
@@ -109,6 +118,8 @@ int taf_index_main(int argc, char *argv[]) {
     free(tai_fn);
 
     LI_destruct(li);
+
+    tai_destruct(tai);
     
     st_logInfo("taffy index is done, %" PRIi64 " seconds have elapsed\n", time(NULL) - startTime);
 
