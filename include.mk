@@ -67,6 +67,8 @@ dataSetsPath=/Users/benedictpaten/Dropbox/Documents/work/myPapers/genomeCactusPa
 
 inclDirs = taffy/inc taffy/submodules/sonLib/C/inc taffy/submodules/sonLib/externalTools/cutest
 
+# client can bypass auto-check by setting their own HTSLIB flags
+ifndef HTSLIB_CFLAGS
 # htslib will be used only if it can be found via pkg-config
 # without it, taf won't support bgzipped input (but is otherwise the same)
 HAVE_HTSLIB = $(shell pkg-config --exists htslib; echo $$?)
@@ -77,6 +79,7 @@ ifeq (${HAVE_HTSLIB},0)
 	else
 		HTSLIB_LIBS = $(shell pkg-config htslib --libs)
 	endif
+endif
 endif
 
 CFLAGS += ${inclDirs:%=-I${rootPath}/%} -I${LIBDIR} -I${rootPath}/include  ${HTSLIB_CFLAGS}
