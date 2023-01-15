@@ -21,8 +21,9 @@ the file. The format is intentionally simple but should prove quite space effici
 Its key potential benefits over the MAF format are that:
 * it does not suffer the same issue with fragmentation as the number of sequences grows (there are no blocks!),
 * is often less verbose (particularly for large alignments), 
-* is very easy to index, as each column of the alignment is a single line, 
 * it supports extensible column annotations.
+* apis support working with gzip compressed files (taf.gz, see below)
+* we have integrated indexing giving efficient random access to both compressed and gzipped files (see below)
 
 The format is composed of a header and then a sequence of columns.
 Tokens are separated by white-space. The syntax is defined as follows:
