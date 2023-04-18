@@ -62,9 +62,9 @@ static Alignment *get_next_taf_block(LI *li, bool run_length_encode_bases) {
 // true and removes the rows. 
 static bool greedy_prune_by_gap(Alignment *alignment, int64_t maximum_gap_length) {
 
-    // map to sample name, using everything up to first "." of sequence name
+    // map row ptr to sample name, using everything up to first "." of sequence name
     // (which is quite hacky but not sure there's a choice)
-    stList *sample_names = stList_construct3(alignment->row_number, free);
+    stHash *row_to_sample_name = stHash_construct2(NULL, free);
     // hash sample name to number of rows with the sample
     stHash *sample_to_count = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, NULL, free);
     int64_t i = 0;
@@ -76,7 +76,7 @@ static bool greedy_prune_by_gap(Alignment *alignment, int64_t maximum_gap_length
         } else {
             sample_name = stString_copy(row->sequence_name);
         }
-        stList_set(sample_names, i, sample_name);
+        stHash_insert(row_to_sample_name, row, sample_name);
         
         int64_t *count = stHash_search(sample_to_count, sample_name);
         if (count == NULL) {
@@ -101,7 +101,7 @@ static bool greedy_prune_by_gap(Alignment *alignment, int64_t maximum_gap_length
         if (row->l_row != NULL && alignment_row_is_predecessor(row->l_row, row)) {
             gap = row->start - (row->l_row->start + row->l_row->length);
         }
-        char *sample_name = (char*)stList_get(sample_names, i); 
+        char *sample_name = (char*)stHash_search(row_to_sample_name, row); 
         if (gap > maximum_gap_length) {            
             int64_t *count = stHash_search(sample_to_count, sample_name);            
             if (*count > 1 && row != alignment->row) {
@@ -111,6 +111,17 @@ static bool greedy_prune_by_gap(Alignment *alignment, int64_t maximum_gap_length
             }
         } else {
             stSet_insert(samples_passing_gap_once, sample_name);    
+        }
+    }
+    // if there isn't at least one copy that we can merge without dropping, then we
+    // don't bother as we don't want to drop coverage below 1 for any sample    
+    int64_t no_to_prune = stList_length(to_prune);
+    for (i = 0; can_prune && i < no_to_prune; ++i) {
+        Alignment_Row *row_to_prune = stList_get(to_prune, i);
+        char *sample_name = stHash_search(row_to_sample_name, row_to_prune);
+        assert(sample_name);        
+        if (stSet_search(samples_passing_gap_once, sample_name) == NULL) {
+            can_prune = false;
         }
     }
 
@@ -125,12 +136,12 @@ static bool greedy_prune_by_gap(Alignment *alignment, int64_t maximum_gap_length
         Alignment_Row *row = alignment->row;
         while (row) {
             Alignment_Row *n_row = row->n_row;
-            if (row == row_to_prune && stSet_search(samples_passing_gap_once, stList_get(sample_names, i))) {
+            if (row == row_to_prune) {
                 assert(p_row != NULL);
                 p_row->n_row = row->n_row;
                 if (row->l_row) {
                     row->l_row->r_row = NULL;
-                }
+                } 
                 if (row->r_row) {
                     row->r_row->l_row = NULL;
                 }
@@ -147,7 +158,7 @@ static bool greedy_prune_by_gap(Alignment *alignment, int64_t maximum_gap_length
         }
     }
 
-    stList_destruct(sample_names);
+    stHash_destruct(row_to_sample_name);
     stHash_destruct(sample_to_count);
     stList_destruct(to_prune);
     stSet_destruct(samples_passing_gap_once);
@@ -278,8 +289,13 @@ int taf_norm_main(int argc, char *argv[]) {
                 (alignment_length(p_alignment) <= maximum_block_length_to_merge ||
                  alignment_length(alignment) <= maximum_block_length_to_merge)) {
                 int64_t total_gap = alignment_total_gap_length(p_alignment);
-                if (total_gap <= maximum_gap_length ||
-                    (filter_gap_causing_dupes && greedy_prune_by_gap(alignment, maximum_gap_length))) {
+                if (total_gap > maximum_gap_length && filter_gap_causing_dupes) {
+                    // try to greedily filter dupes in order to get the gap length down
+                    bool was_pruned = greedy_prune_by_gap(alignment, maximum_gap_length);
+                    total_gap = alignment_total_gap_length(p_alignment);
+                    assert(was_pruned == (total_gap <= maximum_gap_length));
+                }
+                if (total_gap <= maximum_gap_length) {                    
                     p_alignment = alignment_merge_adjacent(p_alignment, alignment);
                     merged = true;
                 }
