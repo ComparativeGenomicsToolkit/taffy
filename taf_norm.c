@@ -93,30 +93,39 @@ static bool greedy_prune_by_gap(Alignment *alignment, int64_t maximum_gap_length
     bool can_prune = true;
     // all rows that are dupes exceeding gap length are stored here
     stList *to_prune = stList_construct();
+    // we only filter dupes if there's at least one row that would not get filtered
+    // remember when that happens here
+    stSet *samples_passing_gap_once = stSet_construct3(stHash_stringKey, stHash_stringEqualKey, NULL);    
     for (Alignment_Row *row = alignment->row; row != NULL && can_prune; row = row->n_row, ++i) {
         int64_t gap = 0;
         if (row->l_row != NULL && alignment_row_is_predecessor(row->l_row, row)) {
             gap = row->start - (row->l_row->start + row->l_row->length);
         }
-        if (gap > maximum_gap_length) {
-            char *sample_name = (char*)stList_get(sample_names, i); 
+        char *sample_name = (char*)stList_get(sample_names, i); 
+        if (gap > maximum_gap_length) {            
             int64_t *count = stHash_search(sample_to_count, sample_name);            
             if (*count > 1 && row != alignment->row) {
                 stList_append(to_prune, row);
             } else {
                 can_prune = false;
             }
+        } else {
+            stSet_insert(samples_passing_gap_once, sample_name);    
         }
     }
 
+    bool pruned = false;
     if (can_prune) {
         // remove the rows
         assert(stList_length(to_prune) > 0);
         Alignment_Row *p_row = NULL;
         int64_t to_prune_idx = 0;
+        i = 0;
         Alignment_Row *row_to_prune = stList_get(to_prune, to_prune_idx);
-        for (Alignment_Row *row = alignment->row; row != NULL && row_to_prune != NULL; row = row->n_row, ++i) {
-            if (row == row_to_prune) {
+        Alignment_Row *row = alignment->row;
+        while (row) {
+            Alignment_Row *n_row = row->n_row;
+            if (row == row_to_prune && stSet_search(samples_passing_gap_once, stList_get(sample_names, i))) {
                 assert(p_row != NULL);
                 p_row->n_row = row->n_row;
                 if (row->l_row) {
@@ -128,18 +137,22 @@ static bool greedy_prune_by_gap(Alignment *alignment, int64_t maximum_gap_length
                 alignment_row_destruct(row);
                 ++to_prune_idx;
                 row_to_prune = to_prune_idx < stList_length(to_prune) ? stList_get(to_prune, to_prune_idx) : NULL;
+                --alignment->row_number;
+                pruned = true;
             } else {
                 p_row = row;
             }
+            row = n_row;
+            ++i;
         }
-        alignment->row_number -= stList_length(to_prune);
     }
 
     stList_destruct(sample_names);
     stHash_destruct(sample_to_count);
     stList_destruct(to_prune);
+    stSet_destruct(samples_passing_gap_once);
     
-    return can_prune;
+    return pruned;
 }
 
 int taf_norm_main(int argc, char *argv[]) {
