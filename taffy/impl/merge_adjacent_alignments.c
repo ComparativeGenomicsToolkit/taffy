@@ -16,8 +16,8 @@ static char *make_run(int64_t length, char c) {
 }
 
 int64_t make_msa(int64_t string_no, int64_t column_no, int64_t max_alignment_length,
-                 int64_t msa[string_no][column_no], char *strings[string_no], int64_t string_lengths[string_no],
-                 char msa_strings[string_no][max_alignment_length]) {
+                 int64_t **msa, char **strings, int64_t *string_lengths,
+                 char **msa_strings) {
     /*
      * Convert the list of aligned columns in msa into a 2D alignment of the strings.
      */
@@ -121,10 +121,15 @@ int64_t align_interstitial_gaps(Alignment *alignment) {
     }
 
     // Align each sequence to the longest sequence
-    int64_t msa[string_no][longest_string_length]; // A longest sequence x sequence number sized integer matrix,
+    
+    // A longest sequence x sequence number sized integer matrix,
+    int64_t **msa = st_calloc(string_no, sizeof(int64_t*));
+    for (int64_t i = 0; i < string_no; ++i) {
+        msa[i] = st_calloc(longest_string_length, sizeof(int64_t));
+    }
     // each entry is the index of the position aligned at that node (or -1 if unaligned)
-    char *row_strings[string_no]; // The gap strings
-    int64_t row_string_lengths[string_no];
+    char **row_strings = st_calloc(string_no, sizeof(char*)); // The gap strings
+    int64_t *row_string_lengths = st_calloc(string_no, sizeof(int64_t));
     row = alignment->row;
     int64_t i=0;
     while (row != NULL) {
@@ -142,7 +147,11 @@ int64_t align_interstitial_gaps(Alignment *alignment) {
 
     // Now convert to a traditional MSA
     int64_t max_alignment_length = total_string_length < (longest_string_length+1)*longest_string_length ? total_string_length : (longest_string_length+1)*longest_string_length;
-    char msa_strings[string_no][max_alignment_length]; // can not be longer than the minimum of the total length of the strings (where all bases
+    // can not be longer than the minimum of the total length of the strings (where all bases
+    char **msa_strings = st_calloc(string_no, sizeof(char*));
+    for (int64_t i = 0; i < string_no; ++i) {
+        msa_strings[i] = st_calloc(max_alignment_length, sizeof(char*));
+    }
     // are unique gaps) and the square of the longest sequence length
     int64_t msa_length = make_msa(string_no, longest_string_length, max_alignment_length, msa, row_strings,
                                   row_string_lengths, msa_strings);
@@ -169,7 +178,16 @@ int64_t align_interstitial_gaps(Alignment *alignment) {
         }
         row = row->n_row;
     }
-
+    for (int64_t i = 0; i < string_no; ++i) {
+        free(msa[i]);
+    }
+    free(msa);    
+    free(row_strings);
+    free(row_string_lengths);
+    for (int64_t i = 0; i < string_no; ++i) {
+        free(msa_strings[i]);
+    }    
+    free(msa_strings);
     return msa_length;
 }
 
