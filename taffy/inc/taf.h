@@ -197,6 +197,20 @@ char *parse_coordinates(int64_t *j, stList *tokens, int64_t *start, bool *strand
 int check_input_format(const char *header_line);
 
 /**
+ * it turns out just scanning for a "." doesn't work, even with the output of hal2maf.  The reason is
+ * that spcecies names can contain "." characters -- at least they do in the VGP alignment.
+ * so this function uses knowloedge of the genome names to greedily scan for a prefix ending in "."
+ * that corresponds to a genome name in the hal. the extracted genome name is returned if found
+ * (it must be freed)
+ *
+ * (note: this function was originally in taf_add_gap_bases.c where it took a set of species. It's
+ * now used by the renaming function int taf_view.c where it uses the hash.  Only one can
+ * be specified. If the hal set is used, it fails with an error if it can't find a key. If
+ * the hash is used, then it just returns NULL). 
+*/
+char *extract_genome_name(const char *sequence_name, stSet *hal_species, stHash *genome_name_map);
+
+/**
  * Load a two-column genome name mapping file and return
  * a hash table mapping COLUMN1 -> COLUMN2
  */
@@ -213,6 +227,10 @@ stHash *load_genome_name_mapping(char *name_mapping_path);
  * apply_genome_name_mapping("hg19") would return "Homo_sapiens"
  * and
  * apply_genome_name_mapping("hg19.ch10") would return "Homo_sapiens.chr10"
+ *
+ * If there's more than one dot, it will try splitting at each one so
+ *
+ * apply_genome_name_mapping("hg19.1.chr10") would return "Homo_sapiens.1.chr10"
  *
  * If a string is returned, it's up to the client to free it
  */

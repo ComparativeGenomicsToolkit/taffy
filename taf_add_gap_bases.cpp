@@ -41,38 +41,6 @@ static void add_to_hash(void *fastas, const char *fasta_header, const char *sequ
     stHash_insert((stHash *)fastas, stString_copy(fasta_header), stString_copy(sequence));
 }
 
-// it turns out just scanning for a "." doesn't work, even with the output of hal2maf.  The reason is
-// that spcecies names can contain "." characters -- at least they do in the VGP alignment.
-// so this function uses knowloedge of the genome names to greedily scan for a prefix ending in "."
-// that corresponds to a genome name in the hal. the extracted genome name is returned if found
-// (it must be freed)
-#ifdef USE_HAL
-static char *extract_genome_name(const char *sequence_name, stSet *hal_species) {
-    const char *dot = NULL;
-    int64_t offset = 0;
-    const char *last = sequence_name + strlen(sequence_name) - 1;
-
-    do {
-        dot = strchr(sequence_name + offset, '.');
-        if (dot != NULL && dot != last && dot != sequence_name) {
-            char *species_name = stString_getSubString(sequence_name, 0, dot-sequence_name);
-            if (stSet_search(hal_species, species_name) != NULL) {
-                return species_name;
-            } else if (dot != last) {
-                free(species_name);
-                offset += (dot-sequence_name) + 1;
-            }
-        }
-    } while (dot != NULL);
-
-    // c++ gives an angry warning if we try to send our string literal directly to st_errAbort, so we do this
-    char msg[8192];
-    snprintf(msg, 8192, "[taf] Error: Unable to find a . that splits %s so that the left side is a genome in the HAL\n", sequence_name);
-    st_errAbort(msg);
-    return NULL;
-}
-#endif
-
 // get a dna interval either from the fastas hash file or from the hal_handle
 // note the string returned needs to be freed
 static char *get_sequence_fragment(const char* sequence_name, int64_t start, int64_t length, stHash *fastas, int hal_handle, stSet *hal_species) {
@@ -86,7 +54,7 @@ static char *get_sequence_fragment(const char* sequence_name, int64_t start, int
     } else {
 #ifdef USE_HAL
         assert(fastas == NULL);
-        char* species_name = extract_genome_name(sequence_name, hal_species);
+        char* species_name = extract_genome_name(sequence_name, hal_species, NULL);
         char* chrom_name = (char*)sequence_name + strlen(species_name) + 1;
         fragment = halGetDna(hal_handle, species_name, chrom_name, start, start + length, NULL);
         free(species_name);

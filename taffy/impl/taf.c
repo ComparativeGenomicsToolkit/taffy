@@ -421,6 +421,35 @@ int check_input_format(const char *header_line) {
     return ret;
 }
 
+char *extract_genome_name(const char *sequence_name, stSet *hal_species, stHash *genome_name_map) {
+    assert((hal_species == NULL) != (genome_name_map == NULL));
+    const char *dot = NULL;
+    int64_t offset = 0;
+    const char *last = sequence_name + strlen(sequence_name) - 1;
+
+    do {
+        dot = strchr(sequence_name + offset, '.');
+        if (dot != NULL && dot != last && dot != sequence_name) {
+            char *species_name = stString_getSubString(sequence_name, 0, dot-sequence_name);
+            if ((hal_species && stSet_search(hal_species, species_name) != NULL) ||
+                (genome_name_map && stHash_search(genome_name_map, species_name) != NULL)){
+                return species_name;
+            } else if (dot != last) {
+                free(species_name);
+                offset += (dot-sequence_name) + 1;
+            }
+        }
+    } while (dot != NULL);
+
+    // c++ gives an angry warning if we try to send our string literal directly to st_errAbort, so we do this
+    if (hal_species) {
+        char msg[8192];
+        snprintf(msg, 8192, "[taffy] Error: Unable to find a . that splits %s so that the left side is a genome in the HAL\n", sequence_name);
+        st_errAbort(msg);
+    }
+    return NULL;
+}
+
 stHash *load_genome_name_mapping(char *name_mapping_path) {
     FILE *mapping_fh = fopen(name_mapping_path, "r");
     if (!mapping_fh) {
@@ -451,24 +480,33 @@ stHash *load_genome_name_mapping(char *name_mapping_path) {
     return genome_name_map;    
 }
 
-char *apply_genome_name_mapping(stHash *genome_name_map, char *input_name) {
-    // follow convention of using (first) "." as delimiter for genome name
-    char *dot = strchr(input_name, '.');
-    char *key = dot != NULL ? stString_getSubString(input_name, 0, dot - input_name) : input_name;
+char *apply_genome_name_mapping(stHash *genome_name_map, char *sequence_name) {
+
+    // resolve the .
+    char *genome_name = extract_genome_name(sequence_name, NULL, genome_name_map);
+    char *key = genome_name != NULL ? genome_name : sequence_name;
     char *val = stHash_search(genome_name_map, key);
-    if (dot != NULL) {
-        free(key);
-        key = NULL;
-    }
     char *output_name = NULL;
     if (val) {
-        int64_t buffer_size = strlen(val) + 1 + (dot != NULL ? strlen(dot) : 0);
+        int64_t buffer_size = strlen(val) + 1;
+        char *suffix = NULL;
+        if (genome_name) {
+            int64_t sequence_name_len = strlen(sequence_name);
+            int64_t genome_name_len = strlen(genome_name);
+            if (sequence_name_len > genome_name_len) {
+                buffer_size += sequence_name_len - genome_name_len;
+                suffix = sequence_name + genome_name_len;
+            }
+        }
         output_name = (char*)st_malloc(buffer_size * sizeof(char));
         strcpy(output_name, val);
-        if (dot != NULL) {
-            strcat(output_name, dot);
+        if (suffix != NULL) {
+            strcat(output_name, suffix);
         }
     }
+    if (genome_name) {
+        free(genome_name);
+    }    
     return output_name;    
 }
 
