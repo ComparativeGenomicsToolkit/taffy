@@ -11,7 +11,7 @@
 #include <time.h>
 
 static void usage() {
-    fprintf(stderr, "taf stats [options]\n");
+    fprintf(stderr, "taffy stats [options]\n");
     fprintf(stderr, "Print statitstics from a TAF or MAF file\n");
     fprintf(stderr, "-i --inputFile : Input TAF or MAF file. If not specified reads from stdin\n");
     fprintf(stderr, "-s --sequenceLengths : Print length of each *reference* sequence in the (indexed) alignment\n");

@@ -18,7 +18,7 @@ static int64_t maximum_gap_string_length = 50;
 static int64_t repeat_coordinates_every_n_columns = 1000;
 
 static void usage() {
-    fprintf(stderr, "taf_add_gap_bases SEQ_FILExN [options]\n");    
+    fprintf(stderr, "taffy add_gap_bases SEQ_FILExN [options]\n");    
     fprintf(stderr, "Add interstitial gap strings to taf file\n");
     fprintf(stderr, "-i --inputFile : Input taf file to normalize. If not specified reads from stdin\n");
     fprintf(stderr, "-o --outputFile : Output taf file. If not specified outputs to stdout\n");

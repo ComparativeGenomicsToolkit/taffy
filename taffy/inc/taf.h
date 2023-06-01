@@ -196,6 +196,32 @@ char *parse_coordinates(int64_t *j, stList *tokens, int64_t *start, bool *strand
  */
 int check_input_format(const char *header_line);
 
+/**
+ * Load a two-column genome name mapping file and return
+ * a hash table mapping COLUMN1 -> COLUMN2
+ */
+stHash *load_genome_name_mapping(char *name_mapping_path);
+
+/**
+ * Apply the name mapping to a string. If the string is found in the map,
+ * the mapped name is return.  Otherwise NULL is returned.
+ * If the input name has a "." in it, only the part before the "."
+ * is considered (following ucsc genome.contig convention).
+ *
+ * So if our mapping contaings hg19 -> Homo_sapiens, then
+ *
+ * apply_genome_name_mapping("hg19") would return "Homo_sapiens"
+ * and
+ * apply_genome_name_mapping("hg19.ch10") would return "Homo_sapiens.chr10"
+ *
+ * If a string is returned, it's up to the client to free it
+ */
+char *apply_genome_name_mapping(stHash *genome_name_map, char *input_name);
+
+/**
+ * Apply the name mapping to an alignment block.
+ */
+void apply_genome_name_mapping_to_alignment(stHash *genome_name_map, Alignment *alignment);
 
 #endif /* STTAF_H_ */
 

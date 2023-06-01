@@ -15,7 +15,7 @@ float fraction_shared_rows = 0.6;
 int64_t repeat_coordinates_every_n_columns = 1000;
 
 static void usage() {
-    fprintf(stderr, "taf_norm [options]\n");
+    fprintf(stderr, "taffy norm [options]\n");
     fprintf(stderr, "Normalize a taf format alignment to remove small blocks using the -m and -n options to determine what to merge \n");
     fprintf(stderr, "-i --inputFile : Input taf file to normalize. If not specified reads from stdin\n");
     fprintf(stderr, "-o --outputFile : Output taf file. If not specified outputs to stdout\n");

@@ -420,3 +420,65 @@ int check_input_format(const char *header_line) {
 #endif
     return ret;
 }
+
+stHash *load_genome_name_mapping(char *name_mapping_path) {
+    FILE *mapping_fh = fopen(name_mapping_path, "r");
+    if (!mapping_fh) {
+        fprintf(stderr, "Error: unable to open name mapping file %s\n", name_mapping_path);
+    }
+
+    stHash *genome_name_map = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, free, free);
+
+    LI* li = LI_construct(mapping_fh);
+    char *line;
+    while ((line = LI_get_next_line(li)) != NULL) {
+        stList* tokens = stString_splitByString(line, "\t");
+        if (stList_length(tokens) != 2) {
+            if (stList_length(tokens) > 0 && !(stList_length(tokens) == 1 && strlen(stList_get(tokens, 0)) == 0)) {
+                fprintf(stderr, "Skipping mapping line that does not have 2 columns: %s\n", line);
+            }
+            continue;
+        }
+        char *key = stList_get(tokens, 0);
+        char *val = stList_get(tokens, 1);
+        if (stHash_search(genome_name_map, key) != NULL) {
+            fprintf(stderr, "Error: Key %s occurs more than once in first column of %s\n", key, name_mapping_path);
+            exit(1);                    
+        }
+        stHash_insert(genome_name_map, key, val);
+    }
+    fclose(mapping_fh);
+    return genome_name_map;    
+}
+
+char *apply_genome_name_mapping(stHash *genome_name_map, char *input_name) {
+    // follow convention of using (first) "." as delimiter for genome name
+    char *dot = strchr(input_name, '.');
+    char *key = dot != NULL ? stString_getSubString(input_name, 0, dot - input_name) : input_name;
+    char *val = stHash_search(genome_name_map, key);
+    if (dot != NULL) {
+        free(key);
+        key = NULL;
+    }
+    char *output_name = NULL;
+    if (val) {
+        int64_t buffer_size = strlen(val) + 1 + (dot != NULL ? strlen(dot) : 0);
+        output_name = (char*)st_malloc(buffer_size * sizeof(char));
+        strcpy(output_name, val);
+        if (dot != NULL) {
+            strcat(output_name, dot);
+        }
+    }
+    return output_name;    
+}
+
+void apply_genome_name_mapping_to_alignment(stHash *genome_name_map, Alignment *aln) {
+    for (Alignment_Row *row = aln->row; row != NULL; row = row->n_row) {
+        char *mapped_sequence_name = apply_genome_name_mapping(genome_name_map, row->sequence_name);
+        if (mapped_sequence_name != NULL) {
+            free(row->sequence_name);
+            row->sequence_name = mapped_sequence_name;
+        }
+    }
+}
+
