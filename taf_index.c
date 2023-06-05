@@ -10,7 +10,7 @@
 #include <time.h>
 
 static void usage() {
-    fprintf(stderr, "taf_index [options]\n");
+    fprintf(stderr, "taffy index [options]\n");
     fprintf(stderr, "Index a TAF or MAF file, output goes in <file>.tai\n");
     fprintf(stderr, "-i --inputFile : Input taf or maf file [REQUIRED]\n");
     fprintf(stderr, "-b --blockSize : Write an index line for intervals of this many bp [default:10000]\n");

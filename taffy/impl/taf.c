@@ -420,3 +420,103 @@ int check_input_format(const char *header_line) {
 #endif
     return ret;
 }
+
+char *extract_genome_name(const char *sequence_name, stSet *hal_species, stHash *genome_name_map) {
+    assert((hal_species == NULL) != (genome_name_map == NULL));
+    const char *dot = NULL;
+    int64_t offset = 0;
+    const char *last = sequence_name + strlen(sequence_name) - 1;
+
+    do {
+        dot = strchr(sequence_name + offset, '.');
+        if (dot != NULL && dot != last && dot != sequence_name) {
+            char *species_name = stString_getSubString(sequence_name, 0, dot-sequence_name);
+            if ((hal_species && stSet_search(hal_species, species_name) != NULL) ||
+                (genome_name_map && stHash_search(genome_name_map, species_name) != NULL)){
+                return species_name;
+            } else if (dot != last) {
+                free(species_name);
+                offset += (dot-sequence_name) + 1;
+            }
+        }
+    } while (dot != NULL);
+
+    // c++ gives an angry warning if we try to send our string literal directly to st_errAbort, so we do this
+    if (hal_species) {
+        char msg[8192];
+        snprintf(msg, 8192, "[taffy] Error: Unable to find a . that splits %s so that the left side is a genome in the HAL\n", sequence_name);
+        st_errAbort(msg);
+    }
+    return NULL;
+}
+
+stHash *load_genome_name_mapping(char *name_mapping_path) {
+    FILE *mapping_fh = fopen(name_mapping_path, "r");
+    if (!mapping_fh) {
+        fprintf(stderr, "Error: unable to open name mapping file %s\n", name_mapping_path);
+    }
+
+    stHash *genome_name_map = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, free, free);
+
+    LI* li = LI_construct(mapping_fh);
+    char *line;
+    while ((line = LI_get_next_line(li)) != NULL) {
+        stList* tokens = stString_splitByString(line, "\t");
+        if (stList_length(tokens) != 2) {
+            if (stList_length(tokens) > 0 && !(stList_length(tokens) == 1 && strlen(stList_get(tokens, 0)) == 0)) {
+                fprintf(stderr, "Skipping mapping line that does not have 2 columns: %s\n", line);
+            }
+            continue;
+        }
+        char *key = stList_get(tokens, 0);
+        char *val = stList_get(tokens, 1);
+        if (stHash_search(genome_name_map, key) != NULL) {
+            fprintf(stderr, "Error: Key %s occurs more than once in first column of %s\n", key, name_mapping_path);
+            exit(1);                    
+        }
+        stHash_insert(genome_name_map, key, val);
+    }
+    fclose(mapping_fh);
+    return genome_name_map;    
+}
+
+char *apply_genome_name_mapping(stHash *genome_name_map, char *sequence_name) {
+
+    // resolve the .
+    char *genome_name = extract_genome_name(sequence_name, NULL, genome_name_map);
+    char *key = genome_name != NULL ? genome_name : sequence_name;
+    char *val = stHash_search(genome_name_map, key);
+    char *output_name = NULL;
+    if (val) {
+        int64_t buffer_size = strlen(val) + 1;
+        char *suffix = NULL;
+        if (genome_name) {
+            int64_t sequence_name_len = strlen(sequence_name);
+            int64_t genome_name_len = strlen(genome_name);
+            if (sequence_name_len > genome_name_len) {
+                buffer_size += sequence_name_len - genome_name_len;
+                suffix = sequence_name + genome_name_len;
+            }
+        }
+        output_name = (char*)st_malloc(buffer_size * sizeof(char));
+        strcpy(output_name, val);
+        if (suffix != NULL) {
+            strcat(output_name, suffix);
+        }
+    }
+    if (genome_name) {
+        free(genome_name);
+    }    
+    return output_name;    
+}
+
+void apply_genome_name_mapping_to_alignment(stHash *genome_name_map, Alignment *aln) {
+    for (Alignment_Row *row = aln->row; row != NULL; row = row->n_row) {
+        char *mapped_sequence_name = apply_genome_name_mapping(genome_name_map, row->sequence_name);
+        if (mapped_sequence_name != NULL) {
+            free(row->sequence_name);
+            row->sequence_name = mapped_sequence_name;
+        }
+    }
+}
+
