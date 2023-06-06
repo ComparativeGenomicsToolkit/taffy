@@ -267,7 +267,11 @@ int taf_view_main(int argc, char *argv[]) {
             if(p_alignment != NULL) {
                 alignment_link_adjacent(p_alignment, alignment, 1);
             }
-            taf_write_block(p_alignment, alignment, run_length_encode_bases, repeat_coordinates_every_n_columns, output);
+            if (taf_output) {
+                taf_write_block(p_alignment, alignment, run_length_encode_bases, repeat_coordinates_every_n_columns, output);
+            } else {
+                maf_write_block(alignment, output);
+            }
             if(p_alignment != NULL) {
                 alignment_destruct(p_alignment, 1);
             }
