@@ -413,7 +413,7 @@ TaiIt *tai_iterator(Tai* tai, LI *li, bool run_length_encode_bases, const char *
     TaiRec qr2;
     qr2.name = tai_it->name;
     qr2.seq_pos = tai_it->end;
-    TaiRec *tair_2 = stSortedSet_searchGreaterThanOrEqual(tai->idx, &qr);
+    TaiRec *tair_2 = stSortedSet_searchGreaterThanOrEqual(tai->idx, &qr2);
     st_logInfo("Queried the in-memory .tai index in %" PRIi64 " seconds\n", time(NULL) - start_time);
 
     // now we know that the start of our region is somewhere in [tair_1, tair_2)
