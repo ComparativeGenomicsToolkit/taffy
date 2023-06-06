@@ -410,7 +410,10 @@ TaiIt *tai_iterator(Tai* tai, LI *li, bool run_length_encode_bases, const char *
 
     // sorted set doesn't let us iterate, so we use a second lookup to get
     // the next record
-    TaiRec *tair_2 = stSortedSet_searchGreaterThan(tai->idx, &qr);
+    TaiRec qr2;
+    qr2.name = tai_it->name;
+    qr2.seq_pos = tai_it->end;
+    TaiRec *tair_2 = stSortedSet_searchGreaterThanOrEqual(tai->idx, &qr);
     st_logInfo("Queried the in-memory .tai index in %" PRIi64 " seconds\n", time(NULL) - start_time);
 
     // now we know that the start of our region is somewhere in [tair_1, tair_2)
