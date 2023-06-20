@@ -18,8 +18,8 @@ static void usage() {
     fprintf(stderr, "-i --inputFile : Input TAF or MAF file to convert. If not specified reads from stdin\n");
     fprintf(stderr, "-o --outputFile : Output file. If not specified outputs to stdout\n");
     fprintf(stderr, "-m --maf : Output in MAF format [default=TAF format]\n");
-    fprintf(stderr, "-p --paf : Output in all-to-one PAF format [default=TAF format]\n");
-    fprintf(stderr, "-a --all-paf : Output in all-to-all PAF format [default=TAF format]\n");
+    fprintf(stderr, "-p --paf : Output in all-to-one (referenced on first row) PAF format [default=TAF format]\n");
+    fprintf(stderr, "-P --paf-all : Output in all-to-all PAF format [default=TAF format]\n");
     fprintf(stderr, "-r --region  : Print only SEQ:START-END, where SEQ is a row-0 sequence name, and START-END are 0-based open-ended like BED\n");
     fprintf(stderr, "-s --repeatCoordinatesEveryNColumns : Repeat TAF coordinates of each sequence at least every n columns. By default: %" PRIi64 "\n", repeat_coordinates_every_n_columns);
     fprintf(stderr, "-u --runLengthEncodeBases : Run length encode bases in TAF\n");
@@ -56,7 +56,7 @@ int taf_view_main(int argc, char *argv[]) {
                                                 { "outputFile", required_argument, 0, 'o' },
                                                 { "maf", no_argument, 0, 'm' },
                                                 { "paf", no_argument, 0, 'p' },
-                                                { "all-paf", no_argument, 0, 'a' },
+                                                { "paf-all", no_argument, 0, 'P' },
                                                 { "runLengthEncodeBases", no_argument, 0, 'u' },
                                                 { "repeatCoordinatesEveryNColumns", required_argument, 0, 's' },
                                                 { "region", required_argument, 0, 'r' },
@@ -87,7 +87,7 @@ int taf_view_main(int argc, char *argv[]) {
             case 'p':
                 paf_output = 1;
                 break;
-            case 'a':
+            case 'P':
                 paf_output = 1;
                 all_to_all_paf = 1;
                 break;                

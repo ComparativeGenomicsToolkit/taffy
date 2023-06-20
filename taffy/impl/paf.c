@@ -5,6 +5,7 @@
 // write a single PAF row from the pairwise alignment between the given two MAF block rows
 static void paf_write_row(Alignment_Row *q_row, Alignment_Row *t_row, int64_t num_col, LW *lw) {
     char relative_strand = q_row->strand == t_row->strand ? '+' : '-';
+    bool flip_cigar = t_row->strand == false;
 
     // query position
     char *query_name = q_row->sequence_name;
@@ -20,7 +21,7 @@ static void paf_write_row(Alignment_Row *q_row, Alignment_Row *t_row, int64_t nu
     char *target_name = t_row->sequence_name;
     int64_t target_length = t_row->sequence_length;
     int64_t target_start = t_row->start;
-    int64_t target_end = t_row->start + q_row->length;
+    int64_t target_end = t_row->start + t_row->length;
     // flip it around if negative (paf coordinates are always forward)
     if (t_row->strand == false) {
         target_start = target_length - target_end;
@@ -38,11 +39,12 @@ static void paf_write_row(Alignment_Row *q_row, Alignment_Row *t_row, int64_t nu
     
     for (int64_t i = 0; i < num_col; ++i) {
         char event = 'M';
-        if (q_row->bases[i] == '-' && t_row->bases[i] != '-') {
+        int64_t pos = flip_cigar ? num_col - 1 - i : i;
+        if (q_row->bases[pos] == '-' && t_row->bases[pos] != '-') {
             event = 'D';
-        } else if (q_row->bases[i] != '-' && t_row->bases[i] == '-') {
+        } else if (q_row->bases[pos] != '-' && t_row->bases[pos] == '-') {
             event = 'I';
-        } else if (q_row->bases[i] == '-' && t_row->bases[i] == '-') {
+        } else if (q_row->bases[pos] == '-' && t_row->bases[pos] == '-') {
             event = 'B'; // B is I and D at same time
             ++block_length;
         } else {
