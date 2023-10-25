@@ -18,6 +18,8 @@ static void usage() {
     fprintf(stderr, "-i --inputFile : Input TAF or MAF file to convert. If not specified reads from stdin\n");
     fprintf(stderr, "-o --outputFile : Output file. If not specified outputs to stdout\n");
     fprintf(stderr, "-m --maf : Output in MAF format [default=TAF format]\n");
+    fprintf(stderr, "-p --paf : Output in all-to-one (referenced on first row) PAF format [default=TAF format]\n");
+    fprintf(stderr, "-P --paf-all : Output in all-to-all PAF format [default=TAF format]\n");
     fprintf(stderr, "-r --region  : Print only SEQ:START-END, where SEQ is a row-0 sequence name, and START-END are 0-based open-ended like BED\n");
     fprintf(stderr, "-s --repeatCoordinatesEveryNColumns : Repeat TAF coordinates of each sequence at least every n columns. By default: %" PRIi64 "\n", repeat_coordinates_every_n_columns);
     fprintf(stderr, "-u --runLengthEncodeBases : Run length encode bases in TAF\n");
@@ -38,6 +40,8 @@ int taf_view_main(int argc, char *argv[]) {
     char *outputFile = NULL;
     bool run_length_encode_bases = 0;
     bool maf_output = false;
+    bool paf_output = false;
+    bool all_to_all_paf = false;
     char *region = NULL;
     bool use_compression = 0;
     char *nameMapFile = NULL;
@@ -50,7 +54,9 @@ int taf_view_main(int argc, char *argv[]) {
         static struct option long_options[] = { { "logLevel", required_argument, 0, 'l' },
                                                 { "inputFile", required_argument, 0, 'i' },
                                                 { "outputFile", required_argument, 0, 'o' },
-                                                { "maf", no_argument, 0, 'm' },                                                
+                                                { "maf", no_argument, 0, 'm' },
+                                                { "paf", no_argument, 0, 'p' },
+                                                { "paf-all", no_argument, 0, 'P' },
                                                 { "runLengthEncodeBases", no_argument, 0, 'u' },
                                                 { "repeatCoordinatesEveryNColumns", required_argument, 0, 's' },
                                                 { "region", required_argument, 0, 'r' },
@@ -60,7 +66,7 @@ int taf_view_main(int argc, char *argv[]) {
                                                 { 0, 0, 0, 0 } };
 
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:o:mucs:r:n:h", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:o:mpaucs:r:n:h", long_options, &option_index);
         if (key == -1) {
             break;
         }
@@ -78,6 +84,13 @@ int taf_view_main(int argc, char *argv[]) {
             case 'm':
                 maf_output = 1;
                 break;
+            case 'p':
+                paf_output = 1;
+                break;
+            case 'P':
+                paf_output = 1;
+                all_to_all_paf = 1;
+                break;                
             case 'u':
                 run_length_encode_bases = 1;
                 break;
@@ -146,7 +159,7 @@ int taf_view_main(int argc, char *argv[]) {
     }
     bool maf_input = input_format == 1;
     bool taf_input = !maf_input;
-    bool taf_output = !maf_output;
+    bool taf_output = !maf_output && !paf_output;
 
     // Parse the header
     Tag *tag = maf_input ? maf_read_header(li) : taf_read_header(li);
@@ -166,7 +179,7 @@ int taf_view_main(int argc, char *argv[]) {
     }
     if (maf_output) {
         maf_write_header(tag, output);
-    } else {
+    } else if (taf_output) {
         taf_write_header(tag, output);
     }
     tag_destruct(tag);
@@ -217,9 +230,12 @@ int taf_view_main(int argc, char *argv[]) {
             }
             if (taf_output) {
                 taf_write_block(p_alignment, alignment, run_length_encode_bases, repeat_coordinates_every_n_columns, output);
-            } else {
+            } else if (maf_output) {
                 maf_write_block(alignment, output);
-            }            
+            } else {
+                assert(paf_output == true);
+                paf_write_block(alignment, output, all_to_all_paf);
+            }
             if (p_alignment) {
                 alignment_destruct(p_alignment, true);
             }
@@ -245,9 +261,12 @@ int taf_view_main(int argc, char *argv[]) {
             }
             if (taf_output) {
                 taf_write_block(p_alignment, alignment, run_length_encode_bases, repeat_coordinates_every_n_columns, output);
-            } else {
+            } else if (maf_output) {
                 maf_write_block(alignment, output);
-            }
+            } else {
+                assert(paf_output == true);
+                paf_write_block(alignment, output, all_to_all_paf);
+            }                    
             if (p_alignment) {
                 alignment_destruct(p_alignment, true);
             }
@@ -269,8 +288,11 @@ int taf_view_main(int argc, char *argv[]) {
             }
             if (taf_output) {
                 taf_write_block(p_alignment, alignment, run_length_encode_bases, repeat_coordinates_every_n_columns, output);
-            } else {
+            } else if (maf_output) {
                 maf_write_block(alignment, output);
+            } else {
+                assert(paf_output == true);
+                paf_write_block(alignment, output, all_to_all_paf);
             }
             if(p_alignment != NULL) {
                 alignment_destruct(p_alignment, 1);

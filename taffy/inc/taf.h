@@ -146,6 +146,12 @@ void maf_write_header(Tag *tag, LW *lw);
  */
 void maf_write_block(Alignment *alignment, LW *lw);
 
+/*
+ * Write a block as PAF. Each PAF row reflects a pairwise alignment in the block.  The all_to_all flag
+ * toggles whether we write every possible pairwise alignment, or just each non-ref to ref alignment
+ * where ref is the first row in the block
+ */
+void paf_write_block(Alignment *alignment, LW *lw, bool all_to_all);
 
 /*
  * Read a taf header line

@@ -24,8 +24,8 @@ ${sonLibDir}/sonLib.a : sonLib
 
 ${sonLibDir}/cuTest.a : sonLib
 
-${LIBDIR}/libstTaf.a : ${srcDir}/alignment_block.o ${srcDir}/line_iterator.o ${srcDir}/maf.o ${srcDir}/ond.o ${srcDir}/taf.o ${srcDir}/merge_adjacent_alignments.o ${srcDir}/tai.o ${libHeaders} ${stTafDependencies}
-	${AR} rc libstTaf.a ${srcDir}/alignment_block.o ${srcDir}/line_iterator.o ${srcDir}/maf.o ${srcDir}/ond.o ${srcDir}/taf.o ${srcDir}/merge_adjacent_alignments.o ${srcDir}/tai.o
+${LIBDIR}/libstTaf.a : ${srcDir}/alignment_block.o ${srcDir}/line_iterator.o ${srcDir}/maf.o ${srcDir}/paf.o ${srcDir}/ond.o ${srcDir}/taf.o ${srcDir}/merge_adjacent_alignments.o ${srcDir}/tai.o ${libHeaders} ${stTafDependencies}
+	${AR} rc libstTaf.a ${srcDir}/alignment_block.o ${srcDir}/line_iterator.o ${srcDir}/maf.o ${srcDir}/paf.o ${srcDir}/ond.o ${srcDir}/taf.o ${srcDir}/merge_adjacent_alignments.o ${srcDir}/tai.o
 	mv libstTaf.a ${LIBDIR}/
 
 ${srcDir}/alignment_block.o : ${srcDir}/alignment_block.c ${libHeaders}
@@ -36,6 +36,9 @@ ${srcDir}/line_iterator.o : ${srcDir}/line_iterator.c ${libHeaders}
 
 ${srcDir}/maf.o : ${srcDir}/maf.c ${libHeaders}
 	${CC} ${CFLAGS} ${LDFLAGS} -o ${srcDir}/maf.o -c ${srcDir}/maf.c
+
+${srcDir}/paf.o : ${srcDir}/paf.c ${libHeaders}
+	${CC} ${CFLAGS} ${LDFLAGS} -o ${srcDir}/paf.o -c ${srcDir}/paf.c
 
 ${srcDir}/ond.o : ${srcDir}/ond.c ${libHeaders}
 	${CC} ${CFLAGS} ${LDFLAGS} -o ${srcDir}/ond.o -c ${srcDir}/ond.c
