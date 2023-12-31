@@ -163,8 +163,8 @@ The corresponding TAF file (265 bytes):
 
 Do build this repo clone the repo as follows and then make:
 
-    git clone https://github.com/benedictpaten/taf.git --recursive
-    cd taf && make
+    git clone https://github.com/ComparativeGenomicsToolkit/taffy.git --recursive
+    cd taffy && make
 
 To test the installation do:
 
@@ -283,8 +283,10 @@ python3 -m pip install virtualenv
 To set up a virtual environment in the directory `taffy_env`, run:
 
 ```
-python3 -m virtualenv -p python3.9 taffy_env
+python3 -m virtualenv -p python3.XX taffy_env
 ```
+
+Where XX is the specific version of Python3 that you wish to use (you can omit the .XX if you want to use the default). Also, note that I have tested this with 3.9.
 
 Then, to enter the virtualenv, run:
 
@@ -319,7 +321,7 @@ if you haven't already:
 
 ```
 python3 -m pip install virtualenv
-python3 -m virtualenv -p python3.9 taffy_env
+python3 -m virtualenv -p python3.XX taffy_env
 source taffy_env/bin/activate
 ```
 
@@ -337,7 +339,103 @@ trying to import the library from the root directory will fail.
 
 # Using Python Library
 
-See: [TODO]
+The following is a brief, interactive tutorial.
+For the complete API see the taffy/lib.py module.
+Having installed the Taffy Python library, you should be able to run the following import command without 
+error. It assumes you are running it from the tests directory of the package. If not, you will need to provide your own demo maf file:
+
+```
+# Import the AlignmentReader and AlignmentWriter objects
+from taffy.lib import AlignmentReader, AlignmentWriter
+```
+
+Next, let's try opening a maf file:
+
+```
+import pathlib
+test_maf_file = (pathlib.Path().absolute() / "./evolverMammals.maf").as_posix()
+with AlignmentReader(test_maf_file, taf_not_maf=False) as mp:
+    header = mp.get_header()
+    print(header) 
+...
+{'version': '1', 'scoring': 'N/A'}
+```
+
+The dictionary you see printed on the last line represents the header
+line of the file. Next let's try iterating through
+some alignment blocks:
+
+```
+with AlignmentReader(test_maf_file, taf_not_maf=False) as mp:
+    for i, block in zip(range(5), mp): # Get the first five blocks in the file
+        print(block, "\n") # Print the blocks, adding a newline between each block
+...       
+Anc0.Anc0refChr0        0       50      +       4151    GTCAAGCTCAGTAGATACTGGATTAGGAATTCATGAGTTAAGCTGTAGCC
+Anc1.Anc1refChr1        292714  50      +       296994  GTCAAGCTCAGTAGATACTGGATTAGGAATTCATGAGTTAAGCTGTAGCC
+Anc2.Anc2refChr1        5       50      +       4655    GTCAAGCTCAGTTGATGCTGGATTAGGAATTCATGAGTTAAGCTGTAGTC
+mr.mrrefChr1    178277  50      +       182340  GTCAAGCTCTGTACATACTAGATTGGACATTCATGGATGAAACTGTGACT
+simCow_chr6.simCow.chr6 5045    50      -       602619  GTGAAGCTCAGTTGATGCTGGATTGGGAACTCATGAGTTAAGCTGTAAGC
+simDog_chr6.simDog.chr6 589129  50      +       593897  GTCAAGCTCAGTTGGTGCTGGATTAAGAATTCATGAGTTAGGCTGCAGTC
+simHuman_chr6.simHuman.chr6     597375  50      +       601863  GTCAAGCTCAGTAGATATTGGATTAGGAATTCATAAGTTAACCTGTAGCC
+simMouse_chr6.simMouse.chr6     630640  50      +       636262  GTCAAGCATTGTACATACTAGATTGGACATTCATGGATGACAATGTGACT
+simRat_chr6.simRat.chr6 642153  50      +       647215  GTCAAGCTCTGTAAATAGTAGATTGGACATTCATGGATGAAACTGTGCCT
+etc.
+```
+
+The alignment you see printed represents the first block in the file. Next, let's iterate on the rows in a block:
+
+```
+with AlignmentReader(test_maf_file, taf_not_maf=False) as mp:
+    block = next(mp) # Get the first block in the file
+    print(f"Row number: {block.row_number()}") # Number of sequences aligned
+    print(f"Column number: {block.column_number()}") # Number of alignment columns
+    for row in block: # For each row in the block, print it and show some functionality of rows:
+        print(f"Sequence name: {row.sequence_name()}")
+        print(f"Start: {row.start()}") # The first position in the sequence
+        print(f"Length: {row.length()}") # The number of bases in the alignment
+        print(f"Sequence length: {row.sequence_length()}") # The number of bases in the actual sequence (ignoring gaps, etc. in the alignment)
+        print(f"Strand: {row.strand()}") # The strand of the sequence
+        print(f"Aligned bases {row.bases()}")
+        print(row) # Or just conveniently print the information about the row as a string
+...
+Row number: 9
+Column number: 50
+Sequence name: Anc0.Anc0refChr0
+Start: 0
+Length: 50
+Sequence length: 4151
+Strand: True
+Aligned bases GTCAAGCTCAGTAGATACTGGATTAGGAATTCATGAGTTAAGCTGTAGCC
+Anc0.Anc0refChr0        0       50      +       4151    GTCAAGCTCAGTAGATACTGGATTAGGAATTCATGAGTTAAGCTGTAGCC
+Sequence name: Anc1.Anc1refChr1
+etc.
+```
+
+Suppose you want to iterate on the columns of the first five blocks in the
+alignment:
+
+```
+with AlignmentReader(test_maf_file, taf_not_maf=False) as mp:
+    for i, block in zip(range(5), mp): # Get the first five blocks in the file in order
+        # Print the sequence names
+        print(f'Sequence names: {" ".join(block.get_column_sequences())}')
+        for j in range(block.column_number()): # For each column
+            print(block.get_column(j)) # Get the column as a string
+... 
+Sequence names: Anc0.Anc0refChr0 Anc1.Anc1refChr1 Anc2.Anc2refChr1 mr.mrrefChr1 simCow_chr6.simCow.chr6 simDog_chr6.simDog.chr6 simHuman_chr6.simHuman.chr6 simMouse_chr6.simMouse.chr6 simRat_chr6.simRat.chr6
+GGGGGGGGG
+TTTTTTTTT
+CCCCGCCCC
+AAAAAAAAA
+AAAAAAAAA
+GGGGGGGGG
+CCCCCCCCC
+etc..
+```
+
+Okay, suppose instead of a MAF we want to load a TAF file, this is easy:
+
+
 
 # Comparison Stats
 

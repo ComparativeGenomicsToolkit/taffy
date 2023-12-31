@@ -62,6 +62,8 @@ Tag *tag_parse(char *tag_string, char *delimiter, Tag *p_tag) {
     return tag;
 }
 
+
+
 void alignment_row_destruct(Alignment_Row *row) {
     if(row->bases != NULL) {
         free(row->bases);
@@ -111,6 +113,12 @@ bool alignment_row_is_predecessor_2(Alignment_Row **left_row, Alignment_Row **ri
     // Do the rows match - this one is needed to work with the OND aligner which compares pointers to the objects being
     // compared
     return alignment_row_is_predecessor(left_row[0], right_row[0]);
+}
+
+char *alignment_row_to_string(Alignment_Row *row) {
+    return stString_print("%s\t%" PRIi64 "\t%" PRIi64 "\t%s\t%" PRIi64 "\t%s",
+                          row->sequence_name, row->start, row->length,
+                          row->strand ? "+" : "-", row->sequence_length, row->bases);
 }
 
 void alignment_link_adjacent(Alignment *left_alignment, Alignment *right_alignment, bool allow_row_substitutions) {
@@ -170,6 +178,18 @@ int64_t alignment_total_gap_length(Alignment *left_alignment) {
         l_row = l_row->n_row; // Move to the next left alignment row
     }
     return total_interstitial_gap_length;
+}
+
+char *alignment_to_string(Alignment *alignment) {
+    stList *strings = stList_construct3(0, free);
+    Alignment_Row *row = alignment->row;
+    while(row != NULL) {
+        stList_append(strings,alignment_row_to_string(row));
+        row = row->n_row;
+    }
+    char *block_string = stString_join2("\n", strings);
+    stList_destruct(strings);
+    return block_string;
 }
 
 /*

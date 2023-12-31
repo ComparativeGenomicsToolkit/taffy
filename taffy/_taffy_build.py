@@ -139,6 +139,11 @@ ffibuilder.cdef("""
     bool alignment_row_is_predecessor(Alignment_Row *left_row, Alignment_Row *right_row);
     
     /*
+     * Returns a pretty-printed string representing the row. Useful for debugging.
+     */
+    char *alignment_row_to_string(Alignment_Row *row);
+    
+    /*
      * Read a column of the alignment into the buffer. The buffer must be initialized and be at least
      * of length alignment->row_number.
      */
@@ -148,6 +153,11 @@ ffibuilder.cdef("""
      * Read a column of the alignment and return as a string
      */
     char *alignment_get_column(Alignment *alignment, int64_t column_index);
+
+    /*
+     * Returns a pretty-printed string representing the alignment. Useful for debugging.
+    */
+    char *alignment_to_string(Alignment *alignment);
 
     /*
      * Read a maf header line

@@ -96,6 +96,25 @@ class Alignment:
     def __del__(self):
         lib.alignment_destruct(self._c_alignment, 0)  # Cleans up the underlying C alignment structure
 
+    def __str__(self):
+        return _to_py_string(lib.alignment_to_string(self._c_alignment))
+
+    def __iter__(self):
+        # Make a custom row iterator object to iterate over the rows in the
+        class RowIter:
+            def __init__(self, row):
+                self.row = row
+
+            def __next__(self):
+                if self.row is not None:
+                    x = self.row
+                    self.row = self.row.next_row()
+                    return x
+                else:
+                    raise StopIteration
+
+        return RowIter(self.first_row())
+
 
 class Row:
     """ Represents a row of an alignment block. See taf.h """
@@ -151,10 +170,14 @@ class Row:
     def __del__(self):
         lib.alignment_row_destruct(self._c_row)  # Cleans up the underlying C alignment structure
 
+    def __str__(self):
+        return _to_py_string(lib.alignment_row_to_string(self._c_row))
+
 
 class TafIndex:
     """ Taf Index (.tai)
     """
+
     def __init__(self, file, is_maf, file_string_not_handle=True):
         """ Load from a file. Can be a file name or a Python file handle """
         c_file_handle = _get_c_file_handle(file, file_string_not_handle)
@@ -169,6 +192,7 @@ class TafIndex:
 class AlignmentReader:
     """ Taf or maf alignment parser.
     """
+
     def __init__(self, file,
                  taf_not_maf=True,
                  use_run_length_encoding=False,
@@ -254,7 +278,7 @@ class AlignmentReader:
 
             # Connect the row object to the chain of row objects for the block
             if p_py_row is not None:
-                 p_py_row._n_row = py_row
+                p_py_row._n_row = py_row
 
             p_py_row = py_row  # Update the previous python row object
             c_row = c_row.n_row  # Move to the next row
@@ -318,6 +342,7 @@ def write_taf_index_file(taf_file, index_file,
 class AlignmentWriter:
     """ Taf or maf alignment writer.
     """
+
     def __init__(self, file, taf_not_maf=True, header_tags=None,
                  repeat_coordinates_every_n_columns=-1,
                  file_string_not_handle=True,

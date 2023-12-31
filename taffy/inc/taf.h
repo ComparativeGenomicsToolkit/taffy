@@ -127,6 +127,16 @@ void alignment_row_destruct(Alignment_Row *row);
 bool alignment_row_is_predecessor(Alignment_Row *left_row, Alignment_Row *right_row);
 
 /*
+ * Returns a pretty-printed string representing the row. Useful for debugging.
+ */
+char *alignment_row_to_string(Alignment_Row *row);
+
+/*
+ * Returns a pretty-printed string representing the alignment. Useful for debugging.
+ */
+char *alignment_to_string(Alignment *alignment);
+
+/*
  * Read a maf header line
  */
 Tag *maf_read_header(LI *li);
