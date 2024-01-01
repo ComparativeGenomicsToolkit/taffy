@@ -91,7 +91,7 @@ def test_tai(regions_path, taf_path, bgzip, block_size, name_map_path=None, rev_
         renamed_taf_path = taf_path + '.renamed'
         if bgzip:
             renamed_taf_path += '.gz'
-        cmd = ['taffy', 'view', '-i', taf_path, '-n', name_map_path, '-o', renamed_taf_path]
+        cmd = ['./bin/taffy', 'view', '-i', taf_path, '-n', name_map_path, '-o', renamed_taf_path]
         if bgzip:
             cmd += ['-c']
         subprocess.check_call(cmd)
