@@ -462,9 +462,11 @@ Given this index file, you can open it as follows:
 ```
 taf_index = TafIndex(test_taf_file + ".tai", is_maf=False)
 with AlignmentReader(test_taf_file, taf_index=taf_index, sequence_name="Anc0.Anc0refChr0",start=1000,length=50) as mp:
+    print(mp.get_header())
     for block in mp:
         print(block, "\n")
 ...
+{'version': '1', 'scoring': 'N/A'}
 Anc0.Anc0refChr0        1000    6       +       4151    GCGCTT
 Anc1.Anc1refChr1        293719  6       +       296994  GCGCTT
 Anc2.Anc2refChr1        1058    6       +       4655    GCGCTT

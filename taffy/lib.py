@@ -194,17 +194,12 @@ class AlignmentReader:
     """ Taf or maf alignment parser.
     """
 
-    def __init__(self, file, taf_not_maf=True, use_run_length_encoding=False, taf_index=None, sequence_name=None,
-                 start=-1, length=-1):
+    def __init__(self, file, taf_not_maf=True, taf_index=None, sequence_name=None, start=-1, length=-1):
         """ Use taf_not_maf to switch between MAF or TAF parsing.
 
         file can be either a Python file handle or a string giving a path to the file.
         Handing in the file name is much faster as it avoids using a Python file object. If using
         with a file string remember to close the file, either the with keyword or with the close method.
-
-        Set use_run_length_encoding to determine how
-        to decode taf columns. If unknown can be set after construction by interrogating the header line after
-        construction.
 
         If file is compressed with zip or bgzip will automatically detect that the file is compressed and read it okay.
 
@@ -212,7 +207,6 @@ class AlignmentReader:
         a taf index. Also works with compressed files.
         """
         self.taf_not_maf = taf_not_maf
-        self.use_run_length_encoding = use_run_length_encoding
         self.p_c_alignment = ffi.NULL  # The previous C alignment returned
         self.p_c_rows_to_py_rows = {}  # Hash from C rows to Python rows of the previous
         # alignment block, allowing linking of rows between blocks
@@ -220,6 +214,9 @@ class AlignmentReader:
         self.file_string_not_handle = isinstance(file, str)  # Will be true if the file is a string, not a file handle
         self.c_li_handle = lib.LI_construct(self.c_file_handle)
         self.taf_index = taf_index  # Store the taf index (if there is one)
+        self.header_tags = self._read_header()  # Read the header tags
+        self.use_run_length_encoding = "run_length_encode_bases" in self.header_tags  # Use run length encoding
+
         if taf_index:
             assert taf_not_maf  # Can not be trying to parse maf with a taf index
             assert sequence_name  # The contig name can not be none if using a taf index
@@ -227,12 +224,16 @@ class AlignmentReader:
             assert length >= 0  # The length must be valid
             self._c_taf_index_it = lib.tai_iterator(taf_index._c_taf_index,
                                                     self.c_li_handle,
-                                                    use_run_length_encoding,
+                                                    self.use_run_length_encoding,
                                                     _to_c_string(sequence_name), start, length)
 
     def get_header(self):
-        """ Get tags from the header line as a dictionary of key:value pairs. Must be called if a header is
-         present in the file before blocks are retrieved """
+        """ Get tags from the header line as a dictionary of key:value pairs.
+        Must be called if a header is present in the file before blocks are retrieved """
+        return dict(self.header_tags)  # Make a copy
+
+    def _read_header(self):
+        # Internal method to read header tags
         c_tag = lib.taf_read_header(self.c_li_handle) if self.taf_not_maf else lib.maf_read_header(self.c_li_handle)
         p_tags = _c_tags_to_dictionary(c_tag)
         lib.tag_destruct(c_tag)  # Clean up tag
@@ -342,6 +343,9 @@ class AlignmentWriter:
         File can be either a Python file handle or a file string.
         Handing in the file name is much faster as it avoids using a Python file object. If using
         with a file name remember to close the file, either the with keyword or with the close method.
+
+        If using taf, to run length encode the bases include a tag in the header tags:
+         "run_length_encode_bases"=1
 
         If use_compression is True then will use bgzf compression on output."""
         self.taf_not_maf = taf_not_maf
