@@ -34,12 +34,13 @@ def _dictionary_to_c_tags(tags):
     return first_c_tag
 
 
-def _get_c_file_handle(file, file_string_not_handle, modifier_string="r"):
-    """ Gets the c file handle for file """
-    # Either open the file or cast the python file handle to a C file handle
-    # note the Python file handle is *way* slower
-    return lib.fopen(_to_c_string(file), _to_c_string(modifier_string)) if \
-        file_string_not_handle else ffi.cast("FILE *", file)
+def _get_c_file_handle(file_string_or_handle, modifier_string="r"):
+    """ Gets the c file handle for file, which can be either a file string
+     or a file handle. If file handle you can set the modifier string.
+     Note the Python file handle is *way* slower
+     """
+    return lib.fopen(_to_c_string(file_string_or_handle), _to_c_string(modifier_string)) if \
+        isinstance(file_string_or_handle, str) else ffi.cast("FILE *", file_string_or_handle)
 
 
 class Alignment:
@@ -178,11 +179,11 @@ class TafIndex:
     """ Taf Index (.tai)
     """
 
-    def __init__(self, file, is_maf, file_string_not_handle=True):
+    def __init__(self, file, is_maf):
         """ Load from a file. Can be a file name or a Python file handle """
-        c_file_handle = _get_c_file_handle(file, file_string_not_handle)
+        c_file_handle = _get_c_file_handle(file)
         self._c_taf_index = lib.tai_load(c_file_handle, is_maf)
-        if file_string_not_handle:  # Close the underlying file handle if opened
+        if isinstance(file, str):  # Close the underlying file handle if opened
             lib.fclose(c_file_handle)
 
     def __del__(self):
@@ -193,23 +194,17 @@ class AlignmentReader:
     """ Taf or maf alignment parser.
     """
 
-    def __init__(self, file,
-                 taf_not_maf=True,
-                 use_run_length_encoding=False,
-                 file_string_not_handle=True,
-                 taf_index=None,
-                 sequence_name=None,
-                 start=-1,
-                 length=-1):
+    def __init__(self, file, taf_not_maf=True, use_run_length_encoding=False, taf_index=None, sequence_name=None,
+                 start=-1, length=-1):
         """ Use taf_not_maf to switch between MAF or TAF parsing.
+
+        file can be either a Python file handle or a string giving a path to the file.
+        Handing in the file name is much faster as it avoids using a Python file object. If using
+        with a file string remember to close the file, either the with keyword or with the close method.
 
         Set use_run_length_encoding to determine how
         to decode taf columns. If unknown can be set after construction by interrogating the header line after
         construction.
-
-        Use the file_string_not_handle to determine if file is a file_handle (if file_string_not_handle=False) or
-        a file name. Handing in the file name is much faster as it avoids using a Python file object. If using
-        with a file name remember to close the file, either the with keyword or with the close method.
 
         If file is compressed with zip or bgzip will automatically detect that the file is compressed and read it okay.
 
@@ -221,8 +216,8 @@ class AlignmentReader:
         self.p_c_alignment = ffi.NULL  # The previous C alignment returned
         self.p_c_rows_to_py_rows = {}  # Hash from C rows to Python rows of the previous
         # alignment block, allowing linking of rows between blocks
-        self.c_file_handle = _get_c_file_handle(file, file_string_not_handle)
-        self.file_string_not_handle = file_string_not_handle
+        self.c_file_handle = _get_c_file_handle(file)
+        self.file_string_not_handle = isinstance(file, str)  # Will be true if the file is a string, not a file handle
         self.c_li_handle = lib.LI_construct(self.c_file_handle)
         self.taf_index = taf_index  # Store the taf index (if there is one)
         if taf_index:
@@ -323,19 +318,16 @@ def get_column_iterator(alignment_reader):
             yield sequence_names, alignment.get_column(i)
 
 
-def write_taf_index_file(taf_file, index_file,
-                         taf_file_string_not_handle=True,
-                         index_file_string_not_handle=True,
-                         index_block_size=10000):
+def write_taf_index_file(taf_file, index_file, index_block_size=10000):
     """ Create a taf index file """
-    c_taf_file_handle = _get_c_file_handle(taf_file, taf_file_string_not_handle)
+    c_taf_file_handle = _get_c_file_handle(taf_file)
     c_li_handle = lib.LI_construct(c_taf_file_handle)
-    c_index_file_handle = _get_c_file_handle(index_file, taf_file_string_not_handle, "w")
+    c_index_file_handle = _get_c_file_handle(index_file, "w")
     lib.tai_create(c_li_handle, c_index_file_handle, index_block_size)
     lib.LI_destruct(c_li_handle)  # Cleanup the allocated line iterator
-    if taf_file_string_not_handle:  # Close the underlying file handle
+    if isinstance(taf_file, str):  # Close the underlying file handle if opened
         lib.fclose(c_taf_file_handle)
-    if index_file_string_not_handle:  # Close the underlying file handle
+    if isinstance(index_file, str):  # Close the underlying file handle
         lib.fclose(c_index_file_handle)
 
 
@@ -343,23 +335,20 @@ class AlignmentWriter:
     """ Taf or maf alignment writer.
     """
 
-    def __init__(self, file, taf_not_maf=True, header_tags=None,
-                 repeat_coordinates_every_n_columns=-1,
-                 file_string_not_handle=True,
+    def __init__(self, file, taf_not_maf=True, header_tags=None, repeat_coordinates_every_n_columns=-1,
                  use_compression=False):
-        """ Use taf_not_maf to switch between MAF or TAF writing. Set use_run_length_encoding to determine how
-        to encode taf columns.
+        """ Use taf_not_maf to switch between MAF or TAF writing.
 
-        Use the file_string_not_handle to determine if file is a file_handle (if file_string_not_handle=False) or
-        a file name. Handing in the file name is much faster as it avoids using a Python file object. If using
+        File can be either a Python file handle or a file string.
+        Handing in the file name is much faster as it avoids using a Python file object. If using
         with a file name remember to close the file, either the with keyword or with the close method.
 
         If use_compression is True then will use bgzf compression on output."""
         self.taf_not_maf = taf_not_maf
         self.header_tags = {} if header_tags is None else header_tags
         self.p_py_alignment = None  # The previous alignment
-        self.c_lw_handle = lib.LW_construct(_get_c_file_handle(file, file_string_not_handle, "w"), use_compression)
-        self.file_string_not_handle = file_string_not_handle
+        self.c_lw_handle = lib.LW_construct(_get_c_file_handle(file, "w"), use_compression)
+        self.file_string_not_handle = isinstance(file, str)
         self.repeat_coordinates_every_n_columns = repeat_coordinates_every_n_columns
 
     def write_header(self):

@@ -182,10 +182,7 @@ class TafTest(unittest.TestCase):
         taf_index = TafIndex(self.test_index_file, False)
 
         # Create a taf reader
-        with AlignmentReader(self.test_taf_file,
-                             taf_index=taf_index,
-                             sequence_name="Anc0.Anc0refChr0",
-                             start=100,
+        with AlignmentReader(self.test_taf_file, taf_index=taf_index, sequence_name="Anc0.Anc0refChr0", start=100,
                              length=500) as tp:
 
             for a in tp:  # For each alignment block in input
