@@ -24,7 +24,7 @@ ${sonLibDir}/sonLib.a : sonLib
 
 ${sonLibDir}/cuTest.a : sonLib
 
-${LIBDIR}/libstTaf.a : ${srcDir}/alignment_block.o ${srcDir}/line_iterator.o ${srcDir}/maf.o ${srcDir}/paf.o ${srcDir}/ond.o ${srcDir}/taf.o ${srcDir}/merge_adjacent_alignments.o ${srcDir}/tai.o ${libHeaders} ${stTafDependencies}
+${LIBDIR}/libstTaf.a : ${libTests} ${libHeaders} ${srcDir}/alignment_block.o ${srcDir}/line_iterator.o ${srcDir}/maf.o ${srcDir}/paf.o ${srcDir}/ond.o ${srcDir}/taf.o ${srcDir}/merge_adjacent_alignments.o ${srcDir}/tai.o ${libHeaders} ${stTafDependencies}
 	${AR} rc libstTaf.a ${srcDir}/alignment_block.o ${srcDir}/line_iterator.o ${srcDir}/maf.o ${srcDir}/paf.o ${srcDir}/ond.o ${srcDir}/taf.o ${srcDir}/merge_adjacent_alignments.o ${srcDir}/tai.o
 	mv libstTaf.a ${LIBDIR}/
 
@@ -79,6 +79,9 @@ taf_stats.o : taf_stats.c ${stTafDependencies} ${libHeaders}
 test : all ${BINDIR}/stTafTests
 	${BINDIR}/stTafTests
 	tests/tai/test_tai.py
+
+python_test: all ${BINDIR}/stTafTests
+	cd tests && python3 taffyTest.py
 
 clean :
 	cd taffy/submodules/sonLib && ${MAKE} clean

@@ -49,11 +49,11 @@ Tokens are separated by white-space. The syntax is defined as follows:
            -> bases coordinates_column
            -> bases tag_string
            -> bases
+           -> #string
 
-(Columns are encoded one per line. Each column encodes an alignment of the
-bases in the column (see below) and then some optional coordinates and tags.)
+(Columns are encoded one per line. Columns are either comment lines, starting with a "#" symbol and then containing an arbitrary comment string, which is ignored, or an encoding of an alignment of the bases in the column (see below) and then some optional coordinates and tags.)
 
-    tag_string -> '#' tags
+    tag_string -> '@' tags
 
     bases -> run_length_encoded_bases
           -> bases
@@ -182,6 +182,7 @@ All Taffy utilities are run using `taffy <command>`, where the available command
     norm           normalize TAF blocks
     add-gap-bases  add sequences from HAL or FASTA files into TAF gaps
     index          create a .tai index (required for region extraction)
+    stats          print statistics of a TAF file
 ```
 
 Taffy supports both uncompressed and [bgzipped](http://www.htslib.org/doc/bgzip.html) input (though Taffy must be built
@@ -362,11 +363,27 @@ with AlignmentReader(test_maf_file, taf_not_maf=False) as mp:
 ```
 
 The dictionary you see printed on the last line represents the header
-line of the file. Next let's try iterating through
+line of the file. 
+
+Okay, suppose instead of a MAF we want to load a TAF file, this is easy. First, make a TAF file from the test maf file (in tests/) (from the command line). This file will also be created by the tests, so my already exist.
+
+```
+./bin/taffy view --inputFile ./tests/evolverMammals.maf --useCompression > ./tests/evolverMammals.taf.gz
+```
+
+Now, let's load the file (it doesn't matter if you used compression or not):
+
+```
+test_taf_file = (pathlib.Path().absolute() / "./evolverMammals.taf.gz").as_posix()
+with AlignmentReader(test_taf_file) as mp:
+    print(mp.get_header())
+```
+
+Next let's try iterating through
 some alignment blocks:
 
 ```
-with AlignmentReader(test_maf_file, taf_not_maf=False) as mp:
+with AlignmentReader(test_taf_file) as mp:
     for i, block in zip(range(5), mp): # Get the first five blocks in the file
         print(block, "\n") # Print the blocks, adding a newline between each block
 ...       
@@ -382,10 +399,10 @@ simRat_chr6.simRat.chr6 642153  50      +       647215  GTCAAGCTCTGTAAATAGTAGATT
 etc.
 ```
 
-The alignment you see printed represents the first block in the file. Next, let's iterate on the rows in a block:
+The alignment you see printed represents the first 'block' in the file. Next, let's iterate on the rows in a block:
 
 ```
-with AlignmentReader(test_maf_file, taf_not_maf=False) as mp:
+with AlignmentReader(test_taf_file) as mp:
     block = next(mp) # Get the first block in the file
     print(f"Row number: {block.row_number()}") # Number of sequences aligned
     print(f"Column number: {block.column_number()}") # Number of alignment columns
@@ -412,7 +429,7 @@ etc.
 ```
 
 Suppose you want to iterate on the columns of the first five blocks in the
-alignment:
+alignment (this time using the MAF file to show it doesn't matter which you start from):
 
 ```
 with AlignmentReader(test_maf_file, taf_not_maf=False) as mp:
@@ -433,9 +450,35 @@ CCCCCCCCC
 etc..
 ```
 
-Okay, suppose instead of a MAF we want to load a TAF file, this is easy:
+Now suppose you want to access a specific subalignment. For this you will need an index file, which you can build with taffy index, e.g.:
 
+```
+./bin/taffy index -i ./tests/evolverMammals.taf.gz
+```
 
+Which creates the file ./tests/evolverMammals.taf.tai. Note, this will work with either a MAF or TAF file and with or without compression.
+Given this index file, you can open it as follows:
+
+```
+taf_index = TafIndex(test_taf_file + ".tai", is_maf=False)
+with AlignmentReader(test_taf_file, taf_index=taf_index, sequence_name="Anc0.Anc0refChr0",start=1000,length=50) as mp:
+    for block in mp:
+        print(block, "\n")
+...
+Anc0.Anc0refChr0        1000    6       +       4151    GCGCTT
+Anc1.Anc1refChr1        293719  6       +       296994  GCGCTT
+Anc2.Anc2refChr1        1058    6       +       4655    GCGCTT
+mr.mrrefChr1    179071  6       +       182340  GCACTT
+simCow_chr6.simCow.chr6 598470  6       +       602619  GCGCTT
+simDog_chr6.simDog.chr6 590144  6       +       593897  GAGCTG
+simHuman_chr6.simHuman.chr6     598418  6       +       601863  GCGCTT
+simMouse_chr6.simMouse.chr6     631494  6       +       636262  GCACTT
+simRat_chr6.simRat.chr6 642932  3       +       647215  GCA--- 
+...
+etc.
+```
+
+Which gets a particular subrange of blocks within the given reference sequence interval.
 
 # Comparison Stats
 
@@ -492,3 +535,6 @@ Which is a 6.97x reduction in block number.
 Things that are ongoing:
 
 * Make `taffy add-gap-bases` use indexed fastas to avoid loading everything into memory
+
+* Add sniffing to the maf/taf parser to remove the annoying need for parameters to
+* determine the type of the file

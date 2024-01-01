@@ -42,6 +42,8 @@ static void test_taf(CuTest *testCase) {
     LW *lw = LW_construct(fopen(temp_copy, "w"), 1);
     Alignment *alignment, *p_alignment = NULL;
     LI *li_maf = LI_construct(file);
+    Tag *tags = maf_read_header(li_maf);
+    taf_write_header(tags, lw);
     while((alignment = maf_read_block(li_maf)) != NULL) {
         if(p_alignment != NULL) {
             alignment_link_adjacent(p_alignment, alignment, 1);

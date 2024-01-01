@@ -58,7 +58,7 @@ static Alignment *parse_coordinates_and_establish_block(Alignment *p_block, stLi
     // Now parse the tokens to edit the rows
     int64_t j;
     has_coordinates(tokens, &j); j++; // Get 1+ the coordinate of the ';' token
-    while(j < stList_length(tokens) && strcmp(stList_get(tokens, j), "#") != 0) { // Iterate through the tokens
+    while(j < stList_length(tokens) && strcmp(stList_get(tokens, j), "@") != 0) { // Iterate through the tokens
         char *op_type = stList_get(tokens, j++); // This is the operation
         assert(strlen(op_type) == 1); // Must be a single character in length
         int64_t row_index = atol(stList_get(tokens, j++)); // Get the index of the affected row
@@ -164,7 +164,7 @@ Tag *parse_tags(stList *tokens, int64_t starting_token, char *delimiter);
 static Tag *parse_tags_for_column(stList *tokens) {
     int64_t i=0;
     while(i<stList_length(tokens)) {
-        if(strcmp(stList_get(tokens, i++), "#") == 0) {
+        if(strcmp(stList_get(tokens, i++), "@") == 0) {
             break; // We have found the token representing the start of the tags
         }
     }
@@ -173,9 +173,17 @@ static Tag *parse_tags_for_column(stList *tokens) {
 
 Alignment *taf_read_block(Alignment *p_block, bool run_length_encode_bases, LI *li) {
     stList *tokens = get_first_line(li); // Get the first non-empty line
+    while(1) {
+        if (tokens == NULL) { // If there are no more lines to be had return NULL
+            return NULL;
+        }
 
-    if(tokens == NULL) { // If there are no more lines to be had return NULL
-        return NULL;
+        if(((char *) stList_get(tokens, 0))[0] != '#') { // If it is not a comment line
+            break;
+        }
+
+        stList_destruct(tokens); // Clean up the comment line
+        tokens = get_first_line(li); // Get the next line
     }
 
     // Find the coordinates
@@ -382,13 +390,13 @@ void taf_write_block(Alignment *p_alignment, Alignment *alignment, bool run_leng
         write_column(row, 0, lw, run_length_encode_bases);
         write_coordinates(p_alignment != NULL ? p_alignment->row : NULL, row, repeat_coordinates_every_n_columns, lw);
         if(alignment->column_tags != NULL && alignment->column_tags[0] != NULL) {
-            write_header(alignment->column_tags[0], lw, " #", ":", "");
+            write_header(alignment->column_tags[0], lw, " @", ":", "");
         }
         LW_write(lw, "\n");
         for(int64_t i=1; i<column_no; i++) {
             write_column(row, i, lw, run_length_encode_bases);
             if(alignment->column_tags != NULL && alignment->column_tags[i] != NULL) {
-                write_header(alignment->column_tags[i], lw, " #", ":", "");
+                write_header(alignment->column_tags[i], lw, " @", ":", "");
             }
             LW_write(lw, "\n");
         }
