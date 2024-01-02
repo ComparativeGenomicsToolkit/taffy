@@ -194,7 +194,7 @@ class AlignmentReader:
     """ Taf or maf alignment parser.
     """
 
-    def __init__(self, file, taf_not_maf=True, taf_index=None, sequence_name=None, start=-1, length=-1):
+    def __init__(self, file, taf_index=None, sequence_name=None, start=-1, length=-1):
         """ Use taf_not_maf to switch between MAF or TAF parsing.
 
         file can be either a Python file handle or a string giving a path to the file.
@@ -206,19 +206,19 @@ class AlignmentReader:
         Use the taf_index and sequence_name, start and length if you want to extract a region from a taf file using
         a taf index. Also works with compressed files.
         """
-        self.taf_not_maf = taf_not_maf
         self.p_c_alignment = ffi.NULL  # The previous C alignment returned
         self.p_c_rows_to_py_rows = {}  # Hash from C rows to Python rows of the previous
         # alignment block, allowing linking of rows between blocks
         self.c_file_handle = _get_c_file_handle(file)
         self.file_string_not_handle = isinstance(file, str)  # Will be true if the file is a string, not a file handle
         self.c_li_handle = lib.LI_construct(self.c_file_handle)
+        self.taf_not_maf = lib.is_taf(self.c_li_handle)  # Sniff the file header to determine if a taf file
         self.taf_index = taf_index  # Store the taf index (if there is one)
         self.header_tags = self._read_header()  # Read the header tags
         self.use_run_length_encoding = "run_length_encode_bases" in self.header_tags  # Use run length encoding
 
         if taf_index:
-            assert taf_not_maf  # Can not be trying to parse maf with a taf index
+            assert self.taf_not_maf  # Can not be trying to parse maf with a taf index
             assert sequence_name  # The contig name can not be none if using a taf index
             assert start >= 0  # The start coordinate must be valid
             assert length >= 0  # The length must be valid

@@ -160,6 +160,11 @@ ffibuilder.cdef("""
     char *alignment_to_string(Alignment *alignment);
 
     /*
+     * Sniff header line to determine if it is a taf file.
+     */
+    bool is_taf(LI *li);
+
+    /*
      * Read a maf header line
      */
     Tag *maf_read_header(LI *li);

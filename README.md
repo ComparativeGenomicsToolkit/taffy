@@ -346,8 +346,8 @@ Having installed the Taffy Python library, you should be able to run the followi
 error. It assumes you are running it from the tests directory of the package. If not, you will need to provide your own demo maf file:
 
 ```
-# Import the AlignmentReader and AlignmentWriter objects
-from taffy.lib import AlignmentReader, AlignmentWriter
+# Import the AlignmentReader
+from taffy.lib import AlignmentReader
 ```
 
 Next, let's try opening a maf file:
@@ -355,7 +355,7 @@ Next, let's try opening a maf file:
 ```
 import pathlib
 test_maf_file = (pathlib.Path().absolute() / "./evolverMammals.maf").as_posix()
-with AlignmentReader(test_maf_file, taf_not_maf=False) as mp:
+with AlignmentReader(test_maf_file) as mp:
     header = mp.get_header()
     print(header) 
 ...
@@ -365,7 +365,7 @@ with AlignmentReader(test_maf_file, taf_not_maf=False) as mp:
 The dictionary you see printed on the last line represents the header
 line of the file. 
 
-Okay, suppose instead of a MAF we want to load a TAF file, this is easy. First, make a TAF file from the test maf file (in tests/) (from the command line). This file will also be created by the tests, so my already exist.
+Okay, suppose instead of a MAF we want to load a TAF file. First, make a TAF file from the test maf file (in tests/) (from the command line). This file will also be created by the tests, so my already exist.
 
 ```
 ./bin/taffy view --inputFile ./tests/evolverMammals.maf --useCompression > ./tests/evolverMammals.taf.gz
@@ -379,6 +379,7 @@ with AlignmentReader(test_taf_file) as mp:
     print(mp.get_header())
 ```
 
+Note the Python is identical and the output will be the same as with the maf file.
 Next let's try iterating through
 some alignment blocks:
 
@@ -432,7 +433,7 @@ Suppose you want to iterate on the columns of the first five blocks in the
 alignment (this time using the MAF file to show it doesn't matter which you start from):
 
 ```
-with AlignmentReader(test_maf_file, taf_not_maf=False) as mp:
+with AlignmentReader(test_maf_file) as mp:
     for i, block in zip(range(5), mp): # Get the first five blocks in the file in order
         # Print the sequence names
         print(f'Sequence names: {" ".join(block.get_column_sequences())}')
@@ -460,6 +461,7 @@ Which creates the file ./tests/evolverMammals.taf.tai. Note, this will work with
 Given this index file, you can open it as follows:
 
 ```
+from taffy.lib import TafIndex  # Import the TafIndex
 taf_index = TafIndex(test_taf_file + ".tai", is_maf=False)
 with AlignmentReader(test_taf_file, taf_index=taf_index, sequence_name="Anc0.Anc0refChr0",start=1000,length=50) as mp:
     print(mp.get_header())
