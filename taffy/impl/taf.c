@@ -265,17 +265,6 @@ Alignment *taf_read_block(Alignment *p_block, bool run_length_encode_bases, LI *
     return block;
 }
 
-bool is_taf(LI *li) {
-    char *line = LI_peek_at_next_line(li);
-    if (line == NULL) { // At end of file
-        return 0;
-    }
-    stList *tokens = stString_split(line); // Tokenize the line
-    bool is_taf = stList_length(tokens) != 0 && strcmp(stList_get(tokens, 0), "#taf") == 0;
-    stList_destruct(tokens);
-    return is_taf;
-}
-
 Tag *parse_header(stList *tokens, char *header_prefix, char *delimiter);
 
 Tag *taf_read_header(LI *li) {

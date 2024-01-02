@@ -33,6 +33,8 @@ ffibuilder.cdef("""
     LI *LI_construct(FILE *fh);
 
     void LI_destruct(LI *li);
+    
+    char *LI_peek_at_next_line(LI *li);
 
     typedef struct _tag Tag;
 
@@ -159,10 +161,13 @@ ffibuilder.cdef("""
     */
     char *alignment_to_string(Alignment *alignment);
 
-    /*
-     * Sniff header line to determine if it is a taf file.
+    /**
+     * Sniff file format from header line.  returns:
+     *  0: taf
+     *  1: maf
+     *  2: unknown
      */
-    bool is_taf(LI *li);
+    int check_input_format(const char *header_line);
 
     /*
      * Read a maf header line

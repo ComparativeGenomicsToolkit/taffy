@@ -164,11 +164,6 @@ void maf_write_block(Alignment *alignment, LW *lw);
 void paf_write_block(Alignment *alignment, LW *lw, bool all_to_all);
 
 /*
- * Sniff the header to determine if the file is a taf file.
- */
-bool is_taf(LI *li);
-
-/*
  * Read a taf header line
  */
 Tag *taf_read_header(LI *li);

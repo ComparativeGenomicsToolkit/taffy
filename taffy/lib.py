@@ -212,7 +212,10 @@ class AlignmentReader:
         self.c_file_handle = _get_c_file_handle(file)
         self.file_string_not_handle = isinstance(file, str)  # Will be true if the file is a string, not a file handle
         self.c_li_handle = lib.LI_construct(self.c_file_handle)
-        self.taf_not_maf = lib.is_taf(self.c_li_handle)  # Sniff the file header to determine if a taf file
+        i = lib.check_input_format(lib.LI_peek_at_next_line(self.c_li_handle))
+        if i not in (0, 1):
+            raise RuntimeError("Input file is not a TAF or MAF file")
+        self.taf_not_maf = i == 0  # Sniff the file header to determine if a taf file
         self.taf_index = taf_index  # Store the taf index (if there is one)
         self.header_tags = self._read_header()  # Read the header tags
         self.use_run_length_encoding = "run_length_encode_bases" in self.header_tags  # Use run length encoding
