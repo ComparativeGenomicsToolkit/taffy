@@ -368,7 +368,7 @@ line of the file.
 Okay, suppose instead of a MAF we want to load a TAF file. First, make a TAF file from the test maf file (in tests/) (from the command line). This file will also be created by the tests, so my already exist.
 
 ```
-./bin/taffy view --inputFile ./tests/evolverMammals.maf --useCompression > ./tests/evolverMammals.taf.gz
+taffy view --inputFile ./evolverMammals.maf --useCompression > ./evolverMammals.taf.gz
 ```
 
 Now, let's load the file (it doesn't matter if you used compression or not):
@@ -454,7 +454,7 @@ etc..
 Now suppose you want to access a specific subalignment. For this you will need an index file, which you can build with taffy index, e.g.:
 
 ```
-./bin/taffy index -i ./tests/evolverMammals.taf.gz
+taffy index -i ./evolverMammals.taf.gz
 ```
 
 Which creates the file ./tests/evolverMammals.taf.tai. Note, this will work with either a MAF or TAF file and with or without compression.
