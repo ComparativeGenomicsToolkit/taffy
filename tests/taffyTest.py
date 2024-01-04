@@ -13,7 +13,7 @@ class TafTest(unittest.TestCase):
 
     def test_maf_reader(self):
         """ Manually test the first couple blocks from the maf file """
-        with AlignmentReader(self.test_maf_file, taf_not_maf=False) as mp:
+        with AlignmentReader(self.test_maf_file) as mp:
             # Check the header is as expected
             header = mp.get_header()
             self.assertEqual(header, {"version": "1", "scoring": "N/A"})
@@ -83,7 +83,7 @@ class TafTest(unittest.TestCase):
 
     def test_column_iterator(self):
         """ Manually test the column iterator """
-        with AlignmentReader(self.test_maf_file, taf_not_maf=False) as mp:
+        with AlignmentReader(self.test_maf_file) as mp:
             column_it = get_column_iterator(mp)
             s = ["Anc0.Anc0refChr0", "Anc1.Anc1refChr1", "Anc2.Anc2refChr1", "mr.mrrefChr1",
                  "simCow_chr6.simCow.chr6", "simDog_chr6.simDog.chr6", "simHuman_chr6.simHuman.chr6",
@@ -115,7 +115,7 @@ class TafTest(unittest.TestCase):
         column_tags = []  # List of tags per column
 
         # First read from the maf file and write the taf file
-        with AlignmentReader(self.test_maf_file, taf_not_maf=False) as mp:
+        with AlignmentReader(self.test_maf_file) as mp:
             maf_header_tags = mp.get_header()  # Get the maf header tags
 
             with AlignmentWriter(self.test_taf_file, header_tags=maf_header_tags, use_compression=compress_file) as tw:
@@ -132,7 +132,7 @@ class TafTest(unittest.TestCase):
         # Now read back the taf file and check it is equivalent to the maf
         column_index = 0  # Used to track where in the list of columns we are
         with AlignmentReader(self.test_taf_file) as tp:
-            with AlignmentReader(self.test_maf_file, taf_not_maf=False) as mp:
+            with AlignmentReader(self.test_maf_file) as mp:
                 self.assertEqual(mp.get_header(), tp.get_header())  # Check headers are equivalent
 
                 for ma, ta in zip(mp, tp):  # For each of the two alignment blocks
@@ -168,7 +168,7 @@ class TafTest(unittest.TestCase):
         """ Index a taf file then load a portion of the file with the
          AlignmentReader """
         # Convert MAF to TAF
-        with AlignmentReader(self.test_maf_file, taf_not_maf=False) as mp:
+        with AlignmentReader(self.test_maf_file) as mp:
             maf_header_tags = mp.get_header()  # Get the maf header tags
             with AlignmentWriter(self.test_taf_file, header_tags=maf_header_tags, use_compression=compress_file) as tw:
                 tw.write_header()  # Write the header
@@ -182,10 +182,7 @@ class TafTest(unittest.TestCase):
         taf_index = TafIndex(self.test_index_file, False)
 
         # Create a taf reader
-        with AlignmentReader(self.test_taf_file,
-                             taf_index=taf_index,
-                             sequence_name="Anc0.Anc0refChr0",
-                             start=100,
+        with AlignmentReader(self.test_taf_file, taf_index=taf_index, sequence_name="Anc0.Anc0refChr0", start=100,
                              length=500) as tp:
 
             for a in tp:  # For each alignment block in input

@@ -33,6 +33,8 @@ ffibuilder.cdef("""
     LI *LI_construct(FILE *fh);
 
     void LI_destruct(LI *li);
+    
+    char *LI_peek_at_next_line(LI *li);
 
     typedef struct _tag Tag;
 
@@ -158,6 +160,14 @@ ffibuilder.cdef("""
      * Returns a pretty-printed string representing the alignment. Useful for debugging.
     */
     char *alignment_to_string(Alignment *alignment);
+
+    /**
+     * Sniff file format from header line.  returns:
+     *  0: taf
+     *  1: maf
+     *  2: unknown
+     */
+    int check_input_format(const char *header_line);
 
     /*
      * Read a maf header line

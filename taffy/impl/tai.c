@@ -273,7 +273,7 @@ static int tai_create_maf(LI *li, FILE *idx_fh, int64_t index_block_size) {
     return 0;
 }
     
-int tai_create(LI *li, FILE* idx_fh, int64_t index_block_size){
+int tai_create(LI *li, FILE* idx_fh, int64_t index_block_size) {
 
     int input_format = check_input_format(LI_peek_at_next_line(li));
     assert(input_format == 0 || input_format == 1);
