@@ -12,7 +12,7 @@
 
 static void usage() {
     fprintf(stderr, "taffy stats [options]\n");
-    fprintf(stderr, "Print statitstics from a TAF or MAF file\n");
+    fprintf(stderr, "Print statistics from a TAF or MAF file\n");
     fprintf(stderr, "-i --inputFile : Input TAF or MAF file. If not specified reads from stdin\n");
     fprintf(stderr, "-s --sequenceLengths : Print length of each *reference* sequence in the (indexed) alignment\n");
     fprintf(stderr, "-l --logLevel : Set the log level\n");
