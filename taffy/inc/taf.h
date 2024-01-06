@@ -105,6 +105,16 @@ int64_t alignment_number_of_common_rows(Alignment *left_alignment, Alignment *ri
 Alignment *alignment_merge_adjacent(Alignment *left_alignment, Alignment *right_alignment);
 
 /*
+ * Get the rows of the alignment in a list.
+ */
+stList *alignment_get_rows_in_a_list(Alignment_Row *row);
+
+/*
+ * Set the rows in the alignment given a list of rows
+ */
+void alignment_set_rows(Alignment *alignment, stList *rows);
+
+/*
  * Read a column of the alignment into the buffer. The buffer must be initialized and be at least
  * of length alignment->row_number.
  */

@@ -94,13 +94,25 @@ void alignment_destruct(Alignment *alignment, bool cleanup_rows) {
     free(alignment);
 }
 
-static stList *get_rows_in_a_list(Alignment_Row *row) {
+stList *alignment_get_rows_in_a_list(Alignment_Row *row) {
     stList *l = stList_construct();
     while(row != NULL) {
         stList_append(l, row);
         row = row->n_row;
     }
     return l;
+}
+
+void alignment_set_rows(Alignment *alignment, stList *rows) {
+    alignment->row_number = stList_length(rows);
+    if(stList_length(rows) > 0) {
+        alignment->row = stList_get(rows, 0);
+        for (int64_t i = 1; i < stList_length(rows); i++) {
+            Alignment_Row *p_row = stList_get(rows, i);
+            Alignment_Row *row = stList_get(rows, i);
+            p_row->n_row = row;
+        }
+    }
 }
 
 bool alignment_row_is_predecessor(Alignment_Row *left_row, Alignment_Row *right_row) {
@@ -122,8 +134,8 @@ char *alignment_row_to_string(Alignment_Row *row) {
 }
 
 void alignment_link_adjacent(Alignment *left_alignment, Alignment *right_alignment, bool allow_row_substitutions) {
-    stList *left_rows = get_rows_in_a_list(left_alignment->row);
-    stList *right_rows = get_rows_in_a_list(right_alignment->row);
+    stList *left_rows = alignment_get_rows_in_a_list(left_alignment->row);
+    stList *right_rows = alignment_get_rows_in_a_list(right_alignment->row);
     // get the alignment of the rows
     WFA *wfa = WFA_construct(stList_getBackingArray(left_rows), stList_getBackingArray(right_rows),
                              stList_length(left_rows), stList_length(right_rows),
