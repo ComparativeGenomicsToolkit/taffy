@@ -108,9 +108,10 @@ void alignment_set_rows(Alignment *alignment, stList *rows) {
     if(stList_length(rows) > 0) {
         alignment->row = stList_get(rows, 0);
         for (int64_t i = 1; i < stList_length(rows); i++) {
-            Alignment_Row *p_row = stList_get(rows, i);
+            Alignment_Row *p_row = stList_get(rows, i-1);
             Alignment_Row *row = stList_get(rows, i);
             p_row->n_row = row;
+            row->n_row = NULL;
         }
     }
 }

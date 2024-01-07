@@ -70,7 +70,7 @@ static int get_closest_prefix_cmp_fn(char *sequence_name, Sequence_Prefix *sp) {
 
 static int64_t get_closest_prefix(Alignment_Row *row, stList *prefixes_to_sort_by) {
     // Binary search the sequence name
-    Sequence_Prefix *sp = stList_binarySearch(prefixes_to_sort_by, row,
+    Sequence_Prefix *sp = stList_binarySearch(prefixes_to_sort_by, row->sequence_name,
                                               (int (*)(const void *a, const void *b))get_closest_prefix_cmp_fn);
     if(sp == NULL) {
         st_logDebug("Did not find a valid prefix to match: %s\n", row->sequence_name);
@@ -94,13 +94,15 @@ static void sort_the_rows(Alignment *p_alignment, Alignment *alignment, stList *
     assert(stList_length(rows) == alignment->row_number); // Quick sanity check
 
     // Sort the rows by the prefix ordering
-    stList_sort2(rows, (int (*)(const void *, const void *, void *))alignment_sequence_prefix_cmp_fn, rows);
+    stList_sort2(rows, (int (*)(const void *, const void *, void *))alignment_sequence_prefix_cmp_fn, prefixes_to_sort_by);
 
     // Re-connect the rows
     alignment_set_rows(alignment, rows);
 
     // Reset the alignment of the rows with the prior row
-    alignment_link_adjacent(p_alignment, alignment, 1);
+    if(p_alignment != NULL) {
+        alignment_link_adjacent(p_alignment, alignment, 1);
+    }
 }
 
 static void usage(void) {
@@ -205,6 +207,7 @@ int taf_sort_main(int argc, char *argv[]) {
         return 1;
     }
     stList *prefixes_to_sort_by = load_sort_file(sort_fh);
+    st_logInfo("Loaded the sort file, got %i rows\n", (int)stList_length(prefixes_to_sort_by));
 
     // Parse the header
     Tag *tag = taf_read_header(li);
@@ -216,13 +219,20 @@ int taf_sort_main(int argc, char *argv[]) {
     tag_destruct(tag);
 
     // Write the alignment blocks
-    Alignment *alignment, *p_alignment = NULL;
-    while((alignment = taf_read_block(p_alignment, li, run_length_encode_bases)) != NULL) {
-        // Sort the alignment block rows
-        sort_the_rows(p_alignment, alignment, prefixes_to_sort_by);
-        // Write the block
-        taf_write_block(p_alignment, alignment, run_length_encode_bases, -1, output); // Write the block
+    Alignment *alignment, *p_alignment = NULL, *pp_alignment = NULL;
+    while((alignment = taf_read_block(p_alignment, run_length_encode_bases, li)) != NULL) {
+        if(p_alignment) {
+            // Sort the alignment block rows
+            sort_the_rows(pp_alignment, p_alignment, prefixes_to_sort_by);
+            // Write the block
+            taf_write_block(pp_alignment, p_alignment, run_length_encode_bases, -1, output); // Write the block
+        }
+        pp_alignment = p_alignment;
         p_alignment = alignment;
+    }
+    if(p_alignment) { // Write the final block
+        sort_the_rows(pp_alignment, p_alignment, prefixes_to_sort_by);
+        taf_write_block(pp_alignment, p_alignment, run_length_encode_bases, -1, output); // Write the block
     }
 
     //////////////////////////////////////////////
