@@ -161,7 +161,7 @@ void maf_write_block(Alignment *alignment, LW *lw);
  * toggles whether we write every possible pairwise alignment, or just each non-ref to ref alignment
  * where ref is the first row in the block
  */
-void paf_write_block(Alignment *alignment, LW *lw, bool all_to_all);
+void paf_write_block(Alignment *alignment, LW *lw, bool all_to_all, bool cs_cigar);
 
 /*
  * Read a taf header line
