@@ -5,6 +5,7 @@
 // write a single PAF row from the pairwise alignment between the given two MAF block rows
 static void paf_write_row(Alignment_Row *q_row, Alignment_Row *t_row, int64_t num_col, bool cs_cigar, LW *lw) {
     char relative_strand = q_row->strand == t_row->strand ? '+' : '-';
+    bool flip_cigar = t_row->strand == false;
     
     // query position
     char *query_name = q_row->sequence_name;
@@ -47,20 +48,21 @@ static void paf_write_row(Alignment_Row *q_row, Alignment_Row *t_row, int64_t nu
     
     for (int64_t i = 0; i < num_col; ++i) {
         // scan the next column
+        int64_t pos = flip_cigar ? num_col - 1 - i : i;
         char event = '.';
-        if (t_row->bases[i] != '-' && q_row->bases[i] != '-') {
-            if (t_row->bases[i] != q_row->bases[i] && cs_cigar) {
+        if (t_row->bases[pos] != '-' && q_row->bases[pos] != '-') {
+            if (t_row->bases[pos] != q_row->bases[pos] && cs_cigar) {
                 event = '*';
             } else {
                 event = 'M';
             }
             ++num_matches;
-        } else if (t_row->bases[i] == '-' && q_row->bases[i] != '-') {
+        } else if (t_row->bases[pos] == '-' && q_row->bases[pos] != '-') {
             event = 'I';
-        } else if (t_row->bases[i] != '-' && q_row->bases[i] == '-') {
+        } else if (t_row->bases[pos] != '-' && q_row->bases[pos] == '-') {
             event = 'D';
         } else {
-            assert(t_row->bases[i] == '-' &&  q_row->bases[i] == '-');
+            assert(t_row->bases[pos] == '-' &&  q_row->bases[pos] == '-');
         }
 
         // print the previous event if we need to start a new event
@@ -102,11 +104,11 @@ static void paf_write_row(Alignment_Row *q_row, Alignment_Row *t_row, int64_t nu
             ++block_length;
             ++current_length;
             if (cs_cigar) {
-                if (t_row->bases[i] != '-') {
-                    target_buffer[target_buffer_length++] = t_row->bases[i];
+                if (t_row->bases[pos] != '-') {
+                    target_buffer[target_buffer_length++] = t_row->bases[pos];
                 }
-                if (q_row->bases[i] != '-') {
-                    query_buffer[query_buffer_length++] = q_row->bases[i];
+                if (q_row->bases[pos] != '-') {
+                    query_buffer[query_buffer_length++] = q_row->bases[pos];
                 }
             }
         }
@@ -115,6 +117,7 @@ static void paf_write_row(Alignment_Row *q_row, Alignment_Row *t_row, int64_t nu
 
     // finalize trailing event
     if (current_start < num_col && current_start >= 0 && current_event[0] != '.') {
+        int64_t i = num_col;
         // note, this code block is (must be) identical to above. todo: factor out
         if (cs_cigar) {
             query_buffer[query_buffer_length] = '\0';
