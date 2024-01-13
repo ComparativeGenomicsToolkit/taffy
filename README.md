@@ -365,7 +365,7 @@ with AlignmentReader(test_maf_file) as mp:
 The dictionary you see printed on the last line represents the header
 line of the file. 
 
-Okay, suppose instead of a MAF we want to load a TAF file. First, make a TAF file from the test maf file (in tests/) (from the command line). This file will also be created by the tests, so my already exist.
+Okay, suppose instead of a MAF we want to load a TAF file. First, make a TAF file from the test maf file (in tests/) (from the command line). This file will also be created by the tests, so it may already exist.
 
 ```
 taffy view --inputFile ./evolverMammals.maf --useCompression > ./evolverMammals.taf.gz
