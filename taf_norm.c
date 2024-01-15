@@ -144,6 +144,8 @@ static bool greedy_prune_by_gap(Alignment *alignment, int64_t maximum_gap_length
                 } 
                 if (row->r_row) {
                     row->r_row->l_row = NULL;
+                    free(row->r_row->left_gap_sequence);
+                    row->r_row->left_gap_sequence = NULL;                    
                 }
                 alignment_row_destruct(row);
                 ++to_prune_idx;
