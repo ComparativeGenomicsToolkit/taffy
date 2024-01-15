@@ -30,7 +30,7 @@ typedef struct _alignment {
 
 struct _row { // Each row encodes the information about an aligned sequence
     char *sequence_name; // name of sequence
-    int64_t start, length, sequence_length; // zero based, half open coordinates
+    int64_t start, length, sequence_length; // zero based, half open coordinates, length is the number of non gap bases in the row
     bool strand; // nonzero is "+" else "-"
     char *bases; // [A-Za-z*+]* string of bases and gaps representing the alignment of the row
     char *left_gap_sequence; // Optional interstitial gap sequence, which is the unaligned substring between this
@@ -41,6 +41,16 @@ struct _row { // Each row encodes the information about an aligned sequence
     int64_t bases_since_coordinates_reported; // this number is used by taf write coordinates to
     // indicate how many bases ago were the row's coordinates printed
 };
+
+/*
+ * Add nucleotide coloring to a character for pretty printing
+ */
+char *color_base_char(char base);
+
+/*
+ * Convert a nucleotide string into a colored string suitable for pretty printing.
+ */
+char *color_base_string(char *bases, int64_t length);
 
 /*
  * Make a tag
@@ -147,6 +157,11 @@ char *alignment_row_to_string(Alignment_Row *row);
 char *alignment_to_string(Alignment *alignment);
 
 /*
+ * Replace bases that match the reference with a * character.
+ */
+void alignment_mask_reference_bases(Alignment *alignment, char mask_char);
+
+/*
  * Read a maf header line
  */
 Tag *maf_read_header(LI *li);
@@ -165,6 +180,11 @@ void maf_write_header(Tag *tag, LW *lw);
  * Write a maf block
  */
 void maf_write_block(Alignment *alignment, LW *lw);
+
+/*
+ * As maf write block, but with option to output pretty colored bases.
+ */
+void maf_write_block2(Alignment *alignment, LW *lw, bool color_bases);
 
 /*
  * Write a block as PAF. Each PAF row reflects a pairwise alignment in the block.  The all_to_all flag
@@ -194,6 +214,12 @@ void taf_write_header(Tag *tag, LW *lw);
  */
 void taf_write_block(Alignment *p_alignment, Alignment *alignment, bool run_length_encode_bases,
                      int64_t repeat_coordinates_every_n_columns, LW *lw);
+
+/*
+ * As taf write block, but with option to pretty print the output
+ */
+void taf_write_block2(Alignment *p_alignment, Alignment *alignment, bool run_length_encode_bases,
+                      int64_t repeat_coordinates_every_n_columns, LW *lw, bool color_bases);
 
 
 // the following are low-level functions used in indexing.  they could

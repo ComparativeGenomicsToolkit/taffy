@@ -182,6 +182,7 @@ All Taffy utilities are run using `taffy <command>`, where the available command
     norm           normalize TAF blocks
     add-gap-bases  add sequences from HAL or FASTA files into TAF gaps
     index          create a .tai index (required for region extraction)
+    sort           sort the rows of a TAF file to a desired order           
     stats          print statistics of a TAF file
 ```
 

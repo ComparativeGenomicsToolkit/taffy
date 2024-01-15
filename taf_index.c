@@ -9,7 +9,7 @@
 #include <getopt.h>
 #include <time.h>
 
-static void usage() {
+static void usage(void) {
     fprintf(stderr, "taffy index [options]\n");
     fprintf(stderr, "Index a TAF or MAF file, output goes in <file>.tai\n");
     fprintf(stderr, "-i --inputFile : Input taf or maf file [REQUIRED]\n");

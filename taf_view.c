@@ -11,8 +11,11 @@
 #include <time.h>
 
 static int64_t repeat_coordinates_every_n_columns = 10000;
+static bool show_only_reference_differences = false;
+static bool show_only_lineage_differences = false;
+static stTree *phylogeny;
 
-static void usage() {
+static void usage(void) {
     fprintf(stderr, "taffy view [options]\n");
     fprintf(stderr, "Convert between TAF and MAF formats\n");
     fprintf(stderr, "-i --inputFile : Input TAF or MAF file to convert. If not specified reads from stdin\n");
@@ -23,10 +26,21 @@ static void usage() {
     fprintf(stderr, "-r --region  : Print only SEQ:START-END, where SEQ is a row-0 sequence name, and START-END are 0-based open-ended like BED\n");
     fprintf(stderr, "-s --repeatCoordinatesEveryNColumns : Repeat TAF coordinates of each sequence at least every n columns. By default: %" PRIi64 "\n", repeat_coordinates_every_n_columns);
     fprintf(stderr, "-u --runLengthEncodeBases : Run length encode bases in TAF\n");
+    fprintf(stderr, "-a --showOnlyReferenceDifferences : Replace matches with the reference (first row) with a * character\n");
+    fprintf(stderr, "-b --showOnlyLineageDifferences : Show only lineage changes, replacing identity with a * character.\n "
+                    "Requires the phylogeny to be specified and ancestors to be present\n");
+    fprintf(stderr, "-x --colorBases : Color bases in the output. THIS IS FOR VISUALIZATION ONLY - DOES NOT PRODUCE A VALID MAF/TAF\n");
+    fprintf(stderr, "-t --phylogeny [newick tree] : Specify a phylogeny for the alignment, where species names must be prefixes of sequence names\n");
     fprintf(stderr, "-c --useCompression : Write the output using bgzip compression.\n");
     fprintf(stderr, "-n --nameMapFile : Apply the given two-column tab-separated name mapping to all assembly names in alignment\n");
     fprintf(stderr, "-l --logLevel : Set the log level\n");
     fprintf(stderr, "-h --help : Print this help message\n");
+}
+
+static void modify_alignment(Alignment *alignment) {
+    if(show_only_reference_differences) {
+        alignment_mask_reference_bases(alignment, '*');
+    }
 }
 
 int taf_view_main(int argc, char *argv[]) {
@@ -38,13 +52,15 @@ int taf_view_main(int argc, char *argv[]) {
     char *logLevelString = NULL;
     char *inputFile = NULL;
     char *outputFile = NULL;
-    bool run_length_encode_bases = 0;
+    bool run_length_encode_bases = false;
     bool maf_output = false;
     bool paf_output = false;
     bool all_to_all_paf = false;
     char *region = NULL;
-    bool use_compression = 0;
+    bool use_compression = false;
     char *nameMapFile = NULL;
+    char *phylogeny_string = NULL;
+    static bool color_bases = false;
 
     ///////////////////////////////////////////////////////////////////////////
     // Parse the inputs
@@ -58,6 +74,10 @@ int taf_view_main(int argc, char *argv[]) {
                                                 { "paf", no_argument, 0, 'p' },
                                                 { "paf-all", no_argument, 0, 'P' },
                                                 { "runLengthEncodeBases", no_argument, 0, 'u' },
+                                                { "showOnlyReferenceDifferences", no_argument, 0, 'a' },
+                                                { "showOnlyLineageDifferences", no_argument, 0, 'b' },
+                                                { "colorBases", no_argument, 0, 'x' },
+                                                { "phylogeny", required_argument, 0, 't' },
                                                 { "repeatCoordinatesEveryNColumns", required_argument, 0, 's' },
                                                 { "region", required_argument, 0, 'r' },
                                                 { "useCompression", no_argument, 0, 'c' },
@@ -66,7 +86,7 @@ int taf_view_main(int argc, char *argv[]) {
                                                 { 0, 0, 0, 0 } };
 
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:o:mpaucs:r:n:h", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:o:mpaucs:r:n:habxt:", long_options, &option_index);
         if (key == -1) {
             break;
         }
@@ -93,6 +113,18 @@ int taf_view_main(int argc, char *argv[]) {
                 break;                
             case 'u':
                 run_length_encode_bases = 1;
+                break;
+            case 't':
+                phylogeny_string = optarg;
+                break;
+            case 'a':
+                show_only_reference_differences = 1;
+                break;
+            case 'b':
+                show_only_lineage_differences = 1;
+                break;
+            case 'x':
+                color_bases = 1;
                 break;
             case 's':
                 repeat_coordinates_every_n_columns = atol(optarg);
@@ -126,6 +158,12 @@ int taf_view_main(int argc, char *argv[]) {
     if (nameMapFile) {
         st_logInfo("Name map file string : %s\n", nameMapFile);
     }
+    if(phylogeny_string) {
+        st_logInfo("Phylogeny : %s\n", phylogeny_string);
+    }
+    st_logInfo("Show only reference differences : %s\n", show_only_reference_differences ? "true" : "false");
+    st_logInfo("Show only lineage differences : %s\n", show_only_lineage_differences ? "true" : "false");
+    st_logInfo("Color bases : %s\n", color_bases ? "true" : "false");
 
     //////////////////////////////////////////////
     // Read in the taf/maf blocks and convert to sequence of taf/maf blocks
@@ -142,6 +180,9 @@ int taf_view_main(int argc, char *argv[]) {
         fprintf(stderr, "Unable to open output file: %s\n", outputFile);
         return 1;
     }
+
+    // Parse the tree if present
+    phylogeny = phylogeny_string ? stTree_parseNewickString(phylogeny_string) : NULL;
 
     stHash *genome_name_map = NULL;
     if (nameMapFile != NULL) {
@@ -224,14 +265,17 @@ int taf_view_main(int argc, char *argv[]) {
         Alignment *p_alignment = NULL;
 
         while ((alignment = tai_next(tai_it, li)) != NULL) {
+            modify_alignment(alignment); // Make any changes to the alignment for output
+
             // apply the name mapping to the alignment block
             if (genome_name_map) {
                 apply_genome_name_mapping_to_alignment(genome_name_map, alignment);
             }
             if (taf_output) {
-                taf_write_block(p_alignment, alignment, run_length_encode_bases, repeat_coordinates_every_n_columns, output);
+                taf_write_block2(p_alignment, alignment, run_length_encode_bases,
+                                 repeat_coordinates_every_n_columns, output, color_bases);
             } else if (maf_output) {
-                maf_write_block(alignment, output);
+                maf_write_block2(alignment, output, color_bases);
             } else {
                 assert(paf_output == true);
                 paf_write_block(alignment, output, all_to_all_paf);
@@ -255,14 +299,17 @@ int taf_view_main(int argc, char *argv[]) {
         Alignment *alignment = NULL;
         Alignment *p_alignment = NULL;        
         while((alignment = taf_read_block(p_alignment, run_length_encode_bases, li)) != NULL) {
+            modify_alignment(alignment); // Make any changes to the alignment for output
+
             // apply the name mapping to the alignment block
             if (genome_name_map) {
                 apply_genome_name_mapping_to_alignment(genome_name_map, alignment);
             }
             if (taf_output) {
-                taf_write_block(p_alignment, alignment, run_length_encode_bases, repeat_coordinates_every_n_columns, output);
+                taf_write_block2(p_alignment, alignment, run_length_encode_bases,
+                                 repeat_coordinates_every_n_columns, output, color_bases);
             } else if (maf_output) {
-                maf_write_block(alignment, output);
+                maf_write_block2(alignment, output, color_bases);
             } else {
                 assert(paf_output == true);
                 paf_write_block(alignment, output, all_to_all_paf);
@@ -279,6 +326,8 @@ int taf_view_main(int argc, char *argv[]) {
         assert(maf_input == true);
         Alignment *alignment, *p_alignment = NULL;
         while((alignment = maf_read_block(li)) != NULL) {
+            modify_alignment(alignment); // Make any changes to the alignment for output
+
             // apply the name mapping to the alignment block
             if (genome_name_map) {
                 apply_genome_name_mapping_to_alignment(genome_name_map, alignment);
@@ -287,9 +336,10 @@ int taf_view_main(int argc, char *argv[]) {
                 alignment_link_adjacent(p_alignment, alignment, 1);
             }
             if (taf_output) {
-                taf_write_block(p_alignment, alignment, run_length_encode_bases, repeat_coordinates_every_n_columns, output);
+                taf_write_block2(p_alignment, alignment, run_length_encode_bases,
+                                 repeat_coordinates_every_n_columns, output, color_bases);
             } else if (maf_output) {
-                maf_write_block(alignment, output);
+                maf_write_block2(alignment, output, color_bases);
             } else {
                 assert(paf_output == true);
                 paf_write_block(alignment, output, all_to_all_paf);
