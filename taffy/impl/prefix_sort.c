@@ -92,3 +92,57 @@ void alignment_sort_the_rows(Alignment *p_alignment, Alignment *alignment, stLis
         alignment_link_adjacent(p_alignment, alignment, 1);
     }
 }
+
+void alignment_show_only_lineage_differences(Alignment *alignment, char mask_char, stList *sequence_prefixes, stList *tree_nodes) {
+    // First create map of tree nodes to bases
+    stHash *tree_nodes_to_bases = stHash_construct2(NULL, (void (*)(void *))stList_destruct);
+    Alignment_Row *row = alignment->row;
+    while(row != NULL) { // For each row
+        // Get corresponding tree node using sequence prefixes
+        int64_t i = alignment_row_get_closest_sequence_prefix(row, sequence_prefixes);
+        if(i != -1) { // We found it in the tree
+            // Add to the tree_nodes_to_bases map
+            stTree *node = stList_get(tree_nodes, i);
+            stList *ancestor_sequences = stHash_search(tree_nodes_to_bases, node);
+            if(ancestor_sequences == NULL) {
+                ancestor_sequences = stList_construct3(0, free);
+                stHash_insert(tree_nodes_to_bases, node, ancestor_sequences);
+            }
+            stList_append(ancestor_sequences, stString_copy(row->bases));
+        }
+        else {
+            st_logDebug("Alignment row sequence not found in tree: %s\n", row->sequence_name);
+        }
+        row = row->n_row;
+    }
+
+    // Now identify mutations
+    row = alignment->row;
+    while(row != NULL) { // For each row
+        //  Identify node in tree using prefix search
+        int64_t i = alignment_row_get_closest_sequence_prefix(row, sequence_prefixes);
+        if(i != -1) { // We found it in the tree
+            stTree *node = stList_get(tree_nodes, i);
+            stTree *ancestor = stTree_getParent(node);
+            if(ancestor != NULL) { // If we're not at the root of the tree - otherwise we must report the base
+                stList *ancestor_sequences = stHash_search(tree_nodes_to_bases, ancestor);
+                for(int64_t j=0; j<alignment->column_number; j++) { // For each alignment column
+                    char base = row->bases[j];
+                    if(base != '-') { // If not a gap base
+                        for (int64_t k = 0; k < stList_length(ancestor_sequences); k++) { // For each ancestor base
+                            char *ancestor_sequence = stList_get(ancestor_sequences, k);
+                            if(base == ancestor_sequence[j]) { // If identical to ancestor base
+                                row->bases[j] = mask_char; // Switch to a star character
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        } // If not found do nothing, as we log missing sequences in the loop above
+        row = row->n_row;
+    }
+
+    // Clean up
+    stHash_destruct(tree_nodes_to_bases);
+}
