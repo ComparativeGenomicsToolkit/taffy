@@ -157,9 +157,14 @@ char *alignment_row_to_string(Alignment_Row *row);
 char *alignment_to_string(Alignment *alignment);
 
 /*
- * Replace bases that match the reference with a * character.
+ * Replace bases that match the reference with a mask character.
  */
 void alignment_mask_reference_bases(Alignment *alignment, char mask_char);
+
+/*
+ * Replace bases that match their ancestral lineage with a mask character
+ */
+void alignment_show_only_lineage_differences(Alignment *alignment, char mask_char, stList *sequence_prefixes, stList *tree_nodes);
 
 /*
  * Read a maf header line
@@ -292,6 +297,41 @@ char *apply_genome_name_mapping(stHash *genome_name_map, char *input_name);
  * Apply the name mapping to an alignment block.
  */
 void apply_genome_name_mapping_to_alignment(stHash *genome_name_map, Alignment *alignment);
+
+/*
+ * Structure to represent a sequence prefix. A sequence of sequence prefixes
+ * are used to order the rows in each alignment block..
+ */
+typedef struct _Sequence_Prefix {
+    char *prefix; // The prefix string
+    int64_t prefix_length; // Length of the prefix string
+    int64_t index; // The index that a sequence matching the prefix should appear in an alignment block
+} Sequence_Prefix;
+
+Sequence_Prefix *sequence_prefix_construct(char *prefix, int64_t index);
+
+void sequence_prefix_destruct(Sequence_Prefix *sequence_prefix);
+
+/*
+ * Compare two sequence prefixes by their prefix strings
+ */
+int sequence_prefix_cmp_fn(Sequence_Prefix *p1, Sequence_Prefix *p2);
+
+/*
+ * Loads a list of sequence prefixes from a given file handle.
+ */
+stList *sequence_prefix_load(FILE *sort_fh);
+
+/*
+ * Gets the index in the list of the sequence prefix of the given row's sequence name.
+ */
+int64_t alignment_row_get_closest_sequence_prefix(Alignment_Row *row, stList *prefixes_to_sort_by);
+
+/*
+ * Sorts the rows of an alignment according to the given sequence prefixes. Reconnects the rows
+ * with the previous alignment in the process.
+ */
+void alignment_sort_the_rows(Alignment *p_alignment, Alignment *alignment, stList *prefixes_to_sort_by);
 
 #endif /* STTAF_H_ */
 

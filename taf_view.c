@@ -13,7 +13,9 @@
 static int64_t repeat_coordinates_every_n_columns = 10000;
 static bool show_only_reference_differences = false;
 static bool show_only_lineage_differences = false;
-static stTree *phylogeny;
+static stTree *phylogeny = NULL;
+static stList *sequence_prefixes = NULL;
+static stList *tree_nodes = NULL;
 
 static void usage(void) {
     fprintf(stderr, "taffy view [options]\n");
@@ -37,9 +39,34 @@ static void usage(void) {
     fprintf(stderr, "-h --help : Print this help message\n");
 }
 
+void getTreeNodesInList(stTree *root, stList *tree_nodes) {
+    stList_append(tree_nodes, root);
+    for (int i = 0; i < stTree_getChildNumber(root); i++) {
+        getTreeNodesInList(stTree_getChild(root, i), tree_nodes);
+    }
+}
+
+void get_sequence_prefixes_for_tree_nodes(void) {
+    // First get list of sequence prefixes to efficiently locate which sequence goes with which tree node
+    sequence_prefixes = stList_construct3(0, (void (*)(void *))sequence_prefix_destruct);
+    tree_nodes = stList_construct();
+    getTreeNodesInList(phylogeny, tree_nodes);
+    // For each tree node
+    for(int64_t i=0; i<stList_length(tree_nodes); i++) {
+        stTree *node = stList_get(tree_nodes, i);
+        // Make a sequence prefix object
+        stList_append(sequence_prefixes, sequence_prefix_construct(stString_copy(stTree_getLabel(node)), i));
+    }
+    // Sort the sequence prefixes
+    stList_sort(sequence_prefixes, (int (*)(const void *, const void *))sequence_prefix_cmp_fn);
+}
+
 static void modify_alignment(Alignment *alignment) {
     if(show_only_reference_differences) {
         alignment_mask_reference_bases(alignment, '*');
+    }
+    else if(show_only_lineage_differences) {
+        alignment_show_only_lineage_differences(alignment, '*', sequence_prefixes, tree_nodes);
     }
 }
 
@@ -182,7 +209,10 @@ int taf_view_main(int argc, char *argv[]) {
     }
 
     // Parse the tree if present
-    phylogeny = phylogeny_string ? stTree_parseNewickString(phylogeny_string) : NULL;
+    if(phylogeny_string) {
+        phylogeny = stTree_parseNewickString(phylogeny_string);
+        get_sequence_prefixes_for_tree_nodes();
+    }
 
     stHash *genome_name_map = NULL;
     if (nameMapFile != NULL) {
@@ -366,6 +396,12 @@ int taf_view_main(int argc, char *argv[]) {
 
     if (genome_name_map != NULL) {
         stHash_destruct(genome_name_map);
+    }
+
+    if(phylogeny_string) {
+        stList_destruct(sequence_prefixes);
+        stList_destruct(tree_nodes);
+        stTree_destruct(phylogeny);
     }
 
     st_logInfo("taffy view is done, %" PRIi64 " seconds have elapsed\n", time(NULL) - startTime);
