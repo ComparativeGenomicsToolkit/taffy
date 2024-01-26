@@ -81,13 +81,67 @@ Tag *maf_read_header(LI *li) {
 
 void maf_write_block(Alignment *alignment, LW *lw) {
     LW_write(lw, "a\n");
+
+    // check for base quality ('q' tag). Just looking at position[0] to not be too inefficient
+    // so the assumption is either you have a quality for every base in every column, or nothing
+    // will fail on an error if this doesn't hold (but we can relax if needed later)
+    bool has_qualities = false;
+    Tag **col_qualities = NULL;
+    char *qual_buffer = NULL;
+    if (alignment->column_number > 0) { 
+        for (Tag *col_tag = alignment->column_tags[0]; col_tag && !has_qualities; col_tag = col_tag->n_tag) {
+            if (strcmp(col_tag->key, TAF_BASE_QUALITY_TAG_KEY) == 0) {
+                has_qualities = true;
+            }
+        }
+        if (has_qualities) {
+            col_qualities = (Tag**)st_calloc(alignment->column_number, sizeof(Tag*));
+            qual_buffer = (char*)st_calloc(alignment->column_number + 1, sizeof(char));
+            // if we have qualites, fill in col_qualities so we don't have to fish for the tags again
+            for (int64_t col = 0; col < alignment->column_number; ++col) {
+                for (Tag *col_tag = alignment->column_tags[col]; col_tag && !col_qualities[col]; col_tag = col_tag->n_tag) {
+                    if (strcmp(col_tag->key, TAF_BASE_QUALITY_TAG_KEY) == 0) {
+                        col_qualities[col] = col_tag;
+                    }
+                }
+                if (col_qualities[col] == NULL) {
+                    // see comment above
+                    fprintf(stderr, "Error: missing base quality at column in block with base qualities\n");
+                    exit(1);
+                }
+            }
+        }
+    }
+    
     Alignment_Row *row = alignment->row;
+    int64_t row_idx = 0;
     while(row != NULL) {
         LW_write(lw, "s\t%s\t%" PRIi64 "\t%" PRIi64 "\t%s\t%" PRIi64 "\t%s\n", row->sequence_name, row->start, row->length,
                 row->strand ? "+" : "-", row->sequence_length, row->bases);
+
+        if (has_qualities && row->length > 0) {
+            int64_t i = 0;
+            for (int64_t col = 0; col < alignment->column_number; ++col) {
+                if (row->bases[col] != '-') {
+                    // this is an ascii-shifted phred score
+                    unsigned char qual = col_qualities[col]->value[row_idx] - (unsigned char)33;
+                    // do the transformation shown here
+                    // https://genome.ucsc.edu/FAQ/FAQformat.html#format5
+                    // MAF quality value = min( floor(actual quality value/5), 9 )
+                    qual_buffer[i++] = qual >= 99 ? 'F' : (qual >= 45 ? '9' : '0' + qual/5);
+                }
+            }
+            assert(i == row->length);
+            qual_buffer[i] = '\0';
+            LW_write(lw, "q\t%s\t%s\n", row->sequence_name, qual_buffer);
+        }
+        
         row = row->n_row;
+        ++row_idx;
     }
     LW_write(lw, "\n"); // Add a blank line at the end of the block
+    free(qual_buffer);
+    free(col_qualities);
 }
 
 void write_header(Tag *tag, LW *lw, char *header_prefix, char *delimiter, char *end);
