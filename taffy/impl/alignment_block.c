@@ -6,6 +6,8 @@ void tag_destruct(Tag *tag) {
     while(tag != NULL) {
         Tag *p_tag = tag;
         tag = tag->n_tag;
+        free(p_tag->key);
+        free(p_tag->value);
         free(p_tag);
     }
 }
