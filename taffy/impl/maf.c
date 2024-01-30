@@ -135,7 +135,7 @@ void maf_write_block(Alignment *alignment, LW *lw) {
             }
             assert(i == alignment->column_number);
             qual_buffer[i] = '\0';
-            LW_write(lw, "q\t%s\t%s\n", row->sequence_name, qual_buffer);
+            LW_write(lw, "q\t%s\t\t\t\t\t%s\n", row->sequence_name, qual_buffer);
         }
         
         row = row->n_row;
