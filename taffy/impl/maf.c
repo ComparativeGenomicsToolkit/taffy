@@ -129,9 +129,11 @@ void maf_write_block(Alignment *alignment, LW *lw) {
                     // https://genome.ucsc.edu/FAQ/FAQformat.html#format5
                     // MAF quality value = min( floor(actual quality value/5), 9 )
                     qual_buffer[i++] = qual >= 99 ? 'F' : (qual >= 45 ? '9' : '0' + qual/5);
+                } else {
+                    qual_buffer[i++] = '-';
                 }
             }
-            assert(i == row->length);
+            assert(i == alignment->column_number);
             qual_buffer[i] = '\0';
             LW_write(lw, "q\t%s\t%s\n", row->sequence_name, qual_buffer);
         }
