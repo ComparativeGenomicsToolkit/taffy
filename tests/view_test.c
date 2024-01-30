@@ -72,8 +72,20 @@ static void test_paf(CuTest *testCase) {
 
 }
 
+static void test_maf_quals(CuTest *testCase) {
+    char *example_file = "./tests/qual.maf";
+    char *output_file = "./tests/qual.out.maf";
+    char *truth_file = "./tests/qual.maf";
+    int i = st_system("./bin/taffy view -i %s -m > %s", example_file, output_file);
+    CuAssertIntEquals(testCase, 0, i); // return value should be zero
+    int diff_ret = st_system("diff %s %s", output_file, truth_file);
+    CuAssertIntEquals(testCase, 0, diff_ret); // return value should be zero if files sames                
+    st_system("rm -f %s", output_file);        
+}
+
 CuSuite* view_test_suite(void) {
     CuSuite* suite = CuSuiteNew();
     SUITE_ADD_TEST(suite, test_paf);
+    SUITE_ADD_TEST(suite, test_maf_quals);    
     return suite;
 }

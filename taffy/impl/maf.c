@@ -5,6 +5,36 @@
 #include "sonLib.h"
 #include "line_iterator.h"
 
+static void set_maf_qualities(Alignment *alignment, stList* row_qualities, stList* row_quality_rows) {
+    // transpose our row qualities into the tags.
+    // first, make a tag for each quality
+    for (int64_t i = 0; i < alignment->column_number; ++i) {
+        char *column_qualities = (char*)st_calloc(alignment->row_number, sizeof(char));
+        int64_t col_row_idx = 0;
+        for (int64_t j = 0; j < alignment->row_number; ++j) {
+            char qual = 'F'; // todo: is there a better default?
+            if (col_row_idx < stList_length(row_quality_rows) &&
+                j == (int64_t)stList_get(row_quality_rows, col_row_idx)) {
+                char* row_quals = (char*)stList_get(row_qualities, col_row_idx);
+                qual = row_quals[i];
+                // clamp it to 0-9
+                if (qual < '0') {                    
+                    qual = '0';
+                } else if (qual > '9') {
+                    qual = '9';
+                }
+                ++col_row_idx;
+            }
+            // convert to ascii phred (which is bounded between 0x21 (!) and 0x7e (~)
+            column_qualities[j] = qual == 'F' ? '~' : '!' + (char)(5 * (qual - '0'));
+        }
+        alignment->column_tags[i] = tag_construct(TAF_BASE_QUALITY_TAG_KEY, column_qualities, NULL);
+        free(column_qualities);
+    }
+    stList_destruct(row_qualities);
+    stList_destruct(row_quality_rows);
+}
+
 Alignment *maf_read_block(LI *li) {
     while(1) {
         char *line = LI_get_next_line(li);
@@ -21,42 +51,70 @@ Alignment *maf_read_block(LI *li) {
             stList_destruct(tokens);
             Alignment *alignment = st_calloc(1, sizeof(Alignment));
             Alignment_Row **p_row = &(alignment->row);
+            Alignment_Row *last_row = NULL;
+            stList *row_qualities = NULL;
+            stList *row_quality_rows = NULL;
             while(1) {
                 line = LI_get_next_line(li);
                 if(line == NULL) {
+                    if (row_qualities != NULL) {
+                        set_maf_qualities(alignment, row_qualities, row_quality_rows);
+                    }
                     return alignment;
                 }
                 tokens = stString_split(line);
                 free(line);
                 if(stList_length(tokens) == 0) {
                     stList_destruct(tokens);
+                    if (row_qualities != NULL) {
+                        set_maf_qualities(alignment, row_qualities, row_quality_rows);
+                    }                    
                     return alignment;
                 }
-                if(strcmp(stList_get(tokens, 0), "s") != 0) {
+                if(strcmp(stList_get(tokens, 0), "s") == 0) {
+                    assert(strcmp(stList_get(tokens, 0), "s") == 0); // Must be an "s" line
+                    Alignment_Row *row = st_calloc(1, sizeof(Alignment_Row));
+                    alignment->row_number++;
+                    *p_row = row;
+                    p_row = &(row->n_row);
+                    last_row = row;
+                    row->sequence_name = stString_copy(stList_get(tokens, 1));
+                    row->start = atol(stList_get(tokens, 2));
+                    row->length = atol(stList_get(tokens, 3));
+                    assert(strcmp(stList_get(tokens, 4), "+") == 0 || strcmp(stList_get(tokens, 4), "-") == 0);
+                    row->strand = strcmp(stList_get(tokens, 4), "+") == 0;
+                    row->sequence_length = atol(stList_get(tokens, 5));
+                    row->bases = stString_copy(stList_get(tokens, 6));
+                    stList_destruct(tokens);
+                    if(alignment->row_number == 1) {
+                        alignment->column_number = strlen(row->bases);
+                        alignment->column_tags = st_calloc(alignment->column_number, sizeof(Tag *));
+                    }
+                    else {
+                        assert(alignment->column_number == strlen(row->bases));
+                    }
+                } else if(strcmp(stList_get(tokens, 0), TAF_BASE_QUALITY_TAG_KEY) == 0) {
+                    if (row_qualities == NULL) {
+                        row_qualities = stList_construct3(0, free);
+                        row_quality_rows = stList_construct();
+                    }
+                    char *qual_seq_name = stList_get(tokens, 1);
+                    if (last_row == NULL || strcmp(qual_seq_name, last_row->sequence_name) != 0) {
+                        fprintf(stderr, "Error: q line invalid because sequence name does not match previous s line: %s\n", line);
+                        exit(1);
+                    }
+                    assert(stList_length(tokens) == 3);
+                    stList_append(row_qualities, stString_copy(stList_get(tokens, 2)));
+                    stList_append(row_quality_rows, (void*)(alignment->row_number - 1));
+                    stList_destruct(tokens);
+                } else {
                     assert(strcmp(stList_get(tokens, 0), "i") == 0 || strcmp(stList_get(tokens, 0), "e") == 0); // Must be an "i" or "e" line, which we ignore
                     stList_destruct(tokens);
                     continue;
                 }
-                assert(strcmp(stList_get(tokens, 0), "s") == 0); // Must be an "s" line
-                Alignment_Row *row = st_calloc(1, sizeof(Alignment_Row));
-                alignment->row_number++;
-                *p_row = row;
-                p_row = &(row->n_row);
-                row->sequence_name = stString_copy(stList_get(tokens, 1));
-                row->start = atol(stList_get(tokens, 2));
-                row->length = atol(stList_get(tokens, 3));
-                assert(strcmp(stList_get(tokens, 4), "+") == 0 || strcmp(stList_get(tokens, 4), "-") == 0);
-                row->strand = strcmp(stList_get(tokens, 4), "+") == 0;
-                row->sequence_length = atol(stList_get(tokens, 5));
-                row->bases = stString_copy(stList_get(tokens, 6));
-                stList_destruct(tokens);
-                if(alignment->row_number == 1) {
-                    alignment->column_number = strlen(row->bases);
-                    alignment->column_tags = st_calloc(alignment->column_number, sizeof(Tag *));
-                }
-                else {
-                    assert(alignment->column_number == strlen(row->bases));
-                }
+            }
+            if (row_qualities != NULL) {
+                set_maf_qualities(alignment, row_qualities, row_quality_rows);
             }
             return alignment;
         }
