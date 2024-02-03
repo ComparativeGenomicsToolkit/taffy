@@ -25,6 +25,7 @@ static void usage(void) {
     fprintf(stderr, "-m --maf : Output in MAF format [default=TAF format]\n");
     fprintf(stderr, "-p --paf : Output in all-to-one (referenced on first row) PAF format [default=TAF format]\n");
     fprintf(stderr, "-P --paf-all : Output in all-to-all PAF format [default=TAF format]\n");
+    fprintf(stderr, "-C --cs : Output PAF cigars in cs instead of cg format\n");
     fprintf(stderr, "-r --region  : Print only SEQ:START-END, where SEQ is a row-0 sequence name, and START-END are 0-based open-ended like BED\n");
     fprintf(stderr, "-s --repeatCoordinatesEveryNColumns : Repeat TAF coordinates of each sequence at least every n columns. By default: %" PRIi64 "\n", repeat_coordinates_every_n_columns);
     fprintf(stderr, "-u --runLengthEncodeBases : Run length encode output bases in TAF\n");
@@ -83,6 +84,7 @@ int taf_view_main(int argc, char *argv[]) {
     bool maf_output = false;
     bool paf_output = false;
     bool all_to_all_paf = false;
+    bool paf_cs = false;
     char *region = NULL;
     bool use_compression = false;
     char *nameMapFile = NULL;
@@ -100,6 +102,7 @@ int taf_view_main(int argc, char *argv[]) {
                                                 { "maf", no_argument, 0, 'm' },
                                                 { "paf", no_argument, 0, 'p' },
                                                 { "paf-all", no_argument, 0, 'P' },
+                                                { "cs", no_argument, 0, 'C'},
                                                 { "runLengthEncodeBases", no_argument, 0, 'u' },
                                                 { "showOnlyReferenceDifferences", no_argument, 0, 'a' },
                                                 { "showOnlyLineageDifferences", no_argument, 0, 'b' },
@@ -113,7 +116,7 @@ int taf_view_main(int argc, char *argv[]) {
                                                 { 0, 0, 0, 0 } };
 
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:o:mpaucs:r:n:habxt:", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:o:mPpCaucs:r:n:habxt:", long_options, &option_index);
         if (key == -1) {
             break;
         }
@@ -137,7 +140,9 @@ int taf_view_main(int argc, char *argv[]) {
             case 'P':
                 paf_output = 1;
                 all_to_all_paf = 1;
-                break;                
+            case 'C':
+                paf_cs = true;
+                break;
             case 'u':
                 run_length_encode_output_bases = 1;
                 break;
@@ -195,6 +200,11 @@ int taf_view_main(int argc, char *argv[]) {
     //////////////////////////////////////////////
     // Read in the taf/maf blocks and convert to sequence of taf/maf blocks
     //////////////////////////////////////////////
+
+    if (paf_cs && !paf_output) {
+        fprintf(stderr, "-C/--cs cannot be used without either -p or -P\n");
+        return 1;
+    }
 
     FILE *input = inputFile == NULL ? stdin : fopen(inputFile, "r");
     if (input == NULL) {
@@ -311,7 +321,7 @@ int taf_view_main(int argc, char *argv[]) {
                 maf_write_block2(alignment, output, color_bases);
             } else {
                 assert(paf_output == true);
-                paf_write_block(alignment, output, all_to_all_paf);
+                paf_write_block(alignment, output, all_to_all_paf, paf_cs);
             }
             if (p_alignment) {
                 alignment_destruct(p_alignment, true);
@@ -345,7 +355,7 @@ int taf_view_main(int argc, char *argv[]) {
                 maf_write_block2(alignment, output, color_bases);
             } else {
                 assert(paf_output == true);
-                paf_write_block(alignment, output, all_to_all_paf);
+                paf_write_block(alignment, output, all_to_all_paf, paf_cs);
             }                    
             if (p_alignment) {
                 alignment_destruct(p_alignment, true);
@@ -375,7 +385,7 @@ int taf_view_main(int argc, char *argv[]) {
                 maf_write_block2(alignment, output, color_bases);
             } else {
                 assert(paf_output == true);
-                paf_write_block(alignment, output, all_to_all_paf);
+                paf_write_block(alignment, output, all_to_all_paf, paf_cs);
             }
             if(p_alignment != NULL) {
                 alignment_destruct(p_alignment, 1);
