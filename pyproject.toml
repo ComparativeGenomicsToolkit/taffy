@@ -22,5 +22,5 @@ classifiers = [
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/ComparativeGenomicsToolkit/taf"
-"Bug Tracker" = "https://github.com/ComparativeGenomicsToolkit/taf/issues"
+"Homepage" = "https://github.com/ComparativeGenomicsToolkit/taffy"
+"Bug Tracker" = "https://github.com/ComparativeGenomicsToolkit/taffy/issues"

@@ -12,6 +12,7 @@ CuSuite* taf_test_suite(void);
 CuSuite* ond_test_suite(void);
 CuSuite* normalize_test_suite(void);
 CuSuite* view_test_suite(void);
+CuSuite* sort_test_suite(void);
 
 static int allTests(void) {
     CuString *output = CuStringNew();
@@ -21,6 +22,7 @@ static int allTests(void) {
     CuSuiteAddSuite(suite, ond_test_suite());
     CuSuiteAddSuite(suite, normalize_test_suite());
     CuSuiteAddSuite(suite, view_test_suite());
+    CuSuiteAddSuite(suite, sort_test_suite());
 
     CuSuiteRun(suite);
     CuSuiteSummary(suite, output);

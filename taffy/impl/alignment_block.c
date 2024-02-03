@@ -2,6 +2,48 @@
 #include "ond.h"
 #include "sonLib.h"
 
+#define ANSI_COLOR_RED     "\x1b[41m"
+#define ANSI_COLOR_GREEN   "\x1b[42m"
+#define ANSI_COLOR_YELLOW  "\x1b[43m"
+#define ANSI_COLOR_BLUE    "\x1b[44m"
+#define ANSI_COLOR_MAGENTA "\x1b[45m"
+#define ANSI_COLOR_CYAN    "\x1b[46m"
+#define ANSI_COLOR_RESET   "\x1b[0m"
+
+char *color_base_char(char base) {
+    switch(base) {
+        case 'A':
+        case 'a':
+            return stString_print(ANSI_COLOR_RED "%c" ANSI_COLOR_RESET, base);
+        case 'C':
+        case 'c':
+            return stString_print(ANSI_COLOR_BLUE "%c" ANSI_COLOR_RESET, base);
+        case 'G':
+        case 'g':
+            return stString_print(ANSI_COLOR_YELLOW "%c" ANSI_COLOR_RESET, base);
+        case 'T':
+        case 't':
+            return stString_print(ANSI_COLOR_GREEN "%c" ANSI_COLOR_RESET, base);
+        case '*':
+            return stString_print(ANSI_COLOR_MAGENTA "%c" ANSI_COLOR_RESET, base);
+        case '-':
+            return stString_print(ANSI_COLOR_CYAN "%c" ANSI_COLOR_RESET, base);
+        default:
+            return stString_print("%c", base);
+    }
+}
+
+char *color_base_string(char *bases, int64_t length) {
+    stList *colored_base_strings = stList_construct3(0, free);
+    for(int64_t i=0; i<length; i++) {
+        char *base_string = color_base_char(bases[i]);
+        stList_append(colored_base_strings, base_string);
+    }
+    char *colored_bases = stString_join2("", colored_base_strings);
+    stList_destruct(colored_base_strings);
+    return colored_bases;
+}
+
 void tag_destruct(Tag *tag) {
     while(tag != NULL) {
         Tag *p_tag = tag;
@@ -94,13 +136,26 @@ void alignment_destruct(Alignment *alignment, bool cleanup_rows) {
     free(alignment);
 }
 
-static stList *get_rows_in_a_list(Alignment_Row *row) {
+stList *alignment_get_rows_in_a_list(Alignment_Row *row) {
     stList *l = stList_construct();
     while(row != NULL) {
         stList_append(l, row);
         row = row->n_row;
     }
     return l;
+}
+
+void alignment_set_rows(Alignment *alignment, stList *rows) {
+    alignment->row_number = stList_length(rows);
+    if(stList_length(rows) > 0) {
+        alignment->row = stList_get(rows, 0);
+        for (int64_t i = 1; i < stList_length(rows); i++) {
+            Alignment_Row *p_row = stList_get(rows, i-1);
+            Alignment_Row *row = stList_get(rows, i);
+            p_row->n_row = row;
+            row->n_row = NULL;
+        }
+    }
 }
 
 bool alignment_row_is_predecessor(Alignment_Row *left_row, Alignment_Row *right_row) {
@@ -122,8 +177,8 @@ char *alignment_row_to_string(Alignment_Row *row) {
 }
 
 void alignment_link_adjacent(Alignment *left_alignment, Alignment *right_alignment, bool allow_row_substitutions) {
-    stList *left_rows = get_rows_in_a_list(left_alignment->row);
-    stList *right_rows = get_rows_in_a_list(right_alignment->row);
+    stList *left_rows = alignment_get_rows_in_a_list(left_alignment->row);
+    stList *right_rows = alignment_get_rows_in_a_list(right_alignment->row);
     // get the alignment of the rows
     WFA *wfa = WFA_construct(stList_getBackingArray(left_rows), stList_getBackingArray(right_rows),
                              stList_length(left_rows), stList_length(right_rows),
@@ -190,6 +245,25 @@ char *alignment_to_string(Alignment *alignment) {
     char *block_string = stString_join2("\n", strings);
     stList_destruct(strings);
     return block_string;
+}
+
+void alignment_row_mask_identical_bases(Alignment *alignment, Alignment_Row *ref, Alignment_Row *non_ref, char mask_char) {
+    for(int64_t i=0; i<alignment->column_number; i++) {
+        if(ref->bases[i] == non_ref->bases[i]) {
+            non_ref->bases[i] = mask_char;
+        }
+    }
+}
+
+void alignment_mask_reference_bases(Alignment *alignment, char mask_char) {
+    Alignment_Row *ref_row = alignment->row;
+    if(ref_row) {
+        Alignment_Row *non_ref_row = ref_row->n_row;
+        while (non_ref_row != NULL) {
+            alignment_row_mask_identical_bases(alignment, ref_row, non_ref_row, mask_char);
+            non_ref_row = non_ref_row->n_row;
+        }
+    }
 }
 
 /*

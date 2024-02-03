@@ -30,7 +30,7 @@ typedef struct _alignment {
 
 struct _row { // Each row encodes the information about an aligned sequence
     char *sequence_name; // name of sequence
-    int64_t start, length, sequence_length; // zero based, half open coordinates
+    int64_t start, length, sequence_length; // zero based, half open coordinates, length is the number of non gap bases in the row
     bool strand; // nonzero is "+" else "-"
     char *bases; // [A-Za-z*+]* string of bases and gaps representing the alignment of the row
     char *left_gap_sequence; // Optional interstitial gap sequence, which is the unaligned substring between this
@@ -41,6 +41,16 @@ struct _row { // Each row encodes the information about an aligned sequence
     int64_t bases_since_coordinates_reported; // this number is used by taf write coordinates to
     // indicate how many bases ago were the row's coordinates printed
 };
+
+/*
+ * Add nucleotide coloring to a character for pretty printing
+ */
+char *color_base_char(char base);
+
+/*
+ * Convert a nucleotide string into a colored string suitable for pretty printing.
+ */
+char *color_base_string(char *bases, int64_t length);
 
 /*
  * Make a tag
@@ -105,6 +115,16 @@ int64_t alignment_number_of_common_rows(Alignment *left_alignment, Alignment *ri
 Alignment *alignment_merge_adjacent(Alignment *left_alignment, Alignment *right_alignment);
 
 /*
+ * Get the rows of the alignment in a list.
+ */
+stList *alignment_get_rows_in_a_list(Alignment_Row *row);
+
+/*
+ * Set the rows in the alignment given a list of rows
+ */
+void alignment_set_rows(Alignment *alignment, stList *rows);
+
+/*
  * Read a column of the alignment into the buffer. The buffer must be initialized and be at least
  * of length alignment->row_number.
  */
@@ -137,6 +157,16 @@ char *alignment_row_to_string(Alignment_Row *row);
 char *alignment_to_string(Alignment *alignment);
 
 /*
+ * Replace bases that match the reference with a mask character.
+ */
+void alignment_mask_reference_bases(Alignment *alignment, char mask_char);
+
+/*
+ * Replace bases that match their ancestral lineage with a mask character
+ */
+void alignment_show_only_lineage_differences(Alignment *alignment, char mask_char, stList *sequence_prefixes, stList *tree_nodes);
+
+/*
  * Read a maf header line
  */
 Tag *maf_read_header(LI *li);
@@ -155,6 +185,11 @@ void maf_write_header(Tag *tag, LW *lw);
  * Write a maf block
  */
 void maf_write_block(Alignment *alignment, LW *lw);
+
+/*
+ * As maf write block, but with option to output pretty colored bases.
+ */
+void maf_write_block2(Alignment *alignment, LW *lw, bool color_bases);
 
 /*
  * Write a block as PAF. Each PAF row reflects a pairwise alignment in the block.  The all_to_all flag
@@ -184,6 +219,12 @@ void taf_write_header(Tag *tag, LW *lw);
  */
 void taf_write_block(Alignment *p_alignment, Alignment *alignment, bool run_length_encode_bases,
                      int64_t repeat_coordinates_every_n_columns, LW *lw);
+
+/*
+ * As taf write block, but with option to pretty print the output
+ */
+void taf_write_block2(Alignment *p_alignment, Alignment *alignment, bool run_length_encode_bases,
+                      int64_t repeat_coordinates_every_n_columns, LW *lw, bool color_bases);
 
 
 // the following are low-level functions used in indexing.  they could
@@ -256,6 +297,41 @@ char *apply_genome_name_mapping(stHash *genome_name_map, char *input_name);
  * Apply the name mapping to an alignment block.
  */
 void apply_genome_name_mapping_to_alignment(stHash *genome_name_map, Alignment *alignment);
+
+/*
+ * Structure to represent a sequence prefix. A sequence of sequence prefixes
+ * are used to order the rows in each alignment block..
+ */
+typedef struct _Sequence_Prefix {
+    char *prefix; // The prefix string
+    int64_t prefix_length; // Length of the prefix string
+    int64_t index; // The index that a sequence matching the prefix should appear in an alignment block
+} Sequence_Prefix;
+
+Sequence_Prefix *sequence_prefix_construct(char *prefix, int64_t index);
+
+void sequence_prefix_destruct(Sequence_Prefix *sequence_prefix);
+
+/*
+ * Compare two sequence prefixes by their prefix strings
+ */
+int sequence_prefix_cmp_fn(Sequence_Prefix *p1, Sequence_Prefix *p2);
+
+/*
+ * Loads a list of sequence prefixes from a given file handle.
+ */
+stList *sequence_prefix_load(FILE *sort_fh);
+
+/*
+ * Gets the index in the list of the sequence prefix of the given row's sequence name.
+ */
+int64_t alignment_row_get_closest_sequence_prefix(Alignment_Row *row, stList *prefixes_to_sort_by);
+
+/*
+ * Sorts the rows of an alignment according to the given sequence prefixes. Reconnects the rows
+ * with the previous alignment in the process.
+ */
+void alignment_sort_the_rows(Alignment *p_alignment, Alignment *alignment, stList *prefixes_to_sort_by);
 
 #endif /* STTAF_H_ */
 

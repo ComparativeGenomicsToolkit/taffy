@@ -182,11 +182,14 @@ All Taffy utilities are run using `taffy <command>`, where the available command
     norm           normalize TAF blocks
     add-gap-bases  add sequences from HAL or FASTA files into TAF gaps
     index          create a .tai index (required for region extraction)
+    sort           sort the rows of a TAF file to a desired order           
     stats          print statistics of a TAF file
 ```
 
 Taffy supports both uncompressed and [bgzipped](http://www.htslib.org/doc/bgzip.html) input (though Taffy must be built
 with [htslib](http://www.htslib.org/) for bgzip support).
+
+## Taffy View
 
 For example, to convert a maf file to a taf use:
 
@@ -196,11 +199,70 @@ To go back to maf use:
 
     taffy view -i TAF_FILE -m
 
+Taffy, view also has a number of nice options, for example to display only mismatches to the chosen reference sequence (first row of the file), or to only show inferred lineage mutations. For example, if this is an input alignment block (in MAF format):
+
+```asm
+a
+s	Anc0.Anc0refChr0	0	50	+	4151	GTCAAGCTCAGTAGATACTGGATTAGGAATTCATGAGTTAAGCTGTAGCC
+s	Anc1.Anc1refChr1	292714	50	+	296994	GTCAAGCTCAGTAGATACTGGATTAGGAATTCATGAGTTAAGCTGTAGCC
+s	Anc2.Anc2refChr1	5	50	+	4655	GTCAAGCTCAGTTGATGCTGGATTAGGAATTCATGAGTTAAGCTGTAGTC
+s	mr.mrrefChr1	178277	50	+	182340	GTCAAGCTCTGTACATACTAGATTGGACATTCATGGATGAAACTGTGACT
+s	simCow_chr6.simCow.chr6	5045	50	-	602619	GTGAAGCTCAGTTGATGCTGGATTGGGAACTCATGAGTTAAGCTGTAAGC
+s	simDog_chr6.simDog.chr6	589129	50	+	593897	GTCAAGCTCAGTTGGTGCTGGATTAAGAATTCATGAGTTAGGCTGCAGTC
+s	simHuman_chr6.simHuman.chr6	597375	50	+	601863	GTCAAGCTCAGTAGATATTGGATTAGGAATTCATAAGTTAACCTGTAGCC
+s	simMouse_chr6.simMouse.chr6	630640	50	+	636262	GTCAAGCATTGTACATACTAGATTGGACATTCATGGATGACAATGTGACT
+s	simRat_chr6.simRat.chr6	642153	50	+	647215	GTCAAGCTCTGTAAATAGTAGATTGGACATTCATGGATGAAACTGTGCCT
+```
+
+Then running 
+
+    taffy view -i TAF_FILE -m -a
+
+Using -a option to only show differences to the reference (first alignemnt row), will result in:
+
+```asm
+a
+s	Anc0.Anc0refChr0	0	50	+	4151	GTCAAGCTCAGTAGATACTGGATTAGGAATTCATGAGTTAAGCTGTAGCC
+s	Anc1.Anc1refChr1	292714	50	+	296994	**************************************************
+s	Anc2.Anc2refChr1	5	50	+	4655	************T***G*******************************T*
+s	mr.mrrefChr1	178277	50	+	182340	*********T***C*****A****G*AC*******GA*G**A****GA*T
+s	simCow_chr6.simCow.chr6	5045	50	-	602619	**G*********T***G*******G****C*****************AG*
+s	simDog_chr6.simDog.chr6	589129	50	+	593897	************T*G*G********A**************G****C**T*
+s	simHuman_chr6.simHuman.chr6	597375	50	+	601863	*****************T****************A******C********
+s	simMouse_chr6.simMouse.chr6	630640	50	+	636262	*******ATT***C*****A****G*AC*******GA*G*CAA***GA*T
+s	simRat_chr6.simRat.chr6	642153	50	+	647215	*********T***A***G*A****G*AC*******GA*G**A****GC*T
+```
+
+Similarly running
+
+    taffy view -i TAF_FILE -m -b -t NEWICK_TREE_STRING
+
+Will result in showing only substitutions inferred along the lineages of the tree:
+
+```asm
+a
+s	Anc0.Anc0refChr0	0	50	+	4151	GTCAAGCTCAGTAGATACTGGATTAGGAATTCATGAGTTAAGCTGTAGCC
+s	Anc1.Anc1refChr1	292714	50	+	296994	**************************************************
+s	Anc2.Anc2refChr1	5	50	+	4655	************T***G*******************************T*
+s	mr.mrrefChr1	178277	50	+	182340	*********T***C*****A****G*AC*******GA*G**A****GA*T
+s	simCow_chr6.simCow.chr6	5045	50	-	602619	**G*********************G****C*****************AG*
+s	simDog_chr6.simDog.chr6	589129	50	+	593897	**************G**********A**************G****C****
+s	simHuman_chr6.simHuman.chr6	597375	50	+	601863	*****************T****************A******C********
+s	simMouse_chr6.simMouse.chr6	630640	50	+	636262	*******AT*******************************C*A*******
+s	simRat_chr6.simRat.chr6	642153	50	+	647215	*************A***G*****************************C**
+```
+
+Note this requires specifying ancestor sequences in the tree and having them correspond to the names of the sequences in the input tree.
+
+## Taffy Add-Gap-Bases
+
 There is also a utility for adding sequences between blocks to a taf file
 
     taffy add-gap-bases SEQ_FILES -i TAF_FILE
 
-And finally, a utility to merge together short alignment blocks to create a more
+## Taffy Norm
+
+There is also a utility to merge together short alignment blocks to create a more
 "normalized" maf/taf file:
  
     taffy norm
@@ -212,6 +274,14 @@ For example, to normalize a maf file do the following:
 `taffy view` converts MAF_FILE into taf, `taffy add-gap-bases` adds in missing
 unaligned sequences between maf blocks and `taffy norm` then merges together the blocks. The 
 `-k` option causes the output to be in maf format.
+
+## Taffy Sort
+
+It can be useful to sort the rows of an alignment. For this we have `taffy sort`. For example:
+
+    taffy view -i MAF_FILE | taffy sort -n SORT_FILE | taffy view -m
+
+Taffy view first converts the input maf to TAF, taffy sort then sorts the rows of the taf according to a given file and finally the last taffy view pipes the output back to maf. The sort file is a sequence of sequence name prefixes, so that each sequence name in the alignment has, uniquely, one of the strings in the sort file as a prefix. The order of these prefixes is then used to sort the rows.
 
 # Referenced-based MAF/TAF and Indexing
 

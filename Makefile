@@ -24,8 +24,8 @@ ${sonLibDir}/sonLib.a : sonLib
 
 ${sonLibDir}/cuTest.a : sonLib
 
-${LIBDIR}/libstTaf.a : ${libTests} ${libHeaders} ${srcDir}/alignment_block.o ${srcDir}/line_iterator.o ${srcDir}/maf.o ${srcDir}/paf.o ${srcDir}/ond.o ${srcDir}/taf.o ${srcDir}/merge_adjacent_alignments.o ${srcDir}/tai.o ${libHeaders} ${stTafDependencies}
-	${AR} rc libstTaf.a ${srcDir}/alignment_block.o ${srcDir}/line_iterator.o ${srcDir}/maf.o ${srcDir}/paf.o ${srcDir}/ond.o ${srcDir}/taf.o ${srcDir}/merge_adjacent_alignments.o ${srcDir}/tai.o
+${LIBDIR}/libstTaf.a : ${libTests} ${libHeaders} ${srcDir}/alignment_block.o ${srcDir}/line_iterator.o ${srcDir}/maf.o ${srcDir}/paf.o ${srcDir}/ond.o ${srcDir}/taf.o ${srcDir}/merge_adjacent_alignments.o ${srcDir}/prefix_sort.o ${srcDir}/tai.o ${libHeaders} ${stTafDependencies}
+	${AR} rc libstTaf.a ${srcDir}/alignment_block.o ${srcDir}/line_iterator.o ${srcDir}/maf.o ${srcDir}/paf.o ${srcDir}/ond.o ${srcDir}/taf.o ${srcDir}/merge_adjacent_alignments.o ${srcDir}/prefix_sort.o ${srcDir}/tai.o
 	mv libstTaf.a ${LIBDIR}/
 
 ${srcDir}/alignment_block.o : ${srcDir}/alignment_block.c ${libHeaders}
@@ -52,11 +52,14 @@ ${srcDir}/taf.o : ${srcDir}/taf.c ${libHeaders}
 ${srcDir}/tai.o : ${srcDir}/tai.c ${libHeaders}
 	${CC} ${CFLAGS} ${LDFLAGS} -o ${srcDir}/tai.o -c ${srcDir}/tai.c
 
+${srcDir}/prefix_sort.o : ${srcDir}/prefix_sort.c ${libHeaders}
+	${CC} ${CFLAGS} ${LDFLAGS} -o ${srcDir}/prefix_sort.o -c ${srcDir}/prefix_sort.c
+
 ${BINDIR}/stTafTests : ${libTests} ${LIBDIR}/libstTaf.a ${stTafDependencies}
 	${CC} ${CFLAGS} ${LDFLAGS} -o ${BINDIR}/stTafTests ${libTests} ${LIBDIR}/libstTaf.a ${LDLIBS}
 
-${BINDIR}/taffy : taf_norm.o taf_add_gap_bases.o taf_index.o taf_view.o taf_stats.o taffy_main.o ${LIBDIR}/libstTaf.a ${libHeaders} ${stTafDependencies}
-	${CXX} ${CPPFLAGS} ${CXXFLAGS} taf_norm.o taf_add_gap_bases.o taf_index.o taf_view.o taf_stats.o taffy_main.o -o ${BINDIR}/taffy ${LIBDIR}/libstTaf.a ${LDLIBS}
+${BINDIR}/taffy : taf_norm.o taf_add_gap_bases.o taf_index.o taf_view.o taf_sort.o taf_stats.o taffy_main.o ${LIBDIR}/libstTaf.a ${libHeaders} ${stTafDependencies}
+	${CXX} ${CPPFLAGS} ${CXXFLAGS} taf_norm.o taf_add_gap_bases.o taf_index.o taf_view.o taf_sort.o taf_stats.o taffy_main.o -o ${BINDIR}/taffy ${LIBDIR}/libstTaf.a ${LDLIBS}
 
 taffy_main.o : taffy_main.cpp ${stTafDependencies} ${libHeaders}
 	${CXX} ${CPPFLAGS} ${CXXFLAGS} -o taffy_main.o -c taffy_main.cpp
@@ -72,6 +75,9 @@ taf_index.o : taf_index.c ${stTafDependencies} ${libHeaders}
 
 taf_view.o : taf_view.c ${stTafDependencies} ${libHeaders}
 	${CC} ${CFLAGS} ${CFLAGS} -o taf_view.o -c taf_view.c
+
+taf_sort.o : taf_sort.c ${stTafDependencies} ${libHeaders}
+	${CC} ${CFLAGS} ${CFLAGS} -o taf_sort.o -c taf_sort.c
 
 taf_stats.o : taf_stats.c ${stTafDependencies} ${libHeaders}
 	${CC} ${CFLAGS} ${CFLAGS} -o taf_stats.o -c taf_stats.c
