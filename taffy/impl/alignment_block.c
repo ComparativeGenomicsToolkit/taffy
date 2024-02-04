@@ -183,7 +183,7 @@ void alignment_link_adjacent(Alignment *left_alignment, Alignment *right_alignme
     WFA *wfa = WFA_construct(stList_getBackingArray(left_rows), stList_getBackingArray(right_rows),
                              stList_length(left_rows), stList_length(right_rows),
                              sizeof(void *), (bool (*)(void *, void *))alignment_row_is_predecessor_2, 1,
-                             allow_row_substitutions ? 2 : 100000000); // Use unit gap and mismatch costs for the diff
+                             allow_row_substitutions ? 1 : 100000000); // Use unit gap and mismatch costs for the diff
                              // unless we disallow substitutions, in which case use an arbitrarily large mismatch cost
     int64_t aligned_rows[stList_length(left_rows)];
     WFA_get_alignment(wfa, aligned_rows);
