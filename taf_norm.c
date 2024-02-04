@@ -11,7 +11,8 @@
 
 int64_t maximum_block_length_to_merge = 200;
 int64_t maximum_gap_length = 30;
-float fraction_shared_rows = 0.6;
+int64_t minimum_shared_rows = 1;
+float fraction_shared_rows = 0.0;
 int64_t repeat_coordinates_every_n_columns = 1000;
 
 static void usage(void) {
@@ -23,6 +24,7 @@ static void usage(void) {
     fprintf(stderr, "-k --maf : Print maf output instead of taf\n");
     fprintf(stderr, "-m --maximumBlockLengthToMerge : Only merge together any two adjacent blocks if one or both is less than this many bases long, by default: %" PRIi64 "\n", maximum_block_length_to_merge);
     fprintf(stderr, "-n --maximumGapLength : Only merge together two adjacent blocks if the total number of unaligned bases between the blocks is less than this many bases, by default: %" PRIi64 "\n", maximum_gap_length);
+    fprintf(stderr, "-Q --minimumSharedRows : The minimum number of rows between two blocks that need to be shared for a merge, default: %" PRIi64 "\n", minimum_shared_rows);
     fprintf(stderr, "-q --fractionSharedRows : The fraction of rows between two blocks that need to be shared for a merge, default: %f\n", fraction_shared_rows);
     fprintf(stderr, "-d --filterGapCausingDupes : Reduce the number of MAF blocks by filtering out rows that induce gaps > maximumGapLength. Rows are only filtered out if they are duplications (contig of same name appears elsewhere in block, or contig with same prefix up to \".\" appears in the same block).\n");
     fprintf(stderr, "-s --repeatCoordinatesEveryNColumns : Repeat coordinates of each sequence at least every n columns. By default: %" PRIi64 "\n", repeat_coordinates_every_n_columns);
@@ -195,13 +197,14 @@ int taf_norm_main(int argc, char *argv[]) {
                                                 { "maximumBlockLengthToMerge", required_argument, 0, 'm' },
                                                 { "maximumGapLength", required_argument, 0, 'n' },
                                                 { "fractionSharedRows", required_argument, 0, 'q' },
+                                                { "minimumSharedRows", required_argument, 0, 'Q' },
                                                 { "filterGapCausingDupes", no_argument, 0, 'd' },
                                                 { "repeatCoordinatesEveryNColumns", required_argument, 0, 's' },
                                                 { "useCompression", no_argument, 0, 'c' },
                                                 { 0, 0, 0, 0 } };
 
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:o:hcm:n:dkq:s:", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:o:hcm:n:dkQ:q:s:", long_options, &option_index);
         if (key == -1) {
             break;
         }
@@ -230,6 +233,9 @@ int taf_norm_main(int argc, char *argv[]) {
                 break;
             case 'd':
                 filter_gap_causing_dupes = 1;
+                break;
+            case 'Q':
+                minimum_shared_rows = atol(optarg);
                 break;
             case 'q':
                 fraction_shared_rows = atof(optarg);
@@ -284,10 +290,14 @@ int taf_norm_main(int argc, char *argv[]) {
     Alignment *alignment, *p_alignment = NULL, *p_p_alignment = NULL;
     while((alignment = get_next_taf_block(li, run_length_encode_bases)) != NULL) {
         if(p_alignment != NULL) {
+            // First realign the rows in case we in the process of merging prior blocks we have
+            // identified rows that can be merged
+            alignment_link_adjacent(p_alignment, alignment, 1);
             bool merged = false;
             int64_t common_rows = alignment_number_of_common_rows(p_alignment, alignment);
             int64_t total_rows = alignment->row_number + p_alignment->row_number - common_rows;
-            if (common_rows >= total_rows * fraction_shared_rows &&
+            if (common_rows >= minimum_shared_rows &&
+                common_rows >= total_rows * fraction_shared_rows &&
                 (alignment_length(p_alignment) <= maximum_block_length_to_merge ||
                  alignment_length(alignment) <= maximum_block_length_to_merge)) {
                 int64_t total_gap = alignment_total_gap_length(p_alignment);
