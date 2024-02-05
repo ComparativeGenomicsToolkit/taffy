@@ -24,8 +24,8 @@ ${sonLibDir}/sonLib.a : sonLib
 
 ${sonLibDir}/cuTest.a : sonLib
 
-${LIBDIR}/libstTaf.a : ${libTests} ${libHeaders} ${srcDir}/alignment_block.o ${srcDir}/line_iterator.o ${srcDir}/maf.o ${srcDir}/paf.o ${srcDir}/ond.o ${srcDir}/taf.o ${srcDir}/merge_adjacent_alignments.o ${srcDir}/prefix_sort.o ${srcDir}/tai.o ${libHeaders} ${stTafDependencies}
-	${AR} rc libstTaf.a ${srcDir}/alignment_block.o ${srcDir}/line_iterator.o ${srcDir}/maf.o ${srcDir}/paf.o ${srcDir}/ond.o ${srcDir}/taf.o ${srcDir}/merge_adjacent_alignments.o ${srcDir}/prefix_sort.o ${srcDir}/tai.o
+${LIBDIR}/libstTaf.a : ${libTests} ${libHeaders} ${srcDir}/alignment_block.o ${srcDir}/line_iterator.o ${srcDir}/maf.o ${srcDir}/paf.o ${srcDir}/ond.o ${srcDir}/taf.o ${srcDir}/add_gap_bases.o ${srcDir}/merge_adjacent_alignments.o ${srcDir}/prefix_sort.o ${srcDir}/tai.o ${libHeaders} ${stTafDependencies}
+	${AR} rc libstTaf.a ${srcDir}/alignment_block.o ${srcDir}/line_iterator.o ${srcDir}/maf.o ${srcDir}/paf.o ${srcDir}/ond.o ${srcDir}/taf.o ${srcDir}/add_gap_bases.o ${srcDir}/merge_adjacent_alignments.o ${srcDir}/prefix_sort.o ${srcDir}/tai.o
 	mv libstTaf.a ${LIBDIR}/
 
 ${srcDir}/alignment_block.o : ${srcDir}/alignment_block.c ${libHeaders}
@@ -42,6 +42,9 @@ ${srcDir}/paf.o : ${srcDir}/paf.c ${libHeaders}
 
 ${srcDir}/ond.o : ${srcDir}/ond.c ${libHeaders}
 	${CC} ${CFLAGS} ${LDFLAGS} -o ${srcDir}/ond.o -c ${srcDir}/ond.c
+
+${srcDir}/add_gap_bases.o : ${srcDir}/add_gap_bases.cpp ${libHeaders}
+	${CXX} ${CPPFLAGS} ${CXXFLAGS} -o ${srcDir}/add_gap_bases.o -c ${srcDir}/add_gap_bases.cpp
 
 ${srcDir}/merge_adjacent_alignments.o : ${srcDir}/merge_adjacent_alignments.c ${libHeaders}
 	${CC} ${CFLAGS} ${LDFLAGS} -o ${srcDir}/merge_adjacent_alignments.o -c ${srcDir}/merge_adjacent_alignments.c

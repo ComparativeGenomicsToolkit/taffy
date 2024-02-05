@@ -170,6 +170,7 @@ static bool greedy_prune_by_gap(Alignment *alignment, int64_t maximum_gap_length
     return pruned;
 }
 
+
 int taf_norm_main(int argc, char *argv[]) {
     time_t startTime = time(NULL);
 

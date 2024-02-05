@@ -333,5 +333,21 @@ int64_t alignment_row_get_closest_sequence_prefix(Alignment_Row *row, stList *pr
  */
 void alignment_sort_the_rows(Alignment *p_alignment, Alignment *alignment, stList *prefixes_to_sort_by);
 
+/*
+ * Load sequences in fasta files into a hash from sequence names to sequences
+ */
+stHash *load_sequences_from_fasta_files(char **seq_file_names, int64_t seq_file_number);
+
+/*
+ * Load sequences in hal file into memory.
+ */
+stSet *load_sequences_from_hal_file(char *hal_file, int *hal_handle);
+
+/*
+ * Add any gap strings between representing unaligned sequences between rows of alignment and p_alignment.
+ */
+void alignment_add_gap_strings(Alignment *p_alignment, Alignment *alignment, stHash *fastas, int hal_handle, stSet *hal_species,
+                               int64_t maximum_gap_string_length);
+
 #endif /* STTAF_H_ */
 
