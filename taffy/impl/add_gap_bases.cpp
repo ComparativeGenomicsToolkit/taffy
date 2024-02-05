@@ -50,7 +50,7 @@ void alignment_add_gap_strings(Alignment *p_alignment, Alignment *alignment, stH
     while(row != NULL) {
         if(row->l_row != NULL && alignment_row_is_predecessor(row->l_row, row)) {
             int64_t gap_length = row->start - (row->l_row->start + row->l_row->length);
-            if(gap_length <= maximum_gap_string_length && row->left_gap_sequence == NULL) {
+            if((maximum_gap_string_length < 0 || gap_length <= maximum_gap_string_length) && row->left_gap_sequence == NULL) {
                 char* seq_interval = NULL;
                 int64_t i = row->l_row->start + row->l_row->length;
                 assert(i >= 0 && i < row->sequence_length);

@@ -276,6 +276,16 @@ Tag *taf_read_header(LI *li) {
     return tag;
 }
 
+Tag *taf_read_header_2(LI *li, bool *run_length_encode_bases) {
+    Tag *tag = taf_read_header(li);
+    Tag *t = tag_find(tag, (char *) "run_length_encode_bases");
+    if (t != NULL && strcmp(t->value, "1") == 0) {
+        *run_length_encode_bases = 1;
+    }
+    return tag;
+}
+
+
 static void write_base(char base, int64_t base_count, LW *lw, bool run_length_encode_bases, bool color_bases) {
     if(base != '\0') {
         if(run_length_encode_bases) {

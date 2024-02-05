@@ -204,6 +204,11 @@ void paf_write_block(Alignment *alignment, LW *lw, bool all_to_all, bool cs_ciga
 Tag *taf_read_header(LI *li);
 
 /*
+ * Read a taf header line, check if the run_length_encode_bases flag is set.
+ */
+Tag *taf_read_header_2(LI *li, bool *run_length_encode_bases);
+
+/*
  * Read a taf block - that is a column with column coordinates and all subsequent coordinate-less columns that
  * are considered to be part of the block.
  */
