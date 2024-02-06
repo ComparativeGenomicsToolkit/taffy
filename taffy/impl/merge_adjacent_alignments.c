@@ -254,29 +254,34 @@ Alignment *alignment_merge_adjacent(Alignment *left_alignment, Alignment *right_
             l_row->bases = bases;
         }
         else {
+            Alignment_Row *r_row = l_row->r_row;
+
             // Check the rows agree coordinate wise
-            assert(strcmp(l_row->sequence_name, l_row->r_row->sequence_name) == 0);
-            assert(l_row->strand == l_row->r_row->strand);
-            assert(l_row->start + l_row->length <= l_row->r_row->start);
+            assert(strcmp(l_row->sequence_name, r_row->sequence_name) == 0);
+            assert(l_row->strand == r_row->strand);
+            assert(l_row->start + l_row->length <= r_row->start);
 
             // Is not a deletion, so merge together two adjacent rows
-            assert(l_row->r_row->left_gap_sequence != NULL);
-            assert(strlen(l_row->r_row->left_gap_sequence) == interstitial_alignment_length);
-            char *bases = stString_print("%s%s%s", l_row->bases, l_row->r_row->left_gap_sequence, l_row->r_row->bases);
+            assert(r_row->left_gap_sequence != NULL);
+            assert(strlen(r_row->left_gap_sequence) == interstitial_alignment_length);
+            char *bases = stString_print("%s%s%s", l_row->bases, r_row->left_gap_sequence, r_row->bases);
             free(l_row->bases); // clean up
             l_row->bases = bases;
 
             // Update the left row's length coordinate
-            int64_t interstitial_bases = l_row->r_row->start - (l_row->start + l_row->length);
-            l_row->length += interstitial_bases + l_row->r_row->length;
+            int64_t interstitial_bases = r_row->start - (l_row->start + l_row->length);
+            l_row->length += interstitial_bases + r_row->length;
             // Update the l_row's r_row pointer...
-            if(l_row->r_row->r_row != NULL) { // Check pointers are correct
-                assert(l_row->r_row->r_row->l_row == l_row->r_row);
+            if(r_row->r_row != NULL) { // Check pointers are correct
+                assert(r_row->r_row->l_row == r_row);
             }
-            l_row->r_row = l_row->r_row->r_row;
+            l_row->r_row = r_row->r_row;
             if(l_row->r_row != NULL) {
                 l_row->r_row->l_row = l_row;
             }
+            // Null r_row's left and right pointers
+            r_row->l_row = NULL;
+            r_row->r_row = NULL;
         }
 
         l_row = l_row->n_row; // Move to the next left alignment row

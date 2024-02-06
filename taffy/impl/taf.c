@@ -84,11 +84,7 @@ static Alignment *parse_coordinates_and_establish_block(Alignment *p_block, stLi
             alignment->row_number--;
             Alignment_Row *r = *row;
             *row = r->n_row;
-            // Fix left pointer of row in previous block
-            assert(r->l_row != NULL);
-            r->l_row->r_row = NULL;
             // Now delete the row
-            r->n_row = NULL;
             alignment_row_destruct(r);
         } else if(op_type[0] == 'g') { // Is making a gap without the sequence specified
             int64_t gap_length = atol(stList_get(tokens, j++)); // Get the index of the affected row
@@ -279,9 +275,7 @@ Tag *taf_read_header(LI *li) {
 Tag *taf_read_header_2(LI *li, bool *run_length_encode_bases) {
     Tag *tag = taf_read_header(li);
     Tag *t = tag_find(tag, (char *) "run_length_encode_bases");
-    if (t != NULL && strcmp(t->value, "1") == 0) {
-        *run_length_encode_bases = 1;
-    }
+    *run_length_encode_bases = t != NULL && strcmp(t->value, "1") == 0;
     return tag;
 }
 

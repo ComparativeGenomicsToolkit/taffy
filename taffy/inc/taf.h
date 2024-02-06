@@ -339,6 +339,11 @@ int64_t alignment_row_get_closest_sequence_prefix(Alignment_Row *row, stList *pr
 void alignment_sort_the_rows(Alignment *p_alignment, Alignment *alignment, stList *prefixes_to_sort_by);
 
 /*
+ * Removes any rows from the alignment whose sequence name prefix matches a string in the prefixes_to_filtet_by list
+ */
+void alignment_filter_the_rows(Alignment *alignment, stList *prefixes_to_filter_by);
+
+/*
  * Load sequences in fasta files into a hash from sequence names to sequences
  */
 stHash *load_sequences_from_fasta_files(char **seq_file_names, int64_t seq_file_number);

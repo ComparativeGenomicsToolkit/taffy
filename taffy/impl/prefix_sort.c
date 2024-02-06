@@ -93,6 +93,23 @@ void alignment_sort_the_rows(Alignment *p_alignment, Alignment *alignment, stLis
     }
 }
 
+void alignment_filter_the_rows(Alignment *alignment, stList *prefixes_to_filter_by) {
+    Alignment_Row *row = alignment->row, **p_row = &(alignment->row);
+    while(row != NULL) {
+        if(alignment_row_get_closest_sequence_prefix(row, prefixes_to_filter_by) != -1) { // Filter the row
+            alignment->row_number--; // Reduce the number of rows
+            assert(alignment->row_number >= 0);
+            *p_row = row->n_row; // Update the previous link to point at the row after the current row
+            alignment_row_destruct(row); // Clean up the row
+            row = (*p_row); // Set row to point at the next row
+        }
+        else { // Keep the row, do nothing
+            p_row = &(row->n_row);  // Update pointers
+            row = row->n_row;
+        }
+    }
+}
+
 void alignment_show_only_lineage_differences(Alignment *alignment, char mask_char, stList *sequence_prefixes, stList *tree_nodes) {
     // First create map of tree nodes to bases
     stHash *tree_nodes_to_bases = stHash_construct2(NULL, (void (*)(void *))stList_destruct);

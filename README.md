@@ -269,11 +269,12 @@ There is also a utility to merge together short alignment blocks to create a mor
 
 For example, to normalize a maf file do the following:
 
-    taffy view -i MAF_FILE | taffy add-gap-bases SEQUENCE_FILES | taffy norm -k > out.maf
+    taffy view -i MAF_FILE | taffy norm -k -b SEQUENCE_FILES out.maf
 
-`taffy view` converts MAF_FILE into taf, `taffy add-gap-bases` adds in missing
-unaligned sequences between maf blocks and `taffy norm` then merges together the blocks. The 
-`-k` option causes the output to be in maf format.
+`taffy view` converts MAF_FILE into taf, `taffy norm` then merges together blocks. The 
+`-k` option causes the output to be in maf format. The `-b`
+ option reads in underlying sequence files and is used to 
+retrieve any sequences that are unaligned between two blocks that is necessary to include in stitching together adjacent blocks. This uses the same method as `taffy add-gap-bases` to add these unaligned sequences.
 
 ## Taffy Sort
 
@@ -281,7 +282,11 @@ It can be useful to sort the rows of an alignment. For this we have `taffy sort`
 
     taffy view -i MAF_FILE | taffy sort -n SORT_FILE | taffy view -m
 
-Taffy view first converts the input maf to TAF, taffy sort then sorts the rows of the taf according to a given file and finally the last taffy view pipes the output back to maf. The sort file is a sequence of sequence name prefixes, so that each sequence name in the alignment has, uniquely, one of the strings in the sort file as a prefix. The order of these prefixes is then used to sort the rows.
+Taffy view first converts the input maf to TAF, taffy sort then sorts the rows of the taf according to a given file and finally the last taffy view pipes the output back to maf. The sort file is a sequence of sequence name prefixes, so that each sequence name in the alignment has, uniquely, one of the strings in the sort file as a prefix. The order of these prefixes is then used to sort the rows. Taffy sort also supports filtering, to remove selected rows of an alignment. For example:
+
+    taffy view -i MAF_FILE | taffy sort -f FILTER_FILE -n SORT_FILE | taffy view -m
+
+Where here we additionally remove any rows with sequence names with a prefix contained in the given FILTER_FILE.
 
 # Referenced-based MAF/TAF and Indexing
 
