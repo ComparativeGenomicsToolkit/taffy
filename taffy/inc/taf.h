@@ -204,6 +204,11 @@ void paf_write_block(Alignment *alignment, LW *lw, bool all_to_all, bool cs_ciga
 Tag *taf_read_header(LI *li);
 
 /*
+ * Read a taf header line, check if the run_length_encode_bases flag is set.
+ */
+Tag *taf_read_header_2(LI *li, bool *run_length_encode_bases);
+
+/*
  * Read a taf block - that is a column with column coordinates and all subsequent coordinate-less columns that
  * are considered to be part of the block.
  */
@@ -332,6 +337,27 @@ int64_t alignment_row_get_closest_sequence_prefix(Alignment_Row *row, stList *pr
  * with the previous alignment in the process.
  */
 void alignment_sort_the_rows(Alignment *p_alignment, Alignment *alignment, stList *prefixes_to_sort_by);
+
+/*
+ * Removes any rows from the alignment whose sequence name prefix matches a string in the prefixes_to_filtet_by list
+ */
+void alignment_filter_the_rows(Alignment *alignment, stList *prefixes_to_filter_by);
+
+/*
+ * Load sequences in fasta files into a hash from sequence names to sequences
+ */
+stHash *load_sequences_from_fasta_files(char **seq_file_names, int64_t seq_file_number);
+
+/*
+ * Load sequences in hal file into memory.
+ */
+stSet *load_sequences_from_hal_file(char *hal_file, int *hal_handle);
+
+/*
+ * Add any gap strings between representing unaligned sequences between rows of alignment and p_alignment.
+ */
+void alignment_add_gap_strings(Alignment *p_alignment, Alignment *alignment, stHash *fastas, int hal_handle, stSet *hal_species,
+                               int64_t maximum_gap_string_length);
 
 #endif /* STTAF_H_ */
 

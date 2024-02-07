@@ -104,9 +104,15 @@ Tag *tag_parse(char *tag_string, char *delimiter, Tag *p_tag) {
     return tag;
 }
 
-
-
 void alignment_row_destruct(Alignment_Row *row) {
+    if(row->l_row != NULL) { // If there is a preceding, left row then unlink it
+        assert(row->l_row->r_row == row);
+        row->l_row->r_row = NULL;
+    }
+    if(row->r_row != NULL) { // If there is a proceeding, right row then unlink it
+        assert(row->r_row->l_row == row);
+        row->r_row->l_row = NULL;
+    }
     if(row->bases != NULL) {
         free(row->bases);
     }
@@ -191,6 +197,11 @@ void alignment_link_adjacent(Alignment *left_alignment, Alignment *right_alignme
     Alignment_Row *row = left_alignment->row;
     while(row != NULL) {
         row->r_row = NULL;
+        // Clean up any gap sequences because once unlinked we can not guarantee continuity
+        if(row->left_gap_sequence != NULL) {
+            free(row->left_gap_sequence);
+            row->left_gap_sequence = NULL;
+        }
         row = row->n_row;
     }
     row = right_alignment->row;
