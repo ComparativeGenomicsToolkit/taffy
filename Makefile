@@ -12,17 +12,28 @@ all_progs: all_libs ${BINDIR}/taffy
 
 sonLib: 
 	mkdir -p ${LIBDIR} ${BINDIR}
-	cd taffy/submodules/sonLib && PKG_CONFIG_PATH=${CWD}/lib/pkgconfig:${PKG_CONFIG_PATH} ${MAKE}
+	cd ${sonLibRootDir} && PKG_CONFIG_PATH=${CWD}/lib/pkgconfig:${PKG_CONFIG_PATH} ${MAKE}
 	mkdir -p ${BINDIR} ${LIBDIR} ${INCLDIR}
-	rm -rf taffy/submodules/sonLib/bin/*.dSYM
-	ln -f taffy/submodules/sonLib/lib/*.a ${LIBDIR}
-	ln -f taffy/submodules/sonLib/lib/sonLib.a ${LIBDIR}/libsonLib.a
+	rm -rf ${sonLibRootDir}/bin/*.dSYM
+	ln -f ${sonLibDir}/*.a ${LIBDIR}
+	ln -f ${sonLibDir}/sonLib.a ${LIBDIR}/libsonLib.a
 
 stTafDependencies = ${sonLibDir}/sonLib.a ${sonLibDir}/cuTest.a
 
 ${sonLibDir}/sonLib.a : sonLib
 
 ${sonLibDir}/cuTest.a : sonLib
+
+abPOA:
+	mkdir -p ${LIBDIR} ${INCLDIR}
+	cd taffy/submodules/abPOA && ${MAKE}
+	ln -f taffy/submodules/abPOA/lib/*.a ${LIBDIR}
+	ln -f taffy/submodules/abPOA/include/*.h ${INCLDIR}
+	rm -fr ${INCLDIR}/simde && cp -r taffy/submodules/abPOA/include/simde ${INCLDIR}
+
+${LIBDIR}/libabpoa.a : abPOA
+
+stTafDependencies += ${LIBDIR}/libabpoa.a
 
 ${LIBDIR}/libstTaf.a : ${libTests} ${libHeaders} ${srcDir}/alignment_block.o ${srcDir}/line_iterator.o ${srcDir}/maf.o ${srcDir}/paf.o ${srcDir}/ond.o ${srcDir}/taf.o ${srcDir}/add_gap_bases.o ${srcDir}/merge_adjacent_alignments.o ${srcDir}/prefix_sort.o ${srcDir}/tai.o ${libHeaders} ${stTafDependencies}
 	${AR} rc libstTaf.a ${srcDir}/alignment_block.o ${srcDir}/line_iterator.o ${srcDir}/maf.o ${srcDir}/paf.o ${srcDir}/ond.o ${srcDir}/taf.o ${srcDir}/add_gap_bases.o ${srcDir}/merge_adjacent_alignments.o ${srcDir}/prefix_sort.o ${srcDir}/tai.o
@@ -93,7 +104,8 @@ python_test: all ${BINDIR}/stTafTests
 	cd tests && python3 taffyTest.py
 
 clean :
-	cd taffy/submodules/sonLib && ${MAKE} clean
+	cd ${sonLibRootDir} && ${MAKE} clean
+	cd taffy/submodules/abPOA && ${MAKE} clean
 	rm -rf *.o taffy/impl/*.o ${LIBDIR} ${BINDIR}
 
 static :

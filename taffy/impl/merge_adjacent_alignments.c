@@ -1,6 +1,7 @@
 #include "taf.h"
 #include "ond.h"
 #include "sonLib.h"
+#include "abpoa.h"
 
 /*
  * Method to merge together two adjacent alignments.
@@ -316,4 +317,117 @@ Alignment *alignment_merge_adjacent(Alignment *left_alignment, Alignment *right_
     free(right_gap);
 
     return left_alignment;
+}
+
+
+// char <--> uint8_t conversion copied over from abPOA example
+// AaCcGgTtNn ==> 0,1,2,3,4
+static unsigned char nst_nt4_table[256] = {
+    4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4, 
+    4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4, 
+    4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 5 /*'-'*/, 4, 4,
+    4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4, 
+    4, 0, 4, 1,  4, 4, 4, 2,  4, 4, 4, 4,  4, 4, 4, 4, 
+    4, 4, 4, 4,  3, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4, 
+    4, 0, 4, 1,  4, 4, 4, 2,  4, 4, 4, 4,  4, 4, 4, 4, 
+    4, 4, 4, 4,  3, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4, 
+    4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4, 
+    4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4, 
+    4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4, 
+    4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4, 
+    4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4, 
+    4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4, 
+    4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4, 
+    4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4
+};
+
+// 65,97=>A, 67,99=>C, 71,103=>G, 84,85,116,117=>T, else=>N
+static const char nst_nt256_table[256] = {
+       'A', 'C', 'G', 'T',  'N', '-', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',
+       'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', '-',  'N', 'N', 'N', 'N',
+       'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',
+       'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',
+       'N', 'A', 'N', 'C',  'N', 'N', 'N', 'G',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',
+       'N', 'N', 'N', 'N',  'T', 'T', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',
+       'N', 'A', 'N', 'C',  'N', 'N', 'N', 'G',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',
+       'N', 'N', 'N', 'N',  'T', 'T', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',
+       'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',
+       'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',
+       'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',
+       'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',
+       'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',
+       'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',
+       'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',
+       'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N'
+};
+
+static inline char msa_to_base(uint8_t n) {
+    return (char)nst_nt256_table[n];
+}
+
+static inline uint8_t msa_to_byte(char c) {
+    return nst_nt4_table[(int)c];
+}
+
+// from cactus/bar/impl/poaBarAligner.c
+abpoa_para_t* construct_abpoa_params() {
+    abpoa_para_t *abpt = abpoa_init_para();
+
+    // output options
+    abpt->out_msa = 1; // generate Row-Column multiple sequence alignment(RC-MSA), set 0 to disable
+    abpt->out_cons = 0; // generate consensus sequence, set 0 to disable
+
+    // alignment mode. 0:global alignment, 1:local, 2:extension
+    // only global works
+    abpt->align_mode = ABPOA_GLOBAL_MODE;
+
+    // banding parameters
+    abpt->wb = 300;
+    abpt->wf = 0.05;
+
+    // gap scoring model
+    abpt->gap_open1 = 400;
+    abpt->gap_ext1 = 30;
+    abpt->gap_open2 = 1200;
+    abpt->gap_ext2 = 1;
+    
+    // seeding paramters
+    abpt->disable_seeding = 1;
+    abpt->k = 19;
+    abpt->w = 10;
+    abpt->min_w = 500;
+
+    // progressive toggle
+    abpt->progressive_poa = 1;
+
+    // generate the substitution matrix
+    abpt->use_score_matrix = 0;
+    abpoa_post_set_para(abpt);
+
+    // optionally override the substitution matrix
+    char *submat_string = stString_copy("91 -114 -61 -123 -100 -114 100 -125 -61 -100 -61 -125 100 -114 -100 -123 -61 -114 91 -100 -100 -100 -100 -100 100");
+    if (submat_string && strlen(submat_string) > 0) {
+        // Note, this will be used to explicitly override abpoa's subsitution matrix just before aligning
+        abpt->use_score_matrix = 1;
+        assert(abpt->m == 5);
+        int count = 0;
+        for (char* val = strtok(submat_string, " "); val != NULL; val = strtok(NULL, " ")) {
+            abpt->mat[count++] = atoi(val);
+        }
+        assert(count == 25);
+        int i; abpt->min_mis = 0, abpt->max_mat = 0;
+        for (i = 0; i < abpt->m * abpt->m; ++i) {
+            if (abpt->mat[i] > abpt->max_mat)
+                abpt->max_mat = abpt->mat[i];
+            if (-abpt->mat[i] > abpt->min_mis) 
+                abpt->min_mis = -abpt->mat[i];
+        }
+    }
+    free(submat_string);
+    return abpt;
+}
+
+
+int64_t align_interstitial_gaps_abpoa(Alignment *alignment) {
+    return -1;
 }
