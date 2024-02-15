@@ -300,6 +300,12 @@ abpoa_para_t* construct_abpoa_params() {
     return abpt;
 }
 
+// input are row ranks, comparison is reverse-sort on length
+static int len_rev_cmp(const void* i1, const void* i2, void* length_list) {
+    int64_t len1 = (int64_t)stList_get((stList*)length_list, (int64_t)i1);
+    int64_t len2 = (int64_t)stList_get((stList*)length_list, (int64_t)i2);    
+    return (int64_t)len2 < (int64_t)len1 ? -1 : ((int64_t)len2 > (int64_t)len1 ? 1 : 0);
+}
 
 int64_t align_interstitial_gaps_abpoa(Alignment *alignment) {
     /*
@@ -307,20 +313,38 @@ int64_t align_interstitial_gaps_abpoa(Alignment *alignment) {
      * Return the length of the interstitial alignment.
      */
 
+    // sorted input really helps abpoa, so we make some arrays for random access
+    stList *row_list = stList_construct2(alignment->row_number);
+    stList *length_list = stList_construct2(alignment->row_number);
+    stList *order_list = stList_construct2(alignment->row_number);
+    
     // Add any missing gap strings in
-    int seq_no = 0; 
+    int64_t row_idx = 0;
+    int seq_no = 0;
     for (Alignment_Row *row = alignment->row; row != NULL; row = row->n_row) {
         if(row->l_row != NULL && alignment_row_is_predecessor(row->l_row, row) && row->left_gap_sequence == NULL) {
             row->left_gap_sequence = make_run(row->start - (row->l_row->start + row->l_row->length), 'N');
         }
+        int64_t row_length = 0;
         if (row->left_gap_sequence != NULL && row->left_gap_sequence[0] != '\0') {
+            row_length = strlen(row->left_gap_sequence);
             ++seq_no;
         }
+        stList_set(row_list, row_idx, (void*)row);
+        stList_set(length_list, row_idx, (void*)row_length);
+        stList_set(order_list, row_idx, (void*)row_idx);                            
+        ++row_idx;
     }
 
     if (seq_no == 0) {
+        stList_destruct(row_list);
+        stList_destruct(length_list);
+        stList_destruct(order_list);
         return 0;
     }
+
+    // sort by length decreasing
+    stList_sort2(order_list, len_rev_cmp, (void*)length_list);
 
     // init abpoa. todo: can move this up, esp. param construction, to avoid repeated invocations
     // though may not make a difference in practice
@@ -330,41 +354,42 @@ int64_t align_interstitial_gaps_abpoa(Alignment *alignment) {
     // convert into abpoa input matrix    
     int *seq_lens = (int*)st_calloc(seq_no, sizeof(int));
     uint8_t **bseqs = (uint8_t**)st_calloc(seq_no, sizeof(uint8_t*));
-    int row_idx = 0;
-    for (Alignment_Row *row = alignment->row; row != NULL; row = row->n_row) {
-        if (row->left_gap_sequence != NULL && row->left_gap_sequence[0] != '\0') {
-            seq_lens[row_idx] = strlen(row->left_gap_sequence);
-            bseqs[row_idx] = (uint8_t*)st_calloc(seq_lens[row_idx], sizeof(uint8_t));
-            for (int64_t col = 0; col < seq_lens[row_idx]; ++col) {
-                bseqs[row_idx][col] = msa_to_byte(row->left_gap_sequence[col]);
-            }
-            ++row_idx;
+    for (int64_t i = 0; i < seq_no; ++i) {
+        row_idx = (int64_t)stList_get(order_list, i);
+        Alignment_Row *row = stList_get(row_list, row_idx);
+        assert(row->left_gap_sequence != NULL && row->left_gap_sequence[0] != '\0');
+        seq_lens[i] = strlen(row->left_gap_sequence);
+        bseqs[i] = (uint8_t*)st_calloc(seq_lens[i], sizeof(uint8_t));
+        for (int64_t col = 0; col < seq_lens[i]; ++col) {
+            bseqs[i][col] = msa_to_byte(row->left_gap_sequence[col]);
         }
     }
-    assert(row_idx == seq_no);
 
     // run abpoa: todo try sorting on length
     abpoa_msa(ab, abpoa_params, seq_no, NULL, seq_lens, bseqs, NULL, NULL);
 
     // copy the results from the abpoa matrix back into the left_gap_sequences
     int64_t msa_length = ab->abc->msa_len;
-    row_idx = 0;
-    for (Alignment_Row *row = alignment->row; row != NULL; row = row->n_row) {
-        bool empty_row = row->left_gap_sequence == NULL || row->left_gap_sequence[0] == '\0';
+    for (int64_t i = 0; i < alignment->row_number; ++i) {
+        row_idx = (int64_t)stList_get(order_list, i);
+        Alignment_Row *row = stList_get(row_list, row_idx);
         free(row->left_gap_sequence);
-        row->left_gap_sequence = (char*)st_calloc(msa_length + 1, sizeof(char));        
-        if (!empty_row) {
+        row->left_gap_sequence = (char*)st_calloc(msa_length + 1, sizeof(char));
+        if (i < seq_no) {
             for (int64_t col = 0; col < msa_length; ++col) {
-                row->left_gap_sequence[col] = msa_to_base(ab->abc->msa_base[row_idx][col]);
+                row->left_gap_sequence[col] = msa_to_base(ab->abc->msa_base[i][col]);
             }
-            ++row_idx;
         } else {
             for (int64_t col = 0; col < msa_length; ++col) {
                 row->left_gap_sequence[col] = '-';
-            }
+            }            
         }
         row->left_gap_sequence[msa_length] = '\0';
     }
+
+    stList_destruct(row_list);
+    stList_destruct(length_list);
+    stList_destruct(order_list);
 
     // free abpoa
     abpoa_free(ab);
