@@ -103,16 +103,6 @@ int64_t align_interstitial_gaps(Alignment *alignment) {
         row = row->n_row;
     }
 
-    fprintf(stderr, "Nd input\n");
-    for (Alignment_Row *row = alignment->row; row != NULL; row = row->n_row) {
-        if (row->left_gap_sequence == NULL) {
-            fprintf(stderr, "NULL\n");
-        } else {
-            fprintf(stderr, "%s\n", row->left_gap_sequence);
-        }
-    }
-
-
     // Find the longest gap sequence and number of sequences to align
     //TODO: Consider not allowing picking the longest sequence if it is all Ns
     row = alignment->row;
@@ -190,16 +180,6 @@ int64_t align_interstitial_gaps(Alignment *alignment) {
         row = row->n_row;
     }
 
-    fprintf(stderr, "Output\n");
-    for (Alignment_Row *row = alignment->row; row != NULL; row = row->n_row) {
-        if (row->left_gap_sequence == NULL) {
-            fprintf(stderr, "NULL\n");
-        } else {
-            fprintf(stderr, "%s\n", row->left_gap_sequence);
-        }
-    }
-
-    
     for (int64_t i = 0; i < string_no; ++i) {
         free(msa[i]);
     }
@@ -338,15 +318,6 @@ int64_t align_interstitial_gaps_abpoa(Alignment *alignment) {
         }
     }
 
-    fprintf(stderr, "Nd input\n");
-    for (Alignment_Row *row = alignment->row; row != NULL; row = row->n_row) {
-        if (row->left_gap_sequence == NULL) {
-            fprintf(stderr, "NULL\n");
-        } else {
-            fprintf(stderr, "%s\n", row->left_gap_sequence);
-        }
-    }
-
     if (seq_no == 0) {
         return 0;
     }
@@ -394,16 +365,6 @@ int64_t align_interstitial_gaps_abpoa(Alignment *alignment) {
         }
         row->left_gap_sequence[msa_length] = '\0';
     }
-
-    fprintf(stderr, "Output\n");
-    for (Alignment_Row *row = alignment->row; row != NULL; row = row->n_row) {
-        if (row->left_gap_sequence == NULL) {
-            fprintf(stderr, "NULL\n");
-        } else {
-            fprintf(stderr, "%s\n", row->left_gap_sequence);
-        }
-    }
-
 
     // free abpoa
     abpoa_free(ab);
