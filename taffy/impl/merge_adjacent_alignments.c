@@ -103,6 +103,16 @@ int64_t align_interstitial_gaps(Alignment *alignment) {
         row = row->n_row;
     }
 
+    fprintf(stderr, "Nd input\n");
+    for (Alignment_Row *row = alignment->row; row != NULL; row = row->n_row) {
+        if (row->left_gap_sequence == NULL) {
+            fprintf(stderr, "NULL\n");
+        } else {
+            fprintf(stderr, "%s\n", row->left_gap_sequence);
+        }
+    }
+
+
     // Find the longest gap sequence and number of sequences to align
     //TODO: Consider not allowing picking the longest sequence if it is all Ns
     row = alignment->row;
@@ -179,6 +189,17 @@ int64_t align_interstitial_gaps(Alignment *alignment) {
         }
         row = row->n_row;
     }
+
+    fprintf(stderr, "Output\n");
+    for (Alignment_Row *row = alignment->row; row != NULL; row = row->n_row) {
+        if (row->left_gap_sequence == NULL) {
+            fprintf(stderr, "NULL\n");
+        } else {
+            fprintf(stderr, "%s\n", row->left_gap_sequence);
+        }
+    }
+
+    
     for (int64_t i = 0; i < string_no; ++i) {
         free(msa[i]);
     }
@@ -317,6 +338,15 @@ int64_t align_interstitial_gaps_abpoa(Alignment *alignment) {
         }
     }
 
+    fprintf(stderr, "Nd input\n");
+    for (Alignment_Row *row = alignment->row; row != NULL; row = row->n_row) {
+        if (row->left_gap_sequence == NULL) {
+            fprintf(stderr, "NULL\n");
+        } else {
+            fprintf(stderr, "%s\n", row->left_gap_sequence);
+        }
+    }
+
     if (seq_no == 0) {
         return 0;
     }
@@ -333,7 +363,10 @@ int64_t align_interstitial_gaps_abpoa(Alignment *alignment) {
     for (Alignment_Row *row = alignment->row; row != NULL; row = row->n_row) {
         if (row->left_gap_sequence != NULL && row->left_gap_sequence[0] != '\0') {
             seq_lens[row_idx] = strlen(row->left_gap_sequence);
-            bseqs[row_idx] = (uint8_t*)st_calloc(seq_lens[row_idx], sizeof(uint8_t));            
+            bseqs[row_idx] = (uint8_t*)st_calloc(seq_lens[row_idx], sizeof(uint8_t));
+            for (int64_t col = 0; col < seq_lens[row_idx]; ++col) {
+                bseqs[row_idx][col] = msa_to_byte(row->left_gap_sequence[col]);
+            }
             ++row_idx;
         }
     }
@@ -346,20 +379,31 @@ int64_t align_interstitial_gaps_abpoa(Alignment *alignment) {
     int64_t msa_length = ab->abc->msa_len;
     row_idx = 0;
     for (Alignment_Row *row = alignment->row; row != NULL; row = row->n_row) {
+        bool empty_row = row->left_gap_sequence == NULL || row->left_gap_sequence[0] == '\0';
         free(row->left_gap_sequence);
         row->left_gap_sequence = (char*)st_calloc(msa_length + 1, sizeof(char));        
-        if (row->left_gap_sequence != NULL && row->left_gap_sequence[0] != '\0') {
+        if (!empty_row) {
             for (int64_t col = 0; col < msa_length; ++col) {
                 row->left_gap_sequence[col] = msa_to_base(ab->abc->msa_base[row_idx][col]);
             }
+            ++row_idx;
         } else {
             for (int64_t col = 0; col < msa_length; ++col) {
                 row->left_gap_sequence[col] = '-';
             }
         }
         row->left_gap_sequence[msa_length] = '\0';
-        ++row_idx;
     }
+
+    fprintf(stderr, "Output\n");
+    for (Alignment_Row *row = alignment->row; row != NULL; row = row->n_row) {
+        if (row->left_gap_sequence == NULL) {
+            fprintf(stderr, "NULL\n");
+        } else {
+            fprintf(stderr, "%s\n", row->left_gap_sequence);
+        }
+    }
+
 
     // free abpoa
     abpoa_free(ab);
