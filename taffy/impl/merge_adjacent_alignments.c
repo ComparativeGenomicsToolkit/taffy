@@ -192,134 +192,6 @@ int64_t align_interstitial_gaps(Alignment *alignment) {
     return msa_length;
 }
 
-Alignment *alignment_merge_adjacent(Alignment *left_alignment, Alignment *right_alignment) {
-    // First un-link any rows that are substitutions as these can't be merged
-    Alignment_Row *r_row = right_alignment->row;
-    while(r_row != NULL) {
-        if(r_row->l_row != NULL && !alignment_row_is_predecessor(r_row->l_row, r_row)) {
-            assert(r_row->l_row->r_row == r_row);
-            r_row->l_row->r_row = NULL; // unlink 1
-            r_row->l_row = NULL; // unlink 2
-        }
-        r_row = r_row->n_row;
-    }
-
-    // Add the new rows in the right alignment to the left alignment
-    r_row = right_alignment->row; Alignment_Row **p_l_row = &(left_alignment->row);
-    while(r_row != NULL) {
-        if(r_row->l_row == NULL) { // Is an insertion
-            // Make a new l_row
-            Alignment_Row *l_row = st_calloc(1, sizeof(Alignment_Row));
-
-            // Set coordinates
-            l_row->sequence_name = stString_copy(r_row->sequence_name);
-            l_row->start = r_row->start;
-            l_row->length = 0; // is an empty alignment
-            l_row->sequence_length = r_row->sequence_length;
-            l_row->strand = r_row->strand;
-            l_row->bases = make_run(left_alignment->column_number, '-');
-
-            // Connect the left and right rows
-            l_row->r_row = r_row;
-            r_row->l_row = l_row;
-
-            // Now connect the left row into the left alignment at the correct place
-            l_row->n_row = *p_l_row;
-            *p_l_row = l_row;
-
-            // Update p_l_row to point at l_row's n_row pointer
-            p_l_row = &(l_row->n_row);
-
-            // Increase the row number
-            left_alignment->row_number++;
-        }
-        else {
-            // Update p_l_row to point at r_row->l_row's n_row pointer
-            p_l_row = &(r_row->l_row->n_row);
-        }
-        r_row = r_row->n_row; // Move to the next right alignment row
-    }
-
-    // Align the interstitial insert sequences, padding the left_gap_sequence strings with gaps to represent the alignment
-    int64_t interstitial_alignment_length = align_interstitial_gaps(right_alignment);
-
-    // Now finally extend the left alignment rows to include the right alignment rows
-    Alignment_Row *l_row = left_alignment->row;
-    char *right_gap = make_run(right_alignment->column_number + interstitial_alignment_length, '-'); // any trailing bases needed
-    while(l_row != NULL) {
-        if(l_row->r_row == NULL) {
-            // Is a deletion, so add in trailing gaps equal in length to the right alignment length plus any interstitial
-            // gap
-            char *bases = stString_print("%s%s", l_row->bases, right_gap);
-            free(l_row->bases);
-            l_row->bases = bases;
-        }
-        else {
-            Alignment_Row *r_row = l_row->r_row;
-
-            // Check the rows agree coordinate wise
-            assert(strcmp(l_row->sequence_name, r_row->sequence_name) == 0);
-            assert(l_row->strand == r_row->strand);
-            assert(l_row->start + l_row->length <= r_row->start);
-
-            // Is not a deletion, so merge together two adjacent rows
-            assert(r_row->left_gap_sequence != NULL);
-            assert(strlen(r_row->left_gap_sequence) == interstitial_alignment_length);
-            char *bases = stString_print("%s%s%s", l_row->bases, r_row->left_gap_sequence, r_row->bases);
-            free(l_row->bases); // clean up
-            l_row->bases = bases;
-
-            // Update the left row's length coordinate
-            int64_t interstitial_bases = r_row->start - (l_row->start + l_row->length);
-            l_row->length += interstitial_bases + r_row->length;
-            // Update the l_row's r_row pointer...
-            if(r_row->r_row != NULL) { // Check pointers are correct
-                assert(r_row->r_row->l_row == r_row);
-            }
-            l_row->r_row = r_row->r_row;
-            if(l_row->r_row != NULL) {
-                l_row->r_row->l_row = l_row;
-            }
-            // Null r_row's left and right pointers
-            r_row->l_row = NULL;
-            r_row->r_row = NULL;
-        }
-
-        l_row = l_row->n_row; // Move to the next left alignment row
-    }
-
-    // Calculate the number of columns in the merged alignment
-    int64_t total_column_number = left_alignment->column_number + right_alignment->column_number + interstitial_alignment_length;
-
-    // Fix the tags
-    if(left_alignment->column_tags != NULL) {
-        assert(right_alignment->column_tags != NULL);
-        Tag **combined_column_tags = st_malloc(sizeof(Tag *) * total_column_number); // Allocate an expanded set of columns
-        int64_t j=0;
-        for(int64_t i=0; i<left_alignment->column_number; i++) { // Add the left alignment's column's tags
-            combined_column_tags[j++] = left_alignment->column_tags[i];
-        }
-        for(int64_t i=0; i<interstitial_alignment_length; i++) { // Add empty tag lists for new columns
-            combined_column_tags[j++] = NULL;
-        }
-        for(int64_t i=0; i<right_alignment->column_number; i++) { // Add the right alignment's column's tags
-            combined_column_tags[j++] = right_alignment->column_tags[i];
-        }
-        free(left_alignment->column_tags); // Cleanup, but not the tag strings which we copied
-        left_alignment->column_tags = combined_column_tags;
-    }
-
-    // Fix column number
-    left_alignment->column_number = total_column_number;
-
-    // Clean up
-    alignment_destruct(right_alignment, 1);  // Delete the right alignment
-    free(right_gap);
-
-    return left_alignment;
-}
-
-
 // char <--> uint8_t conversion copied over from abPOA example
 // AaCcGgTtNn ==> 0,1,2,3,4
 static unsigned char nst_nt4_table[256] = {
@@ -429,5 +301,203 @@ abpoa_para_t* construct_abpoa_params() {
 
 
 int64_t align_interstitial_gaps_abpoa(Alignment *alignment) {
-    return -1;
+    /*
+     * Align the sequences that lie within the gaps between two adjacent blocks using abPOA.
+     * Return the length of the interstitial alignment.
+     */
+
+    // Add any missing gap strings in
+    int seq_no = 0; 
+    for (Alignment_Row *row = alignment->row; row != NULL; row = row->n_row) {
+        if(row->l_row != NULL && alignment_row_is_predecessor(row->l_row, row) && row->left_gap_sequence == NULL) {
+            row->left_gap_sequence = make_run(row->start - (row->l_row->start + row->l_row->length), 'N');
+        }
+        if (row->left_gap_sequence != NULL && row->left_gap_sequence[0] != '\0') {
+            ++seq_no;
+        }
+    }
+
+    if (seq_no == 0) {
+        return 0;
+    }
+
+    // init abpoa. todo: can move this up, esp. param construction, to avoid repeated invocations
+    // though may not make a difference in practice
+    abpoa_t *ab = abpoa_init();
+    abpoa_para_t* abpoa_params = construct_abpoa_params();
+
+    // convert into abpoa input matrix    
+    int *seq_lens = (int*)st_calloc(seq_no, sizeof(int));
+    uint8_t **bseqs = (uint8_t**)st_calloc(seq_no, sizeof(uint8_t*));
+    int row_idx = 0;
+    for (Alignment_Row *row = alignment->row; row != NULL; row = row->n_row) {
+        if (row->left_gap_sequence != NULL && row->left_gap_sequence[0] != '\0') {
+            seq_lens[row_idx] = strlen(row->left_gap_sequence);
+            bseqs[row_idx] = (uint8_t*)st_calloc(seq_lens[row_idx], sizeof(uint8_t));            
+            ++row_idx;
+        }
+    }
+    assert(row_idx == seq_no);
+
+    // run abpoa: todo try sorting on length
+    abpoa_msa(ab, abpoa_params, seq_no, NULL, seq_lens, bseqs, NULL, NULL);
+
+    // copy the results from the abpoa matrix back into the left_gap_sequences
+    int64_t msa_length = ab->abc->msa_len;
+    row_idx = 0;
+    for (Alignment_Row *row = alignment->row; row != NULL; row = row->n_row) {
+        free(row->left_gap_sequence);
+        row->left_gap_sequence = (char*)st_calloc(msa_length + 1, sizeof(char));        
+        if (row->left_gap_sequence != NULL && row->left_gap_sequence[0] != '\0') {
+            for (int64_t col = 0; col < msa_length; ++col) {
+                row->left_gap_sequence[col] = msa_to_base(ab->abc->msa_base[row_idx][col]);
+            }
+        } else {
+            for (int64_t col = 0; col < msa_length; ++col) {
+                row->left_gap_sequence[col] = '-';
+            }
+        }
+        row->left_gap_sequence[msa_length] = '\0';
+        ++row_idx;
+    }
+
+    // free abpoa
+    abpoa_free(ab);
+    abpoa_free_para(abpoa_params);
+    free(seq_lens);
+    for (int64_t i = 0; i < seq_no; ++i) {
+        free(bseqs[i]);
+    }
+    free(bseqs);
+
+    return msa_length;
 }
+
+Alignment *alignment_merge_adjacent(Alignment *left_alignment, Alignment *right_alignment) {
+    // First un-link any rows that are substitutions as these can't be merged
+    Alignment_Row *r_row = right_alignment->row;
+    while(r_row != NULL) {
+        if(r_row->l_row != NULL && !alignment_row_is_predecessor(r_row->l_row, r_row)) {
+            assert(r_row->l_row->r_row == r_row);
+            r_row->l_row->r_row = NULL; // unlink 1
+            r_row->l_row = NULL; // unlink 2
+        }
+        r_row = r_row->n_row;
+    }
+
+    // Add the new rows in the right alignment to the left alignment
+    r_row = right_alignment->row; Alignment_Row **p_l_row = &(left_alignment->row);
+    while(r_row != NULL) {
+        if(r_row->l_row == NULL) { // Is an insertion
+            // Make a new l_row
+            Alignment_Row *l_row = st_calloc(1, sizeof(Alignment_Row));
+
+            // Set coordinates
+            l_row->sequence_name = stString_copy(r_row->sequence_name);
+            l_row->start = r_row->start;
+            l_row->length = 0; // is an empty alignment
+            l_row->sequence_length = r_row->sequence_length;
+            l_row->strand = r_row->strand;
+            l_row->bases = make_run(left_alignment->column_number, '-');
+
+            // Connect the left and right rows
+            l_row->r_row = r_row;
+            r_row->l_row = l_row;
+
+            // Now connect the left row into the left alignment at the correct place
+            l_row->n_row = *p_l_row;
+            *p_l_row = l_row;
+
+            // Update p_l_row to point at l_row's n_row pointer
+            p_l_row = &(l_row->n_row);
+
+            // Increase the row number
+            left_alignment->row_number++;
+        }
+        else {
+            // Update p_l_row to point at r_row->l_row's n_row pointer
+            p_l_row = &(r_row->l_row->n_row);
+        }
+        r_row = r_row->n_row; // Move to the next right alignment row
+    }
+
+    // Align the interstitial insert sequences, padding the left_gap_sequence strings with gaps to represent the alignment
+    int64_t interstitial_alignment_length = align_interstitial_gaps_abpoa(right_alignment);
+
+    // Now finally extend the left alignment rows to include the right alignment rows
+    Alignment_Row *l_row = left_alignment->row;
+    char *right_gap = make_run(right_alignment->column_number + interstitial_alignment_length, '-'); // any trailing bases needed
+    while(l_row != NULL) {
+        if(l_row->r_row == NULL) {
+            // Is a deletion, so add in trailing gaps equal in length to the right alignment length plus any interstitial
+            // gap
+            char *bases = stString_print("%s%s", l_row->bases, right_gap);
+            free(l_row->bases);
+            l_row->bases = bases;
+        }
+        else {
+            Alignment_Row *r_row = l_row->r_row;
+
+            // Check the rows agree coordinate wise
+            assert(strcmp(l_row->sequence_name, r_row->sequence_name) == 0);
+            assert(l_row->strand == r_row->strand);
+            assert(l_row->start + l_row->length <= r_row->start);
+
+            // Is not a deletion, so merge together two adjacent rows
+            assert(r_row->left_gap_sequence != NULL);
+            assert(strlen(r_row->left_gap_sequence) == interstitial_alignment_length);
+            char *bases = stString_print("%s%s%s", l_row->bases, r_row->left_gap_sequence, r_row->bases);
+            free(l_row->bases); // clean up
+            l_row->bases = bases;
+
+            // Update the left row's length coordinate
+            int64_t interstitial_bases = r_row->start - (l_row->start + l_row->length);
+            l_row->length += interstitial_bases + r_row->length;
+            // Update the l_row's r_row pointer...
+            if(r_row->r_row != NULL) { // Check pointers are correct
+                assert(r_row->r_row->l_row == r_row);
+            }
+            l_row->r_row = r_row->r_row;
+            if(l_row->r_row != NULL) {
+                l_row->r_row->l_row = l_row;
+            }
+            // Null r_row's left and right pointers
+            r_row->l_row = NULL;
+            r_row->r_row = NULL;
+        }
+
+        l_row = l_row->n_row; // Move to the next left alignment row
+    }
+
+    // Calculate the number of columns in the merged alignment
+    int64_t total_column_number = left_alignment->column_number + right_alignment->column_number + interstitial_alignment_length;
+
+    // Fix the tags
+    if(left_alignment->column_tags != NULL) {
+        assert(right_alignment->column_tags != NULL);
+        Tag **combined_column_tags = st_malloc(sizeof(Tag *) * total_column_number); // Allocate an expanded set of columns
+        int64_t j=0;
+        for(int64_t i=0; i<left_alignment->column_number; i++) { // Add the left alignment's column's tags
+            combined_column_tags[j++] = left_alignment->column_tags[i];
+        }
+        for(int64_t i=0; i<interstitial_alignment_length; i++) { // Add empty tag lists for new columns
+            combined_column_tags[j++] = NULL;
+        }
+        for(int64_t i=0; i<right_alignment->column_number; i++) { // Add the right alignment's column's tags
+            combined_column_tags[j++] = right_alignment->column_tags[i];
+        }
+        free(left_alignment->column_tags); // Cleanup, but not the tag strings which we copied
+        left_alignment->column_tags = combined_column_tags;
+    }
+
+    // Fix column number
+    left_alignment->column_number = total_column_number;
+
+    // Clean up
+    alignment_destruct(right_alignment, 1);  // Delete the right alignment
+    free(right_gap);
+
+    return left_alignment;
+}
+
+
