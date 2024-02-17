@@ -615,6 +615,4 @@ Things that are ongoing:
 
 * Make `taffy add-gap-bases` use indexed fastas to avoid loading everything into memory
 
-* Add a sorting option to taffy to get the rows of an alignment in a sorted order
-
 
