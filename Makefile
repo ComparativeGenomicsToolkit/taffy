@@ -18,12 +18,6 @@ sonLib:
 	ln -f ${sonLibDir}/*.a ${LIBDIR}
 	ln -f ${sonLibDir}/sonLib.a ${LIBDIR}/libsonLib.a
 
-stTafDependencies = ${sonLibDir}/sonLib.a ${sonLibDir}/cuTest.a
-
-${sonLibDir}/sonLib.a : sonLib
-
-${sonLibDir}/cuTest.a : sonLib
-
 abPOA:
 	mkdir -p ${LIBDIR} ${INCLDIR}
 	cd taffy/submodules/abPOA && ${MAKE}
@@ -33,7 +27,11 @@ abPOA:
 
 ${LIBDIR}/libabpoa.a : abPOA
 
-stTafDependencies += ${LIBDIR}/libabpoa.a
+${sonLibDir}/sonLib.a : sonLib
+
+${sonLibDir}/cuTest.a : sonLib
+
+stTafDependencies = ${sonLibDir}/sonLib.a ${sonLibDir}/cuTest.a ${LIBDIR}/libabpoa.a
 
 ${LIBDIR}/libstTaf.a : ${libTests} ${libHeaders} ${srcDir}/alignment_block.o ${srcDir}/line_iterator.o ${srcDir}/maf.o ${srcDir}/paf.o ${srcDir}/ond.o ${srcDir}/taf.o ${srcDir}/add_gap_bases.o ${srcDir}/merge_adjacent_alignments.o ${srcDir}/prefix_sort.o ${srcDir}/tai.o ${libHeaders} ${stTafDependencies}
 	${AR} rc libstTaf.a ${srcDir}/alignment_block.o ${srcDir}/line_iterator.o ${srcDir}/maf.o ${srcDir}/paf.o ${srcDir}/ond.o ${srcDir}/taf.o ${srcDir}/add_gap_bases.o ${srcDir}/merge_adjacent_alignments.o ${srcDir}/prefix_sort.o ${srcDir}/tai.o
@@ -57,7 +55,7 @@ ${srcDir}/ond.o : ${srcDir}/ond.c ${libHeaders}
 ${srcDir}/add_gap_bases.o : ${srcDir}/add_gap_bases.cpp ${libHeaders}
 	${CXX} ${CPPFLAGS} ${CXXFLAGS} -o ${srcDir}/add_gap_bases.o -c ${srcDir}/add_gap_bases.cpp
 
-${srcDir}/merge_adjacent_alignments.o : ${srcDir}/merge_adjacent_alignments.c ${libHeaders}
+${srcDir}/merge_adjacent_alignments.o : ${srcDir}/merge_adjacent_alignments.c ${libHeaders} abPOA
 	${CC} ${CFLAGS} ${LDFLAGS} -o ${srcDir}/merge_adjacent_alignments.o -c ${srcDir}/merge_adjacent_alignments.c
 
 ${srcDir}/taf.o : ${srcDir}/taf.c ${libHeaders}
