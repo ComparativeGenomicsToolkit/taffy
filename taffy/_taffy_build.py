@@ -285,7 +285,7 @@ ffibuilder.set_source("taffy._taffy_cffi",
                                "taffy/submodules/sonLib/C/impl/sonLibFile.c",
                                "taffy/impl/line_iterator.c",
                                "taffy/impl/alignment_block.c",
-                               "taffy/impl/merge_adjacent_alignments.c",
+                               # "taffy/impl/merge_adjacent_alignments.c" - this is excluded because it uses abPOA
                                "taffy/impl/maf.c",
                                "taffy/impl/ond.c",
                                "taffy/impl/taf.c",
