@@ -269,7 +269,7 @@ There is also a utility to merge together short alignment blocks to create a mor
 
 For example, to normalize a maf file do the following:
 
-    taffy view -i MAF_FILE | taffy norm -k -b SEQUENCE_FILES out.maf
+    taffy view -i MAF_FILE | taffy norm -k -b SEQUENCE_FILES -o out.maf
 
 `taffy view` converts MAF_FILE into taf, `taffy norm` then merges together blocks. The 
 `-k` option causes the output to be in maf format. The `-b`
