@@ -12,17 +12,26 @@ all_progs: all_libs ${BINDIR}/taffy
 
 sonLib: 
 	mkdir -p ${LIBDIR} ${BINDIR}
-	cd taffy/submodules/sonLib && PKG_CONFIG_PATH=${CWD}/lib/pkgconfig:${PKG_CONFIG_PATH} ${MAKE}
+	cd ${sonLibRootDir} && PKG_CONFIG_PATH=${CWD}/lib/pkgconfig:${PKG_CONFIG_PATH} ${MAKE}
 	mkdir -p ${BINDIR} ${LIBDIR} ${INCLDIR}
-	rm -rf taffy/submodules/sonLib/bin/*.dSYM
-	ln -f taffy/submodules/sonLib/lib/*.a ${LIBDIR}
-	ln -f taffy/submodules/sonLib/lib/sonLib.a ${LIBDIR}/libsonLib.a
+	rm -rf ${sonLibRootDir}/bin/*.dSYM
+	ln -f ${sonLibDir}/*.a ${LIBDIR}
+	ln -f ${sonLibDir}/sonLib.a ${LIBDIR}/libsonLib.a
 
-stTafDependencies = ${sonLibDir}/sonLib.a ${sonLibDir}/cuTest.a
+abPOA:
+	mkdir -p ${LIBDIR} ${INCLDIR}
+	cd taffy/submodules/abPOA && ${MAKE}
+	ln -f taffy/submodules/abPOA/lib/*.a ${LIBDIR}
+	ln -f taffy/submodules/abPOA/include/*.h ${INCLDIR}
+	rm -fr ${INCLDIR}/simde && cp -r taffy/submodules/abPOA/include/simde ${INCLDIR}
+
+${LIBDIR}/libabpoa.a : abPOA
 
 ${sonLibDir}/sonLib.a : sonLib
 
 ${sonLibDir}/cuTest.a : sonLib
+
+stTafDependencies = ${sonLibDir}/sonLib.a ${sonLibDir}/cuTest.a ${LIBDIR}/libabpoa.a
 
 ${LIBDIR}/libstTaf.a : ${libTests} ${libHeaders} ${srcDir}/alignment_block.o ${srcDir}/line_iterator.o ${srcDir}/maf.o ${srcDir}/paf.o ${srcDir}/ond.o ${srcDir}/taf.o ${srcDir}/add_gap_bases.o ${srcDir}/merge_adjacent_alignments.o ${srcDir}/prefix_sort.o ${srcDir}/tai.o ${libHeaders} ${stTafDependencies}
 	${AR} rc libstTaf.a ${srcDir}/alignment_block.o ${srcDir}/line_iterator.o ${srcDir}/maf.o ${srcDir}/paf.o ${srcDir}/ond.o ${srcDir}/taf.o ${srcDir}/add_gap_bases.o ${srcDir}/merge_adjacent_alignments.o ${srcDir}/prefix_sort.o ${srcDir}/tai.o
@@ -46,7 +55,7 @@ ${srcDir}/ond.o : ${srcDir}/ond.c ${libHeaders}
 ${srcDir}/add_gap_bases.o : ${srcDir}/add_gap_bases.cpp ${libHeaders}
 	${CXX} ${CPPFLAGS} ${CXXFLAGS} -o ${srcDir}/add_gap_bases.o -c ${srcDir}/add_gap_bases.cpp
 
-${srcDir}/merge_adjacent_alignments.o : ${srcDir}/merge_adjacent_alignments.c ${libHeaders}
+${srcDir}/merge_adjacent_alignments.o : ${srcDir}/merge_adjacent_alignments.c ${libHeaders} abPOA
 	${CC} ${CFLAGS} ${LDFLAGS} -o ${srcDir}/merge_adjacent_alignments.o -c ${srcDir}/merge_adjacent_alignments.c
 
 ${srcDir}/taf.o : ${srcDir}/taf.c ${libHeaders}
@@ -93,7 +102,8 @@ python_test: all ${BINDIR}/stTafTests
 	cd tests && python3 taffyTest.py
 
 clean :
-	cd taffy/submodules/sonLib && ${MAKE} clean
+	cd ${sonLibRootDir} && ${MAKE} clean
+	cd taffy/submodules/abPOA && ${MAKE} clean
 	rm -rf *.o taffy/impl/*.o ${LIBDIR} ${BINDIR}
 
 static :

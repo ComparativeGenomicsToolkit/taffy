@@ -114,20 +114,12 @@ ffibuilder.cdef("""
     /*
      * Gets the max length of an interstitial gap sequence between this block and the next one.
      */
-    int64_t alignment_total_gap_length(Alignment *left_alignment);
+    int64_t alignment_max_gap_length(Alignment *left_alignment);
     
     /*
      * Number of shared rows between two alignments
      */
     int64_t alignment_number_of_common_rows(Alignment *left_alignment, Alignment *right_alignment);
-    
-    /*
-     * Merge together adjacent blocks into one alignment. Requires that the alignment
-     * rows are linked together (e.g. with alignment_link_adjacent). Destroys the input
-     * alignments in the process and returns a merged alignment. If there are interstitial
-     * sequences between the blocks, aligns these sequences together.
-     */
-    Alignment *alignment_merge_adjacent(Alignment *left_alignment, Alignment *right_alignment);
     
     /*
      * Cleanup a row
@@ -285,7 +277,7 @@ ffibuilder.set_source("taffy._taffy_cffi",
                                "taffy/submodules/sonLib/C/impl/sonLibFile.c",
                                "taffy/impl/line_iterator.c",
                                "taffy/impl/alignment_block.c",
-                               "taffy/impl/merge_adjacent_alignments.c",
+                               # "taffy/impl/merge_adjacent_alignments.c" - this is excluded because it uses abPOA
                                "taffy/impl/maf.c",
                                "taffy/impl/ond.c",
                                "taffy/impl/taf.c",

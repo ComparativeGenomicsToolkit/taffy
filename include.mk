@@ -44,10 +44,10 @@ endif
 
 # Hack in ARM support
 # Toggle on if "arm" is set, or if uname -m returns aarch64
-ifeq ($(shell uname -m || true), aarch64)
+ifeq ($(shell uname -m || true), arm64)
 	arm=1
 endif
-ifeq ($(shell arch || true), aarch64)
+ifeq ($(shell arch || true), arm64)
 	arm=1
 endif
 ifdef arm
@@ -92,6 +92,8 @@ LDLIBS += ${HTSLIB_LIBS}
 # libraries can't be added until they are build, so add as to LDLIBS until needed
 sonLibLibs = ${sonLibDir}/sonLib.a ${sonLibDir}/cuTest.a
 
+abpoaLibs = ${abpoaLibDir}/libapoa.a
+
 # optional hal support toggled on by setting HALDIR (ex to ../hal)
 ifdef HALDIR
 	LDLIBS += ${HALDIR}/lib/libHalBlockViz.a ${HALDIR}/lib/libHalLiftover.a ${HALDIR}/lib/libHalLod.a ${HALDIR}/lib/libHalMaf.a ${HALDIR}/lib/libHal.a
@@ -114,5 +116,5 @@ ifdef HALDIR
 endif
 
 # note: the CACTUS_STATIC_LINK_FLAGS below can generally be empty -- it's used by the static builder script only
-LDLIBS += ${sonLibLibs} ${LIBS} -L${rootPath}/lib -Wl,-rpath,${rootPath}/lib -lz -lbz2 -lpthread -lm -lstdc++ -lm ${CACTUS_STATIC_LINK_FLAGS}
+LDLIBS += ${sonLibLibs} ${LIBS} -L${rootPath}/lib -Wl,-rpath,${rootPath}/lib -labpoa -lz -lbz2 -lpthread -lm -lstdc++ -lm ${CACTUS_STATIC_LINK_FLAGS}
 
