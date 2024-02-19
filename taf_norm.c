@@ -326,14 +326,14 @@ int taf_norm_main(int argc, char *argv[]) {
                 common_rows >= total_rows * fraction_shared_rows &&
                 (alignment_length(p_alignment) <= maximum_block_length_to_merge ||
                  alignment_length(alignment) <= maximum_block_length_to_merge)) {
-                int64_t total_gap = alignment_total_gap_length(p_alignment);
-                if (total_gap > maximum_gap_length && filter_gap_causing_dupes) {
+                int64_t max_gap = alignment_max_gap_length(p_alignment);
+                if (max_gap > maximum_gap_length && filter_gap_causing_dupes) {
                     // try to greedily filter dupes in order to get the gap length down
                     bool was_pruned = greedy_prune_by_gap(alignment, maximum_gap_length);
-                    total_gap = alignment_total_gap_length(p_alignment);
-                    assert(was_pruned == (total_gap <= maximum_gap_length));
+                    max_gap = alignment_max_gap_length(p_alignment);
+                    assert(was_pruned == (max_gap <= maximum_gap_length));
                 }
-                if (total_gap <= maximum_gap_length) {
+                if (max_gap <= maximum_gap_length) {
                     if(hal_species || fastas_map) { // Now add in any gap bases if sequences are provided
                         alignment_add_gap_strings(p_alignment, alignment, fastas_map, hal_handle, hal_species, -1);
                     }

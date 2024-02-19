@@ -231,7 +231,7 @@ int64_t alignment_length(Alignment *alignment) {
     return alignment->column_number;
 }
 
-int64_t alignment_total_gap_length(Alignment *left_alignment) {
+int64_t alignment_max_gap_length(Alignment *left_alignment) {
     Alignment_Row *l_row = left_alignment->row;
     int64_t total_interstitial_gap_length = 0;
     while(l_row != NULL) {

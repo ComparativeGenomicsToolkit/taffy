@@ -114,7 +114,7 @@ ffibuilder.cdef("""
     /*
      * Gets the max length of an interstitial gap sequence between this block and the next one.
      */
-    int64_t alignment_total_gap_length(Alignment *left_alignment);
+    int64_t alignment_max_gap_length(Alignment *left_alignment);
     
     /*
      * Number of shared rows between two alignments

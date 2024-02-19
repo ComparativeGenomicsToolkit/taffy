@@ -27,10 +27,10 @@ static void test_normalize(CuTest *testCase) {
             alignment_link_adjacent(p_alignment, alignment, 0);
 
             // And the expected length of the alignment
-            int64_t combined_alignment_length = alignment_length(p_alignment) + alignment_length(alignment) + alignment_total_gap_length(p_alignment);
+            int64_t combined_alignment_length = alignment_length(p_alignment) + alignment_length(alignment) + alignment_max_gap_length(p_alignment);
 
             if((alignment_length(p_alignment) < 50 || alignment_length(alignment) < 50) &&
-                alignment_total_gap_length(p_alignment) < 50) {
+                alignment_max_gap_length(p_alignment) < 50) {
 
                 // Calculate the number of expected rows and get list of row coordinates
                 uint64_t combined_alignment_rows=0;
