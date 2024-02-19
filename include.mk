@@ -44,10 +44,10 @@ endif
 
 # Hack in ARM support
 # Toggle on if "arm" is set, or if uname -m returns aarch64
-ifeq ($(shell uname -m || true), aarch64)
+ifeq ($(shell uname -m || true), arm64)
 	arm=1
 endif
-ifeq ($(shell arch || true), aarch64)
+ifeq ($(shell arch || true), arm64)
 	arm=1
 endif
 ifdef arm
