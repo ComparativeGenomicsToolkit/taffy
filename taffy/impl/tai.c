@@ -401,11 +401,16 @@ TaiIt *tai_iterator(Tai* tai, LI *li, bool run_length_encode_bases, const char *
 
     TaiRec *tair_1 = stSortedSet_searchLessThanOrEqual(tai->idx, &qr);
     if (tair_1 == NULL) {
-        tai_iterator_destruct(tai_it);
-        // there's no chance of finding the region as its contig isn't
-        // in the index or its start position is too low
-        // up to caller to spit out an error
-        return NULL;
+        // This will be null even if the query overlaps the first record in the index
+        // so we explicitly double check below (ie query 0-10 but index starts at 5)
+        tair_1 = stSortedSet_getFirst(tai->idx);
+        if (strcmp(tair_1->name, tai_it->name) != 0 || tai_it->end < tair_1->seq_pos) {
+            // there's no chance of finding the region as its contig isn't
+            // in the index or its start position is too low
+            // up to caller to spit out an error
+            tai_iterator_destruct(tai_it);
+            return NULL;
+        }
     }
 
     // sorted set doesn't let us iterate, so we use a second lookup to get
