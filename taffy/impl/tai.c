@@ -585,6 +585,7 @@ static unsigned int clip_alignment(Alignment *aln, Alignment *p_aln, int64_t sta
         for (Alignment_Row *row = p_aln->row; row != NULL; row = row->n_row) {
             if (row->r_row && row->r_row->length == 0) {
                 assert(strlen(row->r_row->bases) == 0);
+                row->r_row->l_row = NULL;
                 row->r_row = NULL;
             }
         }
