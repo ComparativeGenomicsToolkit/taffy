@@ -84,11 +84,7 @@ static Alignment *parse_coordinates_and_establish_block(Alignment *p_block, stLi
             alignment->row_number--;
             Alignment_Row *r = *row;
             *row = r->n_row;
-            // Fix left pointer of row in previous block
-            assert(r->l_row != NULL);
-            r->l_row->r_row = NULL;
             // Now delete the row
-            r->n_row = NULL;
             alignment_row_destruct(r);
         } else if(op_type[0] == 'g') { // Is making a gap without the sequence specified
             int64_t gap_length = atol(stList_get(tokens, j++)); // Get the index of the affected row
@@ -276,7 +272,35 @@ Tag *taf_read_header(LI *li) {
     return tag;
 }
 
-void write_column(Alignment_Row *row, int64_t column, LW *lw, bool run_length_encode_bases) {
+Tag *taf_read_header_2(LI *li, bool *run_length_encode_bases) {
+    Tag *tag = taf_read_header(li);
+    Tag *t = tag_find(tag, (char *) "run_length_encode_bases");
+    *run_length_encode_bases = t != NULL && strcmp(t->value, "1") == 0;
+    return tag;
+}
+
+
+static void write_base(char base, int64_t base_count, LW *lw, bool run_length_encode_bases, bool color_bases) {
+    if(base != '\0') {
+        if(run_length_encode_bases) {
+            LW_write(lw, "%c %" PRIi64 " ", base, base_count);
+        }
+        else {
+            for (int64_t i = 0; i < base_count; i++) {
+                if(color_bases) {
+                    char *colored_base_string = color_base_char(base);
+                    LW_write(lw, colored_base_string);
+                    free(colored_base_string);
+                }
+                else {
+                    LW_write(lw, "%c", base);
+                }
+            }
+        }
+    }
+}
+
+void write_column(Alignment_Row *row, int64_t column, LW *lw, bool run_length_encode_bases, bool color_bases) {
     char base = '\0';
     int64_t base_count = 0;
     while(row != NULL) {
@@ -284,22 +308,31 @@ void write_column(Alignment_Row *row, int64_t column, LW *lw, bool run_length_en
             base_count++;
         }
         else {
-            if(base != '\0') {
+            write_base(base, base_count, lw, run_length_encode_bases, color_bases);
+            /*if(base != '\0') {
                 if(run_length_encode_bases) {
                     LW_write(lw, "%c %" PRIi64 " ", base, base_count);
                 }
                 else {
                     for (int64_t i = 0; i < base_count; i++) {
-                        LW_write(lw, "%c", base);
+                        if(color_bases) {
+                            char *colored_base_string = color_base_char(base);
+                            LW_write(lw, colored_base_string);
+                            free(colored_base_string);
+                        }
+                        else {
+                            LW_write(lw, "%c", base);
+                        }
                     }
                 }
-            }
+            }*/
             base = row->bases[column];
             base_count = 1;
         }
         row = row->n_row;
     }
-    if(base != '\0') {
+    write_base(base, base_count, lw, run_length_encode_bases, color_bases);
+    /*if(base != '\0') {
         if(run_length_encode_bases) {
             LW_write(lw, "%c %" PRIi64 " ", base, base_count);
         }
@@ -308,7 +341,7 @@ void write_column(Alignment_Row *row, int64_t column, LW *lw, bool run_length_en
                 LW_write(lw, "%c", base);
             }
         }
-    }
+    }*/
 }
 
 void write_coordinates(Alignment_Row *p_row, Alignment_Row *row, int64_t repeat_coordinates_every_n_columns, LW *lw) {
@@ -381,26 +414,31 @@ void write_coordinates(Alignment_Row *p_row, Alignment_Row *row, int64_t repeat_
 
 void write_header(Tag *tag, LW *lw, char *header_prefix, char *delimiter, char *end);
 
-void taf_write_block(Alignment *p_alignment, Alignment *alignment, bool run_length_encode_bases,
-                     int64_t repeat_coordinates_every_n_columns, LW *lw) {
+void taf_write_block2(Alignment *p_alignment, Alignment *alignment, bool run_length_encode_bases,
+                     int64_t repeat_coordinates_every_n_columns, LW *lw, bool color_bases) {
     Alignment_Row *row = alignment->row;
     if(row != NULL) {
         int64_t column_no = strlen(row->bases);
         assert(column_no > 0);
-        write_column(row, 0, lw, run_length_encode_bases);
+        write_column(row, 0, lw, run_length_encode_bases, color_bases);
         write_coordinates(p_alignment != NULL ? p_alignment->row : NULL, row, repeat_coordinates_every_n_columns, lw);
         if(alignment->column_tags != NULL && alignment->column_tags[0] != NULL) {
             write_header(alignment->column_tags[0], lw, " @", ":", "");
         }
         LW_write(lw, "\n");
         for(int64_t i=1; i<column_no; i++) {
-            write_column(row, i, lw, run_length_encode_bases);
+            write_column(row, i, lw, run_length_encode_bases, color_bases);
             if(alignment->column_tags != NULL && alignment->column_tags[i] != NULL) {
                 write_header(alignment->column_tags[i], lw, " @", ":", "");
             }
             LW_write(lw, "\n");
         }
     }
+}
+
+void taf_write_block(Alignment *p_alignment, Alignment *alignment, bool run_length_encode_bases,
+                       int64_t repeat_coordinates_every_n_columns, LW *lw) {
+    taf_write_block2(p_alignment, alignment, run_length_encode_bases, repeat_coordinates_every_n_columns, lw, 0);
 }
 
 void taf_write_header(Tag *tag, LW *lw) {

@@ -32,7 +32,7 @@ typedef struct _alignment {
 
 struct _row { // Each row encodes the information about an aligned sequence
     char *sequence_name; // name of sequence
-    int64_t start, length, sequence_length; // zero based, half open coordinates
+    int64_t start, length, sequence_length; // zero based, half open coordinates, length is the number of non gap bases in the row
     bool strand; // nonzero is "+" else "-"
     char *bases; // [A-Za-z*+]* string of bases and gaps representing the alignment of the row
     char *left_gap_sequence; // Optional interstitial gap sequence, which is the unaligned substring between this
@@ -43,6 +43,16 @@ struct _row { // Each row encodes the information about an aligned sequence
     int64_t bases_since_coordinates_reported; // this number is used by taf write coordinates to
     // indicate how many bases ago were the row's coordinates printed
 };
+
+/*
+ * Add nucleotide coloring to a character for pretty printing
+ */
+char *color_base_char(char base);
+
+/*
+ * Convert a nucleotide string into a colored string suitable for pretty printing.
+ */
+char *color_base_string(char *bases, int64_t length);
 
 /*
  * Make a tag
@@ -91,7 +101,7 @@ int64_t alignment_length(Alignment *alignment);
 /*
  * Gets the max length of an interstitial gap sequence between this block and the next one.
  */
-int64_t alignment_total_gap_length(Alignment *left_alignment);
+int64_t alignment_max_gap_length(Alignment *left_alignment);
 
 /*
  * Number of shared rows between two alignments
@@ -105,6 +115,16 @@ int64_t alignment_number_of_common_rows(Alignment *left_alignment, Alignment *ri
  * sequences between the blocks, aligns these sequences together.
  */
 Alignment *alignment_merge_adjacent(Alignment *left_alignment, Alignment *right_alignment);
+
+/*
+ * Get the rows of the alignment in a list.
+ */
+stList *alignment_get_rows_in_a_list(Alignment_Row *row);
+
+/*
+ * Set the rows in the alignment given a list of rows
+ */
+void alignment_set_rows(Alignment *alignment, stList *rows);
 
 /*
  * Read a column of the alignment into the buffer. The buffer must be initialized and be at least
@@ -139,6 +159,16 @@ char *alignment_row_to_string(Alignment_Row *row);
 char *alignment_to_string(Alignment *alignment);
 
 /*
+ * Replace bases that match the reference with a mask character.
+ */
+void alignment_mask_reference_bases(Alignment *alignment, char mask_char);
+
+/*
+ * Replace bases that match their ancestral lineage with a mask character
+ */
+void alignment_show_only_lineage_differences(Alignment *alignment, char mask_char, stList *sequence_prefixes, stList *tree_nodes);
+
+/*
  * Read a maf header line
  */
 Tag *maf_read_header(LI *li);
@@ -159,6 +189,11 @@ void maf_write_header(Tag *tag, LW *lw);
 void maf_write_block(Alignment *alignment, LW *lw);
 
 /*
+ * As maf write block, but with option to output pretty colored bases.
+ */
+void maf_write_block2(Alignment *alignment, LW *lw, bool color_bases);
+
+/*
  * Write a block as PAF. Each PAF row reflects a pairwise alignment in the block.  The all_to_all flag
  * toggles whether we write every possible pairwise alignment, or just each non-ref to ref alignment
  * where ref is the first row in the block
@@ -169,6 +204,11 @@ void paf_write_block(Alignment *alignment, LW *lw, bool all_to_all, bool cs_ciga
  * Read a taf header line
  */
 Tag *taf_read_header(LI *li);
+
+/*
+ * Read a taf header line, check if the run_length_encode_bases flag is set.
+ */
+Tag *taf_read_header_2(LI *li, bool *run_length_encode_bases);
 
 /*
  * Read a taf block - that is a column with column coordinates and all subsequent coordinate-less columns that
@@ -186,6 +226,12 @@ void taf_write_header(Tag *tag, LW *lw);
  */
 void taf_write_block(Alignment *p_alignment, Alignment *alignment, bool run_length_encode_bases,
                      int64_t repeat_coordinates_every_n_columns, LW *lw);
+
+/*
+ * As taf write block, but with option to pretty print the output
+ */
+void taf_write_block2(Alignment *p_alignment, Alignment *alignment, bool run_length_encode_bases,
+                      int64_t repeat_coordinates_every_n_columns, LW *lw, bool color_bases);
 
 
 // the following are low-level functions used in indexing.  they could
@@ -258,6 +304,62 @@ char *apply_genome_name_mapping(stHash *genome_name_map, char *input_name);
  * Apply the name mapping to an alignment block.
  */
 void apply_genome_name_mapping_to_alignment(stHash *genome_name_map, Alignment *alignment);
+
+/*
+ * Structure to represent a sequence prefix. A sequence of sequence prefixes
+ * are used to order the rows in each alignment block..
+ */
+typedef struct _Sequence_Prefix {
+    char *prefix; // The prefix string
+    int64_t prefix_length; // Length of the prefix string
+    int64_t index; // The index that a sequence matching the prefix should appear in an alignment block
+} Sequence_Prefix;
+
+Sequence_Prefix *sequence_prefix_construct(char *prefix, int64_t index);
+
+void sequence_prefix_destruct(Sequence_Prefix *sequence_prefix);
+
+/*
+ * Compare two sequence prefixes by their prefix strings
+ */
+int sequence_prefix_cmp_fn(Sequence_Prefix *p1, Sequence_Prefix *p2);
+
+/*
+ * Loads a list of sequence prefixes from a given file handle.
+ */
+stList *sequence_prefix_load(FILE *sort_fh);
+
+/*
+ * Gets the index in the list of the sequence prefix of the given row's sequence name.
+ */
+int64_t alignment_row_get_closest_sequence_prefix(Alignment_Row *row, stList *prefixes_to_sort_by);
+
+/*
+ * Sorts the rows of an alignment according to the given sequence prefixes. Reconnects the rows
+ * with the previous alignment in the process.
+ */
+void alignment_sort_the_rows(Alignment *p_alignment, Alignment *alignment, stList *prefixes_to_sort_by);
+
+/*
+ * Removes any rows from the alignment whose sequence name prefix matches a string in the prefixes_to_filtet_by list
+ */
+void alignment_filter_the_rows(Alignment *alignment, stList *prefixes_to_filter_by);
+
+/*
+ * Load sequences in fasta files into a hash from sequence names to sequences
+ */
+stHash *load_sequences_from_fasta_files(char **seq_file_names, int64_t seq_file_number);
+
+/*
+ * Load sequences in hal file into memory.
+ */
+stSet *load_sequences_from_hal_file(char *hal_file, int *hal_handle);
+
+/*
+ * Add any gap strings between representing unaligned sequences between rows of alignment and p_alignment.
+ */
+void alignment_add_gap_strings(Alignment *p_alignment, Alignment *alignment, stHash *fastas, int hal_handle, stSet *hal_species,
+                               int64_t maximum_gap_string_length);
 
 #endif /* STTAF_H_ */
 

@@ -11,10 +11,11 @@
 
 int64_t maximum_block_length_to_merge = 200;
 int64_t maximum_gap_length = 30;
-float fraction_shared_rows = 0.6;
+int64_t minimum_shared_rows = 1;
+float fraction_shared_rows = 0.0;
 int64_t repeat_coordinates_every_n_columns = 1000;
 
-static void usage() {
+static void usage(void) {
     fprintf(stderr, "taffy norm [options]\n");
     fprintf(stderr, "Normalize a taf format alignment to remove small blocks using the -m and -n options to determine what to merge \n");
     fprintf(stderr, "-i --inputFile : Input taf file to normalize. If not specified reads from stdin\n");
@@ -23,10 +24,13 @@ static void usage() {
     fprintf(stderr, "-k --maf : Print maf output instead of taf\n");
     fprintf(stderr, "-m --maximumBlockLengthToMerge : Only merge together any two adjacent blocks if one or both is less than this many bases long, by default: %" PRIi64 "\n", maximum_block_length_to_merge);
     fprintf(stderr, "-n --maximumGapLength : Only merge together two adjacent blocks if the total number of unaligned bases between the blocks is less than this many bases, by default: %" PRIi64 "\n", maximum_gap_length);
+    fprintf(stderr, "-Q --minimumSharedRows : The minimum number of rows between two blocks that need to be shared for a merge, default: %" PRIi64 "\n", minimum_shared_rows);
     fprintf(stderr, "-q --fractionSharedRows : The fraction of rows between two blocks that need to be shared for a merge, default: %f\n", fraction_shared_rows);
     fprintf(stderr, "-d --filterGapCausingDupes : Reduce the number of MAF blocks by filtering out rows that induce gaps > maximumGapLength. Rows are only filtered out if they are duplications (contig of same name appears elsewhere in block, or contig with same prefix up to \".\" appears in the same block).\n");
     fprintf(stderr, "-s --repeatCoordinatesEveryNColumns : Repeat coordinates of each sequence at least every n columns. By default: %" PRIi64 "\n", repeat_coordinates_every_n_columns);
     fprintf(stderr, "-c --useCompression : Write the output using bgzip compression.\n");
+    fprintf(stderr, "-a --halFile : HAL file for extracting gap sequence (MAF must be created with hal2maf *without* --onlySequenceNames)\n");
+    fprintf(stderr, "-b --seqFiles : Fasta files for extracting gap sequence. Do not specify both this option and --halFile\n");
     fprintf(stderr, "-h --help : Print this help message\n");
 }
 
@@ -139,14 +143,6 @@ static bool greedy_prune_by_gap(Alignment *alignment, int64_t maximum_gap_length
             if (row == row_to_prune) {
                 assert(p_row != NULL);
                 p_row->n_row = row->n_row;
-                if (row->l_row) {
-                    row->l_row->r_row = NULL;
-                } 
-                if (row->r_row) {
-                    row->r_row->l_row = NULL;
-                    free(row->r_row->left_gap_sequence);
-                    row->r_row->left_gap_sequence = NULL;                    
-                }
                 alignment_row_destruct(row);
                 ++to_prune_idx;
                 row_to_prune = to_prune_idx < stList_length(to_prune) ? stList_get(to_prune, to_prune_idx) : NULL;
@@ -168,6 +164,7 @@ static bool greedy_prune_by_gap(Alignment *alignment, int64_t maximum_gap_length
     return pruned;
 }
 
+
 int taf_norm_main(int argc, char *argv[]) {
     time_t startTime = time(NULL);
 
@@ -181,6 +178,8 @@ int taf_norm_main(int argc, char *argv[]) {
     bool output_maf = 0;
     bool use_compression = 0;
     bool filter_gap_causing_dupes = 0;
+    stList *fasta_files = stList_construct();
+    char *hal_file = NULL;
 
     ///////////////////////////////////////////////////////////////////////////
     // Parse the inputs
@@ -195,13 +194,16 @@ int taf_norm_main(int argc, char *argv[]) {
                                                 { "maximumBlockLengthToMerge", required_argument, 0, 'm' },
                                                 { "maximumGapLength", required_argument, 0, 'n' },
                                                 { "fractionSharedRows", required_argument, 0, 'q' },
+                                                { "minimumSharedRows", required_argument, 0, 'Q' },
                                                 { "filterGapCausingDupes", no_argument, 0, 'd' },
                                                 { "repeatCoordinatesEveryNColumns", required_argument, 0, 's' },
                                                 { "useCompression", no_argument, 0, 'c' },
+                                                { "halFile", required_argument, 0, 'a' },
+                                                { "seqFiles", required_argument, 0, 'b' },
                                                 { 0, 0, 0, 0 } };
 
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:o:hcm:n:dkq:s:", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:o:hcm:n:dkQ:q:s:a:b:", long_options, &option_index);
         if (key == -1) {
             break;
         }
@@ -231,6 +233,9 @@ int taf_norm_main(int argc, char *argv[]) {
             case 'd':
                 filter_gap_causing_dupes = 1;
                 break;
+            case 'Q':
+                minimum_shared_rows = atol(optarg);
+                break;
             case 'q':
                 fraction_shared_rows = atof(optarg);
                 break;
@@ -239,6 +244,16 @@ int taf_norm_main(int argc, char *argv[]) {
                 break;
             case 's':
                 repeat_coordinates_every_n_columns = atol(optarg);
+                break;
+            case 'a':
+                hal_file = optarg;
+                break;
+            case 'b':
+                // Parse the set of sequence files (this is a bit fragile - files can not start with a '-' character)
+                optind--;
+                for( ;optind < argc && *argv[optind] != '-'; optind++){
+                    stList_append(fasta_files, argv[optind]);
+                }
                 break;
             default:
                 usage();
@@ -260,6 +275,26 @@ int taf_norm_main(int argc, char *argv[]) {
     st_logInfo("Repeat coordinates every n bases : %" PRIi64 "\n", repeat_coordinates_every_n_columns);
     st_logInfo("Fraction shared rows to merge adjacent blocks : %f\n", fraction_shared_rows);
     st_logInfo("Write compressed output : %s\n", use_compression ? "true" : "false");
+    if (hal_file) {
+        st_logInfo("HAL file string : %s\n", hal_file);
+    } else {
+        st_logInfo("Number of input FASTA files : %ld\n", argc - optind);
+    }
+
+    //////////////////////////////////////////////
+    // Read in the sequences if joining over unaligned gaps
+    //////////////////////////////////////////////
+
+    stHash *fastas_map = NULL;
+    stSet *hal_species = NULL;
+    int hal_handle = -1;
+    if (hal_file) {
+        hal_species = load_sequences_from_hal_file(hal_file, &hal_handle);
+    }
+    else if(stList_length(fasta_files) > 0) {
+        fastas_map = load_sequences_from_fasta_files(stList_getBackingArray(fasta_files), stList_length(fasta_files));
+        stList_destruct(fasta_files);
+    }
 
     //////////////////////////////////////////////
     // Read in the taf blocks and merge blocks that are sufficiently small
@@ -270,13 +305,9 @@ int taf_norm_main(int argc, char *argv[]) {
     LI *li = LI_construct(input);
 
     // Pass the header line to determine parameters and write the updated taf header
-    Tag *tag = taf_read_header(li);
-    Tag *t = tag_find(tag, "run_length_encode_bases");
-    if(t != NULL && strcmp(t->value, "1") == 0) {
-        run_length_encode_bases = 1;
-        if(output_maf) { // Remove this tag from the maf output as not relevant
-            tag = tag_remove(tag, "run_length_encode_bases");
-        }
+    Tag *tag = taf_read_header_2(li, &run_length_encode_bases);
+    if(output_maf && run_length_encode_bases) { // Remove this tag from the maf output as not relevant
+        tag = tag_remove(tag, "run_length_encode_bases");
     }
     output_maf ? maf_write_header(tag, output) : taf_write_header(tag, output);
     tag_destruct(tag);
@@ -284,20 +315,28 @@ int taf_norm_main(int argc, char *argv[]) {
     Alignment *alignment, *p_alignment = NULL, *p_p_alignment = NULL;
     while((alignment = get_next_taf_block(li, run_length_encode_bases)) != NULL) {
         if(p_alignment != NULL) {
+            // First realign the rows in case we in the process of merging prior blocks we have
+            // identified rows that can be merged
+            alignment_link_adjacent(p_alignment, alignment, 1);
+
             bool merged = false;
             int64_t common_rows = alignment_number_of_common_rows(p_alignment, alignment);
             int64_t total_rows = alignment->row_number + p_alignment->row_number - common_rows;
-            if (common_rows >= total_rows * fraction_shared_rows &&
+            if (common_rows >= minimum_shared_rows &&
+                common_rows >= total_rows * fraction_shared_rows &&
                 (alignment_length(p_alignment) <= maximum_block_length_to_merge ||
                  alignment_length(alignment) <= maximum_block_length_to_merge)) {
-                int64_t total_gap = alignment_total_gap_length(p_alignment);
-                if (total_gap > maximum_gap_length && filter_gap_causing_dupes) {
+                int64_t max_gap = alignment_max_gap_length(p_alignment);
+                if (max_gap > maximum_gap_length && filter_gap_causing_dupes) {
                     // try to greedily filter dupes in order to get the gap length down
                     bool was_pruned = greedy_prune_by_gap(alignment, maximum_gap_length);
-                    total_gap = alignment_total_gap_length(p_alignment);
-                    assert(was_pruned == (total_gap <= maximum_gap_length));
+                    max_gap = alignment_max_gap_length(p_alignment);
+                    assert(was_pruned == (max_gap <= maximum_gap_length));
                 }
-                if (total_gap <= maximum_gap_length) {                    
+                if (max_gap <= maximum_gap_length) {
+                    if(hal_species || fastas_map) { // Now add in any gap bases if sequences are provided
+                        alignment_add_gap_strings(p_alignment, alignment, fastas_map, hal_handle, hal_species, -1);
+                    }
                     p_alignment = alignment_merge_adjacent(p_alignment, alignment);
                     merged = true;
                 }
@@ -331,6 +370,13 @@ int taf_norm_main(int argc, char *argv[]) {
         fclose(input);
     }
     LW_destruct(output, outputFile != NULL);
+
+    if (fastas_map) {
+        stHash_destruct(fastas_map);
+    }
+    if (hal_species) {
+        stSet_destruct(hal_species);
+    }
 
     st_logInfo("taffy norm is done, %" PRIi64 " seconds have elapsed\n", time(NULL) - startTime);
 

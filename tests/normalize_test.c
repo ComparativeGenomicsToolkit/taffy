@@ -27,10 +27,10 @@ static void test_normalize(CuTest *testCase) {
             alignment_link_adjacent(p_alignment, alignment, 0);
 
             // And the expected length of the alignment
-            int64_t combined_alignment_length = alignment_length(p_alignment) + alignment_length(alignment) + alignment_total_gap_length(p_alignment);
+            int64_t combined_alignment_length = alignment_length(p_alignment) + alignment_length(alignment) + alignment_max_gap_length(p_alignment);
 
             if((alignment_length(p_alignment) < 50 || alignment_length(alignment) < 50) &&
-                alignment_total_gap_length(p_alignment) < 50) {
+                alignment_max_gap_length(p_alignment) < 50) {
 
                 // Calculate the number of expected rows and get list of row coordinates
                 uint64_t combined_alignment_rows=0;
@@ -110,7 +110,7 @@ static void test_maf_norm_to_maf(CuTest *testCase) {
     // Example maf file
     char *example_file = "./tests/evolverMammals.maf";
     char *output_file = "./tests/evolverMammals.maf.norm";
-    int i = st_system("./bin/taffy view -i %s | ./bin/taffy add-gap-bases ./tests/seqs/* | ./bin/taffy norm -k > %s",
+    int i = st_system("./bin/taffy view -i %s | ./bin/taffy norm -k -b ./tests/seqs/* > %s",
               example_file, output_file);
     CuAssertIntEquals(testCase, 0, i); // return value should be zero
 
@@ -188,11 +188,27 @@ static void test_dupe_filter(CuTest *testCase) {
     CuAssertIntEquals(testCase, 0, diff_ret); // return value should be zero if files sames
 }
 
+static void test_norm_pipeline(CuTest *testCase) {
+    /*
+     * Run taf_norm -d on really simple test maf to make sure that it drops a gap-causing dupe
+     */
+    char *input_file = "./tests/evolverMammals.maf.mini";
+    char *filter_file = "./tests/filter_file.txt";
+    char *output_file = "./tests/evolverMammals.maf.norm_pipeline";
+    int i = st_system("./bin/taffy view -i %s | ./bin/taffy sort -f %s | ./bin/taffy norm -b ./tests/seqs/* -k > %s",
+                      input_file, filter_file, output_file);
+    CuAssertIntEquals(testCase, 0, i); // return value should be zero
+    char *truth_file = "./tests/evolverMammals.maf.mini.filtered.normalized";
+    int diff_ret = st_system("diff %s %s", output_file, truth_file);
+    CuAssertIntEquals(testCase, 0, diff_ret); // return value should be zero if files sames
+}
+
 CuSuite* normalize_test_suite(void) {
     CuSuite* suite = CuSuiteNew();
     SUITE_ADD_TEST(suite, test_normalize);
     SUITE_ADD_TEST(suite, test_maf_norm);
     SUITE_ADD_TEST(suite, test_maf_norm_to_maf);
     SUITE_ADD_TEST(suite, test_dupe_filter);
+    SUITE_ADD_TEST(suite, test_norm_pipeline);
     return suite;
 }

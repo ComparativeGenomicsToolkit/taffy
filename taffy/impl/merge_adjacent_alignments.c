@@ -1,6 +1,7 @@
 #include "taf.h"
 #include "ond.h"
 #include "sonLib.h"
+#include "abpoa.h"
 
 /*
  * Method to merge together two adjacent alignments.
@@ -178,6 +179,7 @@ int64_t align_interstitial_gaps(Alignment *alignment) {
         }
         row = row->n_row;
     }
+
     for (int64_t i = 0; i < string_no; ++i) {
         free(msa[i]);
     }
@@ -188,6 +190,216 @@ int64_t align_interstitial_gaps(Alignment *alignment) {
         free(msa_strings[i]);
     }    
     free(msa_strings);
+    return msa_length;
+}
+
+// char <--> uint8_t conversion copied over from abPOA example
+// AaCcGgTtNn ==> 0,1,2,3,4
+static unsigned char nst_nt4_table[256] = {
+    4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4, 
+    4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4, 
+    4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 5 /*'-'*/, 4, 4,
+    4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4, 
+    4, 0, 4, 1,  4, 4, 4, 2,  4, 4, 4, 4,  4, 4, 4, 4, 
+    4, 4, 4, 4,  3, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4, 
+    4, 0, 4, 1,  4, 4, 4, 2,  4, 4, 4, 4,  4, 4, 4, 4, 
+    4, 4, 4, 4,  3, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4, 
+    4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4, 
+    4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4, 
+    4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4, 
+    4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4, 
+    4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4, 
+    4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4, 
+    4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4, 
+    4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4
+};
+
+// 65,97=>A, 67,99=>C, 71,103=>G, 84,85,116,117=>T, else=>N
+static const char nst_nt256_table[256] = {
+       'A', 'C', 'G', 'T',  'N', '-', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',
+       'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', '-',  'N', 'N', 'N', 'N',
+       'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',
+       'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',
+       'N', 'A', 'N', 'C',  'N', 'N', 'N', 'G',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',
+       'N', 'N', 'N', 'N',  'T', 'T', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',
+       'N', 'A', 'N', 'C',  'N', 'N', 'N', 'G',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',
+       'N', 'N', 'N', 'N',  'T', 'T', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',
+       'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',
+       'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',
+       'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',
+       'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',
+       'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',
+       'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',
+       'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',
+       'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N',  'N', 'N', 'N', 'N'
+};
+
+static inline char msa_to_base(uint8_t n) {
+    return (char)nst_nt256_table[n];
+}
+
+static inline uint8_t msa_to_byte(char c) {
+    return nst_nt4_table[(int)c];
+}
+
+// from cactus/bar/impl/poaBarAligner.c
+abpoa_para_t* construct_abpoa_params() {
+    abpoa_para_t *abpt = abpoa_init_para();
+
+    // output options
+    abpt->out_msa = 1; // generate Row-Column multiple sequence alignment(RC-MSA), set 0 to disable
+    abpt->out_cons = 0; // generate consensus sequence, set 0 to disable
+
+    // alignment mode. 0:global alignment, 1:local, 2:extension
+    // only global works
+    abpt->align_mode = ABPOA_GLOBAL_MODE;
+
+    // banding parameters
+    abpt->wb = 300;
+    abpt->wf = 0.05;
+
+    // gap scoring model
+    abpt->gap_open1 = 400;
+    abpt->gap_ext1 = 30;
+    abpt->gap_open2 = 1200;
+    abpt->gap_ext2 = 1;
+    
+    // seeding paramters
+    abpt->disable_seeding = 1;
+    abpt->k = 19;
+    abpt->w = 10;
+    abpt->min_w = 500;
+
+    // progressive toggle
+    abpt->progressive_poa = 1;
+
+    // generate the substitution matrix
+    abpt->use_score_matrix = 0;
+    abpoa_post_set_para(abpt);
+
+    // optionally override the substitution matrix
+    char *submat_string = stString_copy("91 -114 -61 -123 -100 -114 100 -125 -61 -100 -61 -125 100 -114 -100 -123 -61 -114 91 -100 -100 -100 -100 -100 100");
+    if (submat_string && strlen(submat_string) > 0) {
+        // Note, this will be used to explicitly override abpoa's subsitution matrix just before aligning
+        abpt->use_score_matrix = 1;
+        assert(abpt->m == 5);
+        int count = 0;
+        for (char* val = strtok(submat_string, " "); val != NULL; val = strtok(NULL, " ")) {
+            abpt->mat[count++] = atoi(val);
+        }
+        assert(count == 25);
+        int i; abpt->min_mis = 0, abpt->max_mat = 0;
+        for (i = 0; i < abpt->m * abpt->m; ++i) {
+            if (abpt->mat[i] > abpt->max_mat)
+                abpt->max_mat = abpt->mat[i];
+            if (-abpt->mat[i] > abpt->min_mis) 
+                abpt->min_mis = -abpt->mat[i];
+        }
+    }
+    free(submat_string);
+    return abpt;
+}
+
+// input are row ranks, comparison is reverse-sort on length
+static int len_rev_cmp(const void* i1, const void* i2, void* length_list) {
+    int64_t len1 = (int64_t)stList_get((stList*)length_list, (int64_t)i1);
+    int64_t len2 = (int64_t)stList_get((stList*)length_list, (int64_t)i2);    
+    return (int64_t)len2 < (int64_t)len1 ? -1 : ((int64_t)len2 > (int64_t)len1 ? 1 : 0);
+}
+
+int64_t align_interstitial_gaps_abpoa(Alignment *alignment) {
+    /*
+     * Align the sequences that lie within the gaps between two adjacent blocks using abPOA.
+     * Return the length of the interstitial alignment.
+     */
+
+    // sorted input really helps abpoa, so we make some arrays for random access
+    stList *row_list = stList_construct2(alignment->row_number);
+    stList *length_list = stList_construct2(alignment->row_number);
+    stList *order_list = stList_construct2(alignment->row_number);
+    
+    // Add any missing gap strings in
+    int64_t row_idx = 0;
+    int seq_no = 0;
+    for (Alignment_Row *row = alignment->row; row != NULL; row = row->n_row) {
+        if(row->l_row != NULL && alignment_row_is_predecessor(row->l_row, row) && row->left_gap_sequence == NULL) {
+            row->left_gap_sequence = make_run(row->start - (row->l_row->start + row->l_row->length), 'N');
+        }
+        int64_t row_length = 0;
+        if (row->left_gap_sequence != NULL && row->left_gap_sequence[0] != '\0') {
+            row_length = strlen(row->left_gap_sequence);
+            ++seq_no;
+        }
+        stList_set(row_list, row_idx, (void*)row);
+        stList_set(length_list, row_idx, (void*)row_length);
+        stList_set(order_list, row_idx, (void*)row_idx);                            
+        ++row_idx;
+    }
+
+    if (seq_no == 0) {
+        stList_destruct(row_list);
+        stList_destruct(length_list);
+        stList_destruct(order_list);
+        return 0;
+    }
+
+    // sort by length decreasing
+    stList_sort2(order_list, len_rev_cmp, (void*)length_list);
+
+    // init abpoa. todo: can move this up, esp. param construction, to avoid repeated invocations
+    // though may not make a difference in practice
+    abpoa_t *ab = abpoa_init();
+    abpoa_para_t* abpoa_params = construct_abpoa_params();
+
+    // convert into abpoa input matrix    
+    int *seq_lens = (int*)st_calloc(seq_no, sizeof(int));
+    uint8_t **bseqs = (uint8_t**)st_calloc(seq_no, sizeof(uint8_t*));
+    for (int64_t i = 0; i < seq_no; ++i) {
+        row_idx = (int64_t)stList_get(order_list, i);
+        Alignment_Row *row = stList_get(row_list, row_idx);
+        assert(row->left_gap_sequence != NULL && row->left_gap_sequence[0] != '\0');
+        seq_lens[i] = strlen(row->left_gap_sequence);
+        bseqs[i] = (uint8_t*)st_calloc(seq_lens[i], sizeof(uint8_t));
+        for (int64_t col = 0; col < seq_lens[i]; ++col) {
+            bseqs[i][col] = msa_to_byte(row->left_gap_sequence[col]);
+        }
+    }
+
+    // run abpoa: todo try sorting on length
+    abpoa_msa(ab, abpoa_params, seq_no, NULL, seq_lens, bseqs, NULL, NULL);
+
+    // copy the results from the abpoa matrix back into the left_gap_sequences
+    int64_t msa_length = ab->abc->msa_len;
+    for (int64_t i = 0; i < alignment->row_number; ++i) {
+        row_idx = (int64_t)stList_get(order_list, i);
+        Alignment_Row *row = stList_get(row_list, row_idx);
+        free(row->left_gap_sequence);
+        row->left_gap_sequence = (char*)st_calloc(msa_length + 1, sizeof(char));
+        if (i < seq_no) {
+            for (int64_t col = 0; col < msa_length; ++col) {
+                row->left_gap_sequence[col] = msa_to_base(ab->abc->msa_base[i][col]);
+            }
+        } else {
+            for (int64_t col = 0; col < msa_length; ++col) {
+                row->left_gap_sequence[col] = '-';
+            }            
+        }
+        row->left_gap_sequence[msa_length] = '\0';
+    }
+
+    stList_destruct(row_list);
+    stList_destruct(length_list);
+    stList_destruct(order_list);
+
+    // free abpoa
+    abpoa_free(ab);
+    abpoa_free_para(abpoa_params);
+    free(seq_lens);
+    for (int64_t i = 0; i < seq_no; ++i) {
+        free(bseqs[i]);
+    }
+    free(bseqs);
+
     return msa_length;
 }
 
@@ -240,7 +452,7 @@ Alignment *alignment_merge_adjacent(Alignment *left_alignment, Alignment *right_
     }
 
     // Align the interstitial insert sequences, padding the left_gap_sequence strings with gaps to represent the alignment
-    int64_t interstitial_alignment_length = align_interstitial_gaps(right_alignment);
+    int64_t interstitial_alignment_length = align_interstitial_gaps_abpoa(right_alignment);
 
     // Now finally extend the left alignment rows to include the right alignment rows
     Alignment_Row *l_row = left_alignment->row;
@@ -254,29 +466,34 @@ Alignment *alignment_merge_adjacent(Alignment *left_alignment, Alignment *right_
             l_row->bases = bases;
         }
         else {
+            Alignment_Row *r_row = l_row->r_row;
+
             // Check the rows agree coordinate wise
-            assert(strcmp(l_row->sequence_name, l_row->r_row->sequence_name) == 0);
-            assert(l_row->strand == l_row->r_row->strand);
-            assert(l_row->start + l_row->length <= l_row->r_row->start);
+            assert(strcmp(l_row->sequence_name, r_row->sequence_name) == 0);
+            assert(l_row->strand == r_row->strand);
+            assert(l_row->start + l_row->length <= r_row->start);
 
             // Is not a deletion, so merge together two adjacent rows
-            assert(l_row->r_row->left_gap_sequence != NULL);
-            assert(strlen(l_row->r_row->left_gap_sequence) == interstitial_alignment_length);
-            char *bases = stString_print("%s%s%s", l_row->bases, l_row->r_row->left_gap_sequence, l_row->r_row->bases);
+            assert(r_row->left_gap_sequence != NULL);
+            assert(strlen(r_row->left_gap_sequence) == interstitial_alignment_length);
+            char *bases = stString_print("%s%s%s", l_row->bases, r_row->left_gap_sequence, r_row->bases);
             free(l_row->bases); // clean up
             l_row->bases = bases;
 
             // Update the left row's length coordinate
-            int64_t interstitial_bases = l_row->r_row->start - (l_row->start + l_row->length);
-            l_row->length += interstitial_bases + l_row->r_row->length;
+            int64_t interstitial_bases = r_row->start - (l_row->start + l_row->length);
+            l_row->length += interstitial_bases + r_row->length;
             // Update the l_row's r_row pointer...
-            if(l_row->r_row->r_row != NULL) { // Check pointers are correct
-                assert(l_row->r_row->r_row->l_row == l_row->r_row);
+            if(r_row->r_row != NULL) { // Check pointers are correct
+                assert(r_row->r_row->l_row == r_row);
             }
-            l_row->r_row = l_row->r_row->r_row;
+            l_row->r_row = r_row->r_row;
             if(l_row->r_row != NULL) {
                 l_row->r_row->l_row = l_row;
             }
+            // Null r_row's left and right pointers
+            r_row->l_row = NULL;
+            r_row->r_row = NULL;
         }
 
         l_row = l_row->n_row; // Move to the next left alignment row
@@ -312,3 +529,5 @@ Alignment *alignment_merge_adjacent(Alignment *left_alignment, Alignment *right_
 
     return left_alignment;
 }
+
+

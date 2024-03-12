@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "taffy"
-version = "0.0.1"
+version = "0.0.2"
 authors = [
   { name="Benedict Paten", email="bpaten@ucsc.edu" },
   { name="Glenn Hickey", email="glenn.hickey@gmail.com" },
@@ -22,5 +22,5 @@ classifiers = [
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/ComparativeGenomicsToolkit/taf"
-"Bug Tracker" = "https://github.com/ComparativeGenomicsToolkit/taf/issues"
+"Homepage" = "https://github.com/ComparativeGenomicsToolkit/taffy"
+"Bug Tracker" = "https://github.com/ComparativeGenomicsToolkit/taffy/issues"

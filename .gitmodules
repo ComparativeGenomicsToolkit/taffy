@@ -2,3 +2,6 @@
 [submodule "taffy/submodules/sonLib"]
 	path = taffy/submodules/sonLib
 	url = https://github.com/ComparativeGenomicsToolkit/sonLib
+[submodule "taffy/submodules/abPOA"]
+	path = taffy/submodules/abPOA
+	url = https://github.com/yangao07/abPOA.git
