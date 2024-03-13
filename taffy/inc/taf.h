@@ -7,6 +7,8 @@
 #include "sonLib.h"
 #include "line_iterator.h"
 
+#define TAF_BASE_QUALITY_TAG_KEY "q"
+
 /*
  * Structures to represent blocks of an alignment
  */

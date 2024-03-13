@@ -4,6 +4,7 @@ include ${rootPath}/include.mk
 srcDir = taffy/impl
 libHeaders = taffy/inc/*.h
 libTests = tests/*.c
+base64Dir = taffy/submodules/base64
 
 all: all_libs all_progs
 all_libs: ${LIBDIR}/libstTaf.a
@@ -31,10 +32,14 @@ ${sonLibDir}/sonLib.a : sonLib
 
 ${sonLibDir}/cuTest.a : sonLib
 
+${base64Dir}/base64.o : ${base64Dir}/base64.h ${base64Dir}/base64.c
+	cd ${base64Dir} && ${CC} ${CFLAGS} -o base64.o -c base64.c
+	ln -f ${base64Dir}/base64.h ${INCLDIR}
+
 stTafDependencies = ${sonLibDir}/sonLib.a ${sonLibDir}/cuTest.a ${LIBDIR}/libabpoa.a
 
-${LIBDIR}/libstTaf.a : ${libTests} ${libHeaders} ${srcDir}/alignment_block.o ${srcDir}/line_iterator.o ${srcDir}/maf.o ${srcDir}/paf.o ${srcDir}/ond.o ${srcDir}/taf.o ${srcDir}/add_gap_bases.o ${srcDir}/merge_adjacent_alignments.o ${srcDir}/prefix_sort.o ${srcDir}/tai.o ${libHeaders} ${stTafDependencies}
-	${AR} rc libstTaf.a ${srcDir}/alignment_block.o ${srcDir}/line_iterator.o ${srcDir}/maf.o ${srcDir}/paf.o ${srcDir}/ond.o ${srcDir}/taf.o ${srcDir}/add_gap_bases.o ${srcDir}/merge_adjacent_alignments.o ${srcDir}/prefix_sort.o ${srcDir}/tai.o
+${LIBDIR}/libstTaf.a : ${libTests} ${libHeaders} ${srcDir}/alignment_block.o ${srcDir}/line_iterator.o ${srcDir}/maf.o ${srcDir}/paf.o ${srcDir}/ond.o ${srcDir}/taf.o ${srcDir}/add_gap_bases.o ${srcDir}/merge_adjacent_alignments.o ${srcDir}/prefix_sort.o ${srcDir}/tai.o ${libHeaders} ${stTafDependencies} ${base64Dir}/base64.o
+	${AR} rc libstTaf.a ${srcDir}/alignment_block.o ${srcDir}/line_iterator.o ${srcDir}/maf.o ${srcDir}/paf.o ${srcDir}/ond.o ${srcDir}/taf.o ${srcDir}/add_gap_bases.o ${srcDir}/merge_adjacent_alignments.o ${srcDir}/prefix_sort.o ${srcDir}/tai.o ${base64Dir}/base64.o
 	mv libstTaf.a ${LIBDIR}/
 
 ${srcDir}/alignment_block.o : ${srcDir}/alignment_block.c ${libHeaders}
@@ -43,7 +48,7 @@ ${srcDir}/alignment_block.o : ${srcDir}/alignment_block.c ${libHeaders}
 ${srcDir}/line_iterator.o : ${srcDir}/line_iterator.c ${libHeaders}
 	${CC} ${CFLAGS} ${LDFLAGS} -o ${srcDir}/line_iterator.o -c ${srcDir}/line_iterator.c
 
-${srcDir}/maf.o : ${srcDir}/maf.c ${libHeaders}
+${srcDir}/maf.o : ${srcDir}/maf.c ${libHeaders} ${base64Dir}/base64.o
 	${CC} ${CFLAGS} ${LDFLAGS} -o ${srcDir}/maf.o -c ${srcDir}/maf.c
 
 ${srcDir}/paf.o : ${srcDir}/paf.c ${libHeaders}
@@ -70,7 +75,7 @@ ${srcDir}/prefix_sort.o : ${srcDir}/prefix_sort.c ${libHeaders}
 ${BINDIR}/stTafTests : ${libTests} ${LIBDIR}/libstTaf.a ${stTafDependencies}
 	${CC} ${CFLAGS} ${LDFLAGS} -o ${BINDIR}/stTafTests ${libTests} ${LIBDIR}/libstTaf.a ${LDLIBS}
 
-${BINDIR}/taffy : taf_norm.o taf_add_gap_bases.o taf_index.o taf_view.o taf_sort.o taf_stats.o taffy_main.o ${LIBDIR}/libstTaf.a ${libHeaders} ${stTafDependencies}
+${BINDIR}/taffy : taf_norm.o taf_add_gap_bases.o taf_index.o taf_view.o taf_sort.o taf_stats.o taffy_main.o ${LIBDIR}/libstTaf.a ${libHeaders} ${stTafDependencies} 
 	${CXX} ${CPPFLAGS} ${CXXFLAGS} taf_norm.o taf_add_gap_bases.o taf_index.o taf_view.o taf_sort.o taf_stats.o taffy_main.o -o ${BINDIR}/taffy ${LIBDIR}/libstTaf.a ${LDLIBS}
 
 taffy_main.o : taffy_main.cpp ${stTafDependencies} ${libHeaders}
@@ -104,6 +109,7 @@ python_test: all ${BINDIR}/stTafTests
 clean :
 	cd ${sonLibRootDir} && ${MAKE} clean
 	cd taffy/submodules/abPOA && ${MAKE} clean
+	rm -f ${base64Dir}/base64.o
 	rm -rf *.o taffy/impl/*.o ${LIBDIR} ${BINDIR}
 
 static :

@@ -159,6 +159,12 @@ The corresponding TAF file (265 bytes):
     CCCCC
     AGGGG
 
+# Base Qualities
+
+The [MAF format](https://genome.cse.ucsc.edu/FAQ/FAQformat.html#format5) can represent base qualites via `q`-lines.  Taffy will read these into `q`-tags in TAF. Whereas MAF only supports 11 quality values, `0-9` and `F`, the TAF `q`-tags allow one full bytes per quality value so roundtripping from TAF to MAF then back to TAF will be lossy. These qualites are encoded in base64 in TAF (similar to `vg`'s GAM format). To access the ith quality value in Python, you'd use `base64.b64decode(quality_string)[i]`.  
+
+Base qualities can be stored in a `q` tag in TAF. 
+
 # Installing Taffy CLI/C Library
 
 Do build this repo clone the repo as follows and then make:
