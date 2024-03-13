@@ -4,32 +4,37 @@
 #include "taf.h"
 #include "sonLib.h"
 #include "line_iterator.h"
+#include "base64.h"
 
 static void set_maf_qualities(Alignment *alignment, stList* row_qualities, stList* row_quality_rows) {
     // transpose our row qualities into the tags.
-    // first, make a tag for each quality
+    // first, make a tag for each column
     for (int64_t i = 0; i < alignment->column_number; ++i) {
-        char *column_qualities = (char*)st_calloc(alignment->row_number, sizeof(char));
+        unsigned char *column_qualities = (unsigned char*)st_calloc(alignment->row_number, sizeof(unsigned char));
         int64_t col_row_idx = 0;
         for (int64_t j = 0; j < alignment->row_number; ++j) {
-            char qual = 'F'; // todo: is there a better default?
+            unsigned char qual = 255; // todo: is there a better default?
             if (col_row_idx < stList_length(row_quality_rows) &&
                 j == (int64_t)stList_get(row_quality_rows, col_row_idx)) {
-                char* row_quals = (char*)stList_get(row_qualities, col_row_idx);
-                qual = row_quals[i];
-                // clamp it to 0-9
-                if (qual < '0') {                    
-                    qual = '0';
-                } else if (qual > '9') {
-                    qual = '9';
+                char* row_quals = (char*)stList_get(row_qualities, col_row_idx);                
+                qual = (unsigned char)row_quals[i];
+                // apply conversion from maf qual to raw qual
+                // as defined on https://genome.cse.ucsc.edu/FAQ/FAQformat.html#format5
+                if (qual == 'F') {
+                    qual = 99;
+                } else if (qual != '-') {
+                    assert(qual >= '0' && qual <= '9');
+                    qual = (qual - '0') * 5;
                 }
                 ++col_row_idx;
             }
-            // convert to ascii phred (which is bounded between 0x21 (!) and 0x7e (~)
-            column_qualities[j] = qual == 'F' ? '~' : '!' + (char)(5 * (qual - '0'));
+            column_qualities[j] = qual;
         }
-        alignment->column_tags[i] = tag_construct(TAF_BASE_QUALITY_TAG_KEY, column_qualities, NULL);
+        char *encoded_qualities = (char*)st_calloc(BASE64_ENCODE_OUT_SIZE(alignment->row_number) + 1, sizeof(char));
+        base64_encode(column_qualities, alignment->row_number, encoded_qualities);
+        alignment->column_tags[i] = tag_construct(TAF_BASE_QUALITY_TAG_KEY, encoded_qualities, NULL);
         free(column_qualities);
+        free(encoded_qualities);
     }
     stList_destruct(row_qualities);
     stList_destruct(row_quality_rows);
@@ -144,7 +149,7 @@ void maf_write_block2(Alignment *alignment, LW *lw, bool color_bases) {
     // so the assumption is either you have a quality for every base in every column, or nothing
     // will fail on an error if this doesn't hold (but we can relax if needed later)
     bool has_qualities = false;
-    Tag **col_qualities = NULL;
+    unsigned char **decoded_col_qualities = NULL;
     char *qual_buffer = NULL;
     if (alignment->column_number > 0) { 
         for (Tag *col_tag = alignment->column_tags[0]; col_tag && !has_qualities; col_tag = col_tag->n_tag) {
@@ -153,16 +158,17 @@ void maf_write_block2(Alignment *alignment, LW *lw, bool color_bases) {
             }
         }
         if (has_qualities) {
-            col_qualities = (Tag**)st_calloc(alignment->column_number, sizeof(Tag*));
-            qual_buffer = (char*)st_calloc(alignment->column_number + 1, sizeof(char));
-            // if we have qualites, fill in col_qualities so we don't have to fish for the tags again
+            decoded_col_qualities = (unsigned char**)st_calloc(alignment->column_number, sizeof(unsigned char*));
+            qual_buffer = (char*)st_calloc(alignment->column_number, sizeof(char));
+            // if we have qualites, decode them into a matrix for the entire block so they can be transposed
             for (int64_t col = 0; col < alignment->column_number; ++col) {
-                for (Tag *col_tag = alignment->column_tags[col]; col_tag && !col_qualities[col]; col_tag = col_tag->n_tag) {
+                for (Tag *col_tag = alignment->column_tags[col]; col_tag && !decoded_col_qualities[col]; col_tag = col_tag->n_tag) {
                     if (strcmp(col_tag->key, TAF_BASE_QUALITY_TAG_KEY) == 0) {
-                        col_qualities[col] = col_tag;
+                        decoded_col_qualities[col] = (unsigned char*)st_calloc(alignment->row_number + 1, sizeof(unsigned char));
+                        base64_decode(col_tag->value, BASE64_ENCODE_OUT_SIZE(alignment->row_number) - 1, decoded_col_qualities[col]);
                     }
                 }
-                if (col_qualities[col] == NULL) {
+                if (decoded_col_qualities[col] == NULL) {
                     // see comment above
                     fprintf(stderr, "Error: missing base quality at column in block with base qualities\n");
                     exit(1);
@@ -182,12 +188,12 @@ void maf_write_block2(Alignment *alignment, LW *lw, bool color_bases) {
             int64_t i = 0;
             for (int64_t col = 0; col < alignment->column_number; ++col) {
                 if (row->bases[col] != '-') {
-                    // this is an ascii-shifted phred score
-                    unsigned char qual = col_qualities[col]->value[row_idx] - (unsigned char)33;
+                    // this is a raw quality value
+                    unsigned char qual = decoded_col_qualities[col][row_idx];
                     // do the transformation shown here
                     // https://genome.ucsc.edu/FAQ/FAQformat.html#format5
                     // MAF quality value = min( floor(actual quality value/5), 9 )
-                    qual_buffer[i++] = qual >= 99 ? 'F' : (qual >= 45 ? '9' : '0' + qual/5);
+                    qual_buffer[i++] = (char)(qual >= 99 ? 'F' : (qual >= 45 ? '9' : '0' + qual/5));
                 } else {
                     qual_buffer[i++] = '-';
                 }
@@ -204,8 +210,13 @@ void maf_write_block2(Alignment *alignment, LW *lw, bool color_bases) {
         }
     }
     LW_write(lw, "\n"); // Add a blank line at the end of the block
-    free(qual_buffer);
-    free(col_qualities);
+    if (has_qualities) {
+        free(qual_buffer);
+        for (int64_t i = 0; i < alignment->column_number; ++i) {
+            free(decoded_col_qualities[i]);
+        }
+        free(decoded_col_qualities);
+    }
 }
 
 void maf_write_block(Alignment *alignment, LW *lw) {
