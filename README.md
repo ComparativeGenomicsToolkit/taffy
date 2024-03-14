@@ -184,6 +184,7 @@ All Taffy utilities are run using `taffy <command>`, where the available command
     index          create a .tai index (required for region extraction)
     sort           sort the rows of a TAF file to a desired order           
     stats          print statistics of a TAF file
+    coverage       print coverage statistics of a given genome in a TAF file
 ```
 
 Taffy supports both uncompressed and [bgzipped](http://www.htslib.org/doc/bgzip.html) input (though Taffy must be built
@@ -287,6 +288,30 @@ Taffy view first converts the input maf to TAF, taffy sort then sorts the rows o
     taffy view -i MAF_FILE | taffy sort -f FILTER_FILE -n SORT_FILE | taffy view -m
 
 Where here we additionally remove any rows with sequence names with a prefix contained in the given FILTER_FILE.
+
+## Taffy Coverage
+
+This tool calculates basic coverage and percent identity statistics of a selected reference (defaults to first row) vs all other genomes in the alignment. Whole-genome and reference-contig-level statistics are provided. The values presented are:
+
+* `ref-contig`: full name of reference contig (`_Total_` for whole-genome numbers)
+* `len`: length of `contig`
+* `query`: name of query genome
+* `aln-bp` : number of (non-`N`) bases in `ref-contig` that align to a (non-`N`) base in `query`
+* `ident-bp` : number (non-`N`) bases in `ref-contig` that align to *THE SAME* (non-`N`) base in `query`
+* `1:1-aln-bp` : number of (non-`N`) bases in `ref-contig` that align to no other positions in `reference` genome and that align to exactly one (non-`N`) base in `query`
+* `1:1-ident-bp` : number of (non-`N`) bases in `ref-contig` that align to no other positions in `reference` genome and that align to exactly one *OF THE SAME* (non-`N`) bases in `query`
+* `aln` : `aln-bp / len`
+* `1:1-aln` : `1:1-aln-bp / len`
+* `ident` : `ident-bp / aln-bp`
+* `1:1-ident` : `1:1-ident-bp / 1:1-aln-bp`
+
+* `ident` : fraction of (
+
+The coverage is broken down into overall statistics and just those corresponding to 1:1 alignments (ie where both genomes appear only once in the block). In the event of a column with multiple copies of the same genome, it will count as identical if any one of those copies matches the reference base. Total statistics as well as reference contig breakdowns are output. The percent identity  
+
+By default, the first `.` character is used to parse out the genome name from a sequence name.  So `hs1.chr1` would belong to genome `hs1`.  This does not work if the genome name itself contains a `.` character. In this case, it is best to supply the genome names with the `-g` flag, and they will be used to help the parser.  For example
+
+    taffy view -i MAF_FILE | taffy coverage -g "$(halStats --genomes HAL_FILE)" > COV.tsv
 
 # Referenced-based MAF/TAF and Indexing
 

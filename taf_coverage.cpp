@@ -353,7 +353,9 @@ void print_coverage_tsv(const ContigCoverageMap& contig_cov_map, ostream& os) {
             }
             if (genome_counts.second.tot_aligned > 0) {
                 tot_identical_pct = (double)genome_counts.second.tot_identical / genome_counts.second.tot_aligned;
-                single_identical_pct = (double)genome_counts.second.single_identical / genome_counts.second.tot_aligned;
+            }
+            if (genome_counts.second.single_aligned > 0) {
+                single_identical_pct = (double)genome_counts.second.single_identical / genome_counts.second.single_aligned;
             }
             os << contig_cov.first << "\t"
                << contig_cov.second.ref_length << "\t"
