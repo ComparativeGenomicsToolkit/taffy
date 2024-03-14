@@ -42,13 +42,12 @@ typedef map<string, CoverageMap> ContigCoverageMap;
 static void update_block_coverage(Alignment* aln, const string& ref_name, stHash* genome_names, ContigCoverageMap& contig_cov_map);
 // sum up all the coverages and add a total coverage entry in the map
 static void update_total_coverage(ContigCoverageMap& contig_cov_map, const string& key = "_Total_");
-
 // print the coverage tsv
 static void print_coverage_tsv(const ContigCoverageMap& contig_cov_map, ostream& os);
 
 static void usage() {
     fprintf(stderr, "taffy coverage [options]\n");    
-    fprintf(stderr, "Compute very basic coverage stats for a TAF file\n");
+    fprintf(stderr, "Compute very basic pairwise coverage stats as fraction and bp for a TAF file\n");
     fprintf(stderr, "-i --inputFile : Input taf file to normalize. If not specified reads from stdin\n");
     fprintf(stderr, "-r --reference : Name of reference genome. If note specified used first row in block\n");
     fprintf(stderr, "-g --genomeNames : List of genome names (quoted, space-separated), ex from \"$(halStats --genomes aln.hal)\". This can help contig name parsing which otherwise uses everything up to first . as genome name\n");
@@ -133,9 +132,10 @@ int taf_coverage_main(int argc, char *argv[]) {
     stHash* genome_names_hash = NULL;
     if (genomeNames != NULL) {
         stList* tokens = stString_splitByString(genomeNames, " ");
-        genome_names_hash = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, free, NULL);
+        genome_names_hash = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, free, free);
         for (int64_t i = 0; i < stList_length(tokens); ++i) {
-            stHash_insert(genome_names_hash, stString_copy((char*)stList_get(tokens, i)), NULL);
+            stHash_insert(genome_names_hash, stString_copy((char*)stList_get(tokens, i)),
+                          stString_copy((char*)stList_get(tokens, i)));
         }
         stList_destruct(tokens);
     }

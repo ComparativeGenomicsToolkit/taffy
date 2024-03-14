@@ -26,6 +26,7 @@ void usage() {
     fprintf(stderr, "    index          create a .tai index (required for region extraction)\n");
     fprintf(stderr, "    sort           sort the rows of a TAF file to a desired order\n");
     fprintf(stderr, "    stats          print statistics of a TAF file\n");
+    fprintf(stderr, "    covarage       print coverage statistics of a given genome in a TAF file\n");    
     fprintf(stderr, "\n");
 
 #ifdef USE_HTSLIB
