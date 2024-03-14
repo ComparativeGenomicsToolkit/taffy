@@ -14,6 +14,7 @@ extern int taf_stats_main(int argc, char *argv[]);
 }
 
 extern int taf_add_gap_bases_main(int argc, char *argv[]);
+extern int taf_coverage_main(int argc, char *argv[]);
 
 void usage() {
     fprintf(stderr, "taffy: toolkit for working with TAF and MAF multiple alignment files\n\n");
@@ -53,6 +54,8 @@ int main(int argc, char *argv[]) {
         return taf_sort_main(argc - 1, argv + 1);
     } else if (strcmp(argv[1], "stats") == 0) {
         return taf_stats_main(argc - 1, argv + 1);
+    } else if (strcmp(argv[1], "coverage") == 0) {
+        return taf_coverage_main(argc - 1, argv + 1);        
     } else {
         fprintf(stderr, "%s is not a valid taffy command\n", argv[1]);
         usage();
