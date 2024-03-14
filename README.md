@@ -294,18 +294,16 @@ Where here we additionally remove any rows with sequence names with a prefix con
 This tool calculates basic coverage and percent identity statistics of a selected reference (defaults to first row) vs all other genomes in the alignment. Whole-genome and reference-contig-level statistics are provided. The values presented are:
 
 * `ref-contig`: full name of reference contig (`_Total_` for whole-genome numbers)
-* `len`: length of `contig`
+* `len`: length of `ref-contig`
 * `query`: name of query genome
 * `aln-bp` : number of (non-`N`) bases in `ref-contig` that align to a (non-`N`) base in `query`
-* `ident-bp` : number (non-`N`) bases in `ref-contig` that align to *THE SAME* (non-`N`) base in `query`
+* `ident-bp` : number (non-`N`) bases in `ref-contig` that align to *THE SAME* (non-`N`) base in `query` at least once
 * `1:1-aln-bp` : number of (non-`N`) bases in `ref-contig` that align to no other positions in `reference` genome and that align to exactly one (non-`N`) base in `query`
 * `1:1-ident-bp` : number of (non-`N`) bases in `ref-contig` that align to no other positions in `reference` genome and that align to exactly one *OF THE SAME* (non-`N`) bases in `query`
 * `aln` : `aln-bp / len`
 * `1:1-aln` : `1:1-aln-bp / len`
 * `ident` : `ident-bp / aln-bp`
 * `1:1-ident` : `1:1-ident-bp / 1:1-aln-bp`
-
-* `ident` : fraction of (
 
 The coverage is broken down into overall statistics and just those corresponding to 1:1 alignments (ie where both genomes appear only once in the block). In the event of a column with multiple copies of the same genome, it will count as identical if any one of those copies matches the reference base. Total statistics as well as reference contig breakdowns are output. The percent identity  
 
