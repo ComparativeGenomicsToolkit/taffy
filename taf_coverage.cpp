@@ -343,14 +343,26 @@ void print_coverage_tsv(const ContigCoverageMap& contig_cov_map, ostream& os) {
 
     for (const auto& contig_cov : contig_cov_map) {
         for (const auto& genome_counts : contig_cov.second.genome_map) {
+            double tot_aligned_pct = 0;
+            double tot_identical_pct = 0;
+            double single_aligned_pct = 0;
+            double single_identical_pct = 0;
+            if (contig_cov.second.ref_length > 0) {
+                tot_aligned_pct = (double)genome_counts.second.tot_aligned / contig_cov.second.ref_length;
+                single_aligned_pct = (double)genome_counts.second.single_aligned / contig_cov.second.ref_length;                
+            }
+            if (genome_counts.second.tot_aligned > 0) {
+                tot_identical_pct = (double)genome_counts.second.tot_identical / genome_counts.second.tot_aligned;
+                single_identical_pct = (double)genome_counts.second.single_identical / genome_counts.second.tot_aligned;
+            }
             os << contig_cov.first << "\t"
                << contig_cov.second.ref_length << "\t"
                << genome_counts.first << "\t"
-               << std::setprecision(3) << std::fixed
-               << (double(genome_counts.second.tot_aligned) / contig_cov.second.ref_length)  << "\t"
-               << (double(genome_counts.second.tot_identical) / contig_cov.second.ref_length) << "\t"
-               << (double(genome_counts.second.single_aligned) / contig_cov.second.ref_length) << "\t"
-               << (double(genome_counts.second.single_identical) / contig_cov.second.ref_length) << "\t"
+               << std::setprecision(4) << std::fixed
+               << tot_aligned_pct << "\t"
+               << tot_identical_pct << "\t"
+               << single_aligned_pct << "\t"
+               << single_identical_pct << "\t"
                << genome_counts.second.tot_aligned << "\t"
                << genome_counts.second.tot_identical << "\t"
                << genome_counts.second.single_aligned << "\t"
