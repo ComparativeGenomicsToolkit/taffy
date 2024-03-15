@@ -1,0 +1,21 @@
+##maf version=1 scoring=N/A
+
+a
+s	dog.chr1	0	5	+	10	ACG-TA
+s	cat.a.chr1	0	6	+	10	ACCTTA
+s	mouse.chr1	0	5	+	10	A-GTTA
+
+a
+s	dog.chr1	5	5	+	10	ACG-TA
+s	cat.a.chr2	0	6	+	10	ACCTTA
+s	mouse.chr3	0	5	+	10	A-GTCA
+s	mouse.chr4	0	5	+	10	A-GTTA
+
+a
+s	dog.chr2	0	5	+	10	ACG-TA
+s	cat.a.chr3	0	6	+	10	ACCTTA
+s	mouse.chr4	0	5	+	10	A-GTTA
+s	dog.chr3	0	5	+	10	ACG-TA
+
+
+
