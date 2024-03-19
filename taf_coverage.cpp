@@ -14,10 +14,11 @@ extern "C" {
 #include <map>
 #include <string>
 #include <vector>
-#include <unordered_set>
+#include <set>
 #include <functional>
 #include <iostream>
 #include <iomanip>
+#include <limits>
 
 using namespace std;
 
@@ -28,6 +29,8 @@ struct CoverageCounts {
     int64_t tot_identical = 0;
     int64_t single_aligned = 0;
     int64_t single_identical = 0;
+    int64_t prev_ref_pos = 0;
+    map<int64_t, int64_t> gap_hist;
 };
 // coverage stats for a given reference contig
 struct CoverageMap {
@@ -39,11 +42,16 @@ struct CoverageMap {
 typedef map<string, CoverageMap> ContigCoverageMap;
 
 // update the coverage map for a given block
-static void update_block_coverage(Alignment* aln, const string& ref_name, stHash* genome_names, ContigCoverageMap& contig_cov_map);
+static void update_block_coverage(Alignment* aln, Alignment* prev_aln, const string& ref_name,
+                                  stHash* genome_names, ContigCoverageMap& contig_cov_map);
 // sum up all the coverages and add a total coverage entry in the map
 static void update_total_coverage(ContigCoverageMap& contig_cov_map, const string& key = "_Total_");
+// add the final gap in each ref contig and 
+static void add_final_gap(ContigCoverageMap& contig_cov_map);
+// transform so gaps counts are cumulative
+static void postprocess_gap_hist(ContigCoverageMap& contig_cov_map);
 // print the coverage tsv
-static void print_coverage_tsv(const ContigCoverageMap& contig_cov_map, ostream& os);
+static void print_coverage_tsv(const ContigCoverageMap& contig_cov_map, const set<int64_t>& gap_thresholds, ostream& os);
 
 static void usage() {
     fprintf(stderr, "taffy coverage [options]\n");    
@@ -51,6 +59,7 @@ static void usage() {
     fprintf(stderr, "-i --inputFile : Input taf file to normalize. If not specified reads from stdin\n");
     fprintf(stderr, "-r --reference : Name of reference genome. If note specified used first row in block\n");
     fprintf(stderr, "-g --genomeNames : List of genome names (quoted, space-separated), ex from \"$(halStats --genomes aln.hal)\". This can help contig name parsing which otherwise uses everything up to first . as genome name\n");
+    fprintf(stderr, "-a, --gapThreshold : Breakdown rows using given gap threshold, to restrict aligned bp to exclude gaps>threshold. Multiple allowed. \n");
     fprintf(stderr, "-l --logLevel : Set the log level\n");
     fprintf(stderr, "-h --help : Print this help message\n");
 }
@@ -65,6 +74,7 @@ int taf_coverage_main(int argc, char *argv[]) {
     char *inputFile = NULL;
     string reference;
     char *genomeNames = NULL;
+    set<int64_t> gap_thresholds = {-1};
 
     ///////////////////////////////////////////////////////////////////////////
     // Parse the inputs
@@ -75,11 +85,12 @@ int taf_coverage_main(int argc, char *argv[]) {
                                                 { "inputFile", required_argument, 0, 'i' },
                                                 { "reference", required_argument, 0, 'r' },
                                                 { "genomeNames", required_argument, 0, 'g' },
+                                                { "gapThreshold", required_argument, 0, 'a' },
                                                 { "help", no_argument, 0, 'h' },
                                                 { 0, 0, 0, 0 } };
 
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:r:g:", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:r:g:a:", long_options, &option_index);
         if (key == -1) {
             break;
         }
@@ -96,6 +107,9 @@ int taf_coverage_main(int argc, char *argv[]) {
                 break;
             case 'g':
                 genomeNames = optarg;
+                break;
+            case 'a':
+                gap_thresholds.insert(atol(optarg));
                 break;
             case 'h':
                 usage();
@@ -152,7 +166,7 @@ int taf_coverage_main(int argc, char *argv[]) {
     Alignment *alignment, *p_alignment = NULL;
     while((alignment = taf_read_block(p_alignment, run_length_encode_bases, li)) != NULL) {
         // update the coverage
-        update_block_coverage(alignment, reference, genome_names_hash, contig_coverage_map);
+        update_block_coverage(alignment, p_alignment, reference, genome_names_hash, contig_coverage_map);
 
         // Clean up the previous alignment
         if(p_alignment != NULL) {
@@ -164,11 +178,17 @@ int taf_coverage_main(int argc, char *argv[]) {
         alignment_destruct(p_alignment, 1);
     }
 
+    // add gaps from last covered base to ends of contigs
+    add_final_gap(contig_coverage_map);
+    
     // total up and print coverage
     update_total_coverage(contig_coverage_map);
 
-    print_coverage_tsv(contig_coverage_map, cout);
-    
+    // finalize the gap coverage, making it cumulative in bp
+    postprocess_gap_hist(contig_coverage_map);
+
+    // write the table to stdout
+    print_coverage_tsv(contig_coverage_map, gap_thresholds, cout);    
 
     //////////////////////////////////////////////
     // Cleanup
@@ -188,7 +208,8 @@ int taf_coverage_main(int argc, char *argv[]) {
 }
 
 
-void update_block_coverage(Alignment* aln, const string& ref_name, stHash* genome_names, ContigCoverageMap& contig_cov_map) {
+void update_block_coverage(Alignment* aln, Alignment* prev_aln, const string& ref_name, stHash* genome_names,
+                           ContigCoverageMap& contig_cov_map) {
     
     // random access rows
     vector<Alignment_Row*> rows(aln->row_number, NULL);
@@ -263,6 +284,7 @@ void update_block_coverage(Alignment* aln, const string& ref_name, stHash* genom
     }
 
     int64_t ref_count = groups[row_to_group[ref_row_idx]].size();
+    int64_t ref_pos = rows[ref_row_idx]->start;
     
     // update the coverage column by column
     for (int64_t col = 0; col < aln->column_number; ++col) {
@@ -289,12 +311,21 @@ void update_block_coverage(Alignment* aln, const string& ref_name, stHash* genom
                             };
                             found_identical = true;
                         }
+                        // update gap information for given species
+                        int64_t gap_len = ref_pos - coverage.prev_ref_pos - 1;
+                        if (gap_len > 0) {
+                            coverage.gap_hist[gap_len] += 1;
+                        }
+                        coverage.prev_ref_pos = ref_pos;
                     }
                     if (found_aligned && found_identical) {
                         break;
                     }
                 }
             }
+        }
+        if (ref_base != '-') {
+            ++ref_pos;
         }
     }
 }
@@ -324,14 +355,52 @@ void update_total_coverage(ContigCoverageMap& contig_cov_map, const string& key)
             tot_counts.tot_identical += genome_counts.second.tot_identical;
             tot_counts.single_aligned += genome_counts.second.single_aligned;
             tot_counts.single_identical += genome_counts.second.single_identical;
+            tot_counts.prev_ref_pos = numeric_limits<int64_t>::max();
+            for (const auto& gc : genome_counts.second.gap_hist) {
+                tot_counts.gap_hist[gc.first] += gc.second;
+            }
         }
     }
 }
 
-void print_coverage_tsv(const ContigCoverageMap& contig_cov_map, ostream& os) {
+void add_final_gap(ContigCoverageMap& contig_cov_map) {
+    for (auto& contig_covmap : contig_cov_map) {
+        for (auto& genome_cov : contig_covmap.second.genome_map) {
+            // add in the final gap
+            int64_t gap_len = contig_covmap.second.ref_length - genome_cov.second.prev_ref_pos - 1;
+            if (gap_len > 0) {
+                genome_cov.second.gap_hist[gap_len] += 1;
+            }
+        }
+    }
+}
+
+void postprocess_gap_hist(ContigCoverageMap& contig_cov_map) {
+    for (auto& contig_covmap : contig_cov_map) {
+        for (auto& genome_cov : contig_covmap.second.genome_map) {
+            // make gap_hist cumulative
+            // before: gap_hist[i] is the number of gaps with length == i
+            // after: gap_hist[i] is the number of gap BASES with length >=i 
+            int64_t running_total = 0;
+            for (auto gci = genome_cov.second.gap_hist.rbegin();
+                 gci != genome_cov.second.gap_hist.rend();
+                 ++gci) {
+                running_total += gci->second * gci->first;
+                gci->second = running_total;
+            }
+
+            // add in a point for whole contig
+            genome_cov.second.gap_hist[numeric_limits<int64_t>::max()] = 0;
+        }        
+    }
+}
+
+
+void print_coverage_tsv(const ContigCoverageMap& contig_cov_map, const set<int64_t>& gap_thresholds, ostream& os) {
     os << "contig" << "\t"
+       << "max-gap" << "\t"
        << "len" << "\t"
-       << "genome" << "\t"
+       << "query" << "\t"
        << "aln" << "\t"
        << "ident" << "\t"
        << "1:1-aln" << "\t"
@@ -342,33 +411,49 @@ void print_coverage_tsv(const ContigCoverageMap& contig_cov_map, ostream& os) {
        << "1:1-ident-bp" << endl;
 
     for (const auto& contig_cov : contig_cov_map) {
+        set<int64_t> contig_gap_thresholds;
+        // replace -1 with the contig length (for prettier output)
+        for (int64_t gt : gap_thresholds) {
+            if (gt >= 0) {
+                contig_gap_thresholds.insert(gt);
+            } else {
+                assert(gt == -1);
+                contig_gap_thresholds.insert(contig_cov.second.ref_length);
+            }
+        }        
         for (const auto& genome_counts : contig_cov.second.genome_map) {
-            double tot_aligned_pct = 0;
-            double tot_identical_pct = 0;
-            double single_aligned_pct = 0;
-            double single_identical_pct = 0;
-            if (contig_cov.second.ref_length > 0) {
-                tot_aligned_pct = (double)genome_counts.second.tot_aligned / contig_cov.second.ref_length;
-                single_aligned_pct = (double)genome_counts.second.single_aligned / contig_cov.second.ref_length;                
+            for (int64_t max_gap : contig_gap_thresholds) {
+                int64_t ref_length = contig_cov.second.ref_length;
+                int64_t gap_length = genome_counts.second.gap_hist.upper_bound(max_gap)->second;
+                ref_length -= gap_length;
+                double tot_aligned_pct = 0;
+                double tot_identical_pct = 0;
+                double single_aligned_pct = 0;
+                double single_identical_pct = 0;
+                if (ref_length > 0) {
+                    tot_aligned_pct = (double)genome_counts.second.tot_aligned / ref_length;
+                    single_aligned_pct = (double)genome_counts.second.single_aligned / ref_length;                
+                }
+                if (genome_counts.second.tot_aligned > 0) {
+                    tot_identical_pct = (double)genome_counts.second.tot_identical / genome_counts.second.tot_aligned;
+                }
+                if (genome_counts.second.single_aligned > 0) {
+                    single_identical_pct = (double)genome_counts.second.single_identical / genome_counts.second.single_aligned;
+                }
+                os << contig_cov.first << "\t"
+                   << max_gap << "\t"
+                   << ref_length << "\t"
+                   << genome_counts.first << "\t"
+                   << std::setprecision(4) << std::fixed
+                   << tot_aligned_pct << "\t"
+                   << tot_identical_pct << "\t"
+                   << single_aligned_pct << "\t"
+                   << single_identical_pct << "\t"
+                   << genome_counts.second.tot_aligned << "\t"
+                   << genome_counts.second.tot_identical << "\t"
+                   << genome_counts.second.single_aligned << "\t"
+                   << genome_counts.second.single_identical << endl;
             }
-            if (genome_counts.second.tot_aligned > 0) {
-                tot_identical_pct = (double)genome_counts.second.tot_identical / genome_counts.second.tot_aligned;
-            }
-            if (genome_counts.second.single_aligned > 0) {
-                single_identical_pct = (double)genome_counts.second.single_identical / genome_counts.second.single_aligned;
-            }
-            os << contig_cov.first << "\t"
-               << contig_cov.second.ref_length << "\t"
-               << genome_counts.first << "\t"
-               << std::setprecision(4) << std::fixed
-               << tot_aligned_pct << "\t"
-               << tot_identical_pct << "\t"
-               << single_aligned_pct << "\t"
-               << single_identical_pct << "\t"
-               << genome_counts.second.tot_aligned << "\t"
-               << genome_counts.second.tot_identical << "\t"
-               << genome_counts.second.single_aligned << "\t"
-               << genome_counts.second.single_identical << endl;
-        }
+        }        
     }
 }

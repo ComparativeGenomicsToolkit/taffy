@@ -294,6 +294,7 @@ Where here we additionally remove any rows with sequence names with a prefix con
 This tool calculates basic coverage and percent identity statistics of a selected reference (defaults to first row) vs all other genomes in the alignment. Whole-genome and reference-contig-level statistics are provided. The values presented are:
 
 * `ref-contig`: full name of reference contig (`_Total_` for whole-genome numbers)
+* `max-gap`: reference bases in alignment gaps greater than this value are not counted in `len`.  
 * `len`: length of `ref-contig`
 * `query`: name of query genome
 * `aln-bp` : number of (non-`N`) bases in `ref-contig` that align to a (non-`N`) base in `query`
@@ -310,6 +311,8 @@ The coverage is broken down into overall statistics and just those corresponding
 By default, the first `.` character is used to parse out the genome name from a sequence name.  So `hs1.chr1` would belong to genome `hs1`.  This does not work if the genome name itself contains a `.` character. In this case, it is best to supply the genome names with the `-g` flag, and they will be used to help the parser.  For example
 
     taffy view -i MAF_FILE | taffy coverage -g "$(halStats --genomes HAL_FILE)" > COV.tsv
+
+The `-a` option can be used to add rows that ignore gaps greater than the specified size when computing coverage.  So `-a 10 -a 100` would report coverage statistics for the whole genome, as well as ignoring gaps `>10bp` and `>100bp`. There will be `3X` the number of output rows.    
 
 # Referenced-based MAF/TAF and Indexing
 
