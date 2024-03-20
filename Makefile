@@ -70,8 +70,8 @@ ${srcDir}/prefix_sort.o : ${srcDir}/prefix_sort.c ${libHeaders}
 ${BINDIR}/stTafTests : ${libTests} ${LIBDIR}/libstTaf.a ${stTafDependencies}
 	${CC} ${CFLAGS} ${LDFLAGS} -o ${BINDIR}/stTafTests ${libTests} ${LIBDIR}/libstTaf.a ${LDLIBS}
 
-${BINDIR}/taffy : taf_norm.o taf_add_gap_bases.o taf_index.o taf_view.o taf_sort.o taf_stats.o taffy_main.o ${LIBDIR}/libstTaf.a ${libHeaders} ${stTafDependencies}
-	${CXX} ${CPPFLAGS} ${CXXFLAGS} taf_norm.o taf_add_gap_bases.o taf_index.o taf_view.o taf_sort.o taf_stats.o taffy_main.o -o ${BINDIR}/taffy ${LIBDIR}/libstTaf.a ${LDLIBS}
+${BINDIR}/taffy : taf_norm.o taf_add_gap_bases.o taf_index.o taf_view.o taf_sort.o taf_stats.o taf_coverage.o taffy_main.o ${LIBDIR}/libstTaf.a ${libHeaders} ${stTafDependencies}
+	${CXX} ${CPPFLAGS} ${CXXFLAGS} taf_norm.o taf_add_gap_bases.o taf_index.o taf_view.o taf_sort.o taf_stats.o taf_coverage.o taffy_main.o -o ${BINDIR}/taffy ${LIBDIR}/libstTaf.a ${LDLIBS}
 
 taffy_main.o : taffy_main.cpp ${stTafDependencies} ${libHeaders}
 	${CXX} ${CPPFLAGS} ${CXXFLAGS} -o taffy_main.o -c taffy_main.cpp
@@ -93,6 +93,9 @@ taf_sort.o : taf_sort.c ${stTafDependencies} ${libHeaders}
 
 taf_stats.o : taf_stats.c ${stTafDependencies} ${libHeaders}
 	${CC} ${CFLAGS} ${CFLAGS} -o taf_stats.o -c taf_stats.c
+
+taf_coverage.o : taf_coverage.cpp ${stTafDependencies} ${libHeaders}
+	${CXX} ${CPPFLAGS} ${CXXFLAGS} -o taf_coverage.o -c taf_coverage.cpp
 
 test : all ${BINDIR}/stTafTests
 	${BINDIR}/stTafTests
