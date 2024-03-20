@@ -45,7 +45,8 @@ typedef map<string, CoverageMap> ContigCoverageMap;
 static void update_block_coverage(Alignment* aln, Alignment* prev_aln, const string& ref_name,
                                   stHash* genome_names, ContigCoverageMap& contig_cov_map);
 // sum up all the coverages and add a total coverage entry in the map
-static void update_total_coverage(ContigCoverageMap& contig_cov_map, const string& key = "_Total_");
+static void update_total_coverage(ContigCoverageMap& contig_cov_map, const set<string>& sex_chrs,
+                                  const string& key = "_Total_");
 // add the final gap in each ref contig and 
 static void add_final_gap(ContigCoverageMap& contig_cov_map);
 // transform so gaps counts are cumulative
@@ -60,6 +61,7 @@ static void usage() {
     fprintf(stderr, "-r --reference : Name of reference genome. If note specified used first row in block\n");
     fprintf(stderr, "-g --genomeNames : List of genome names (quoted, space-separated), ex from \"$(halStats --genomes aln.hal)\". This can help contig name parsing which otherwise uses everything up to first . as genome name\n");
     fprintf(stderr, "-a, --gapThreshold : Breakdown rows using given gap threshold, to restrict aligned bp to exclude gaps>threshold. Multiple allowed. \n");
+    fprintf(stderr, "-s, --sexChr : Label given ref contig as a sex chromosome. Name must be full name from TAF, ex \"hs1.chrX\". Output stats will include breakdown into sex chroms and autosomes. Multiple allowed. \n");
     fprintf(stderr, "-l --logLevel : Set the log level\n");
     fprintf(stderr, "-h --help : Print this help message\n");
 }
@@ -75,6 +77,7 @@ int taf_coverage_main(int argc, char *argv[]) {
     string reference;
     char *genomeNames = NULL;
     set<int64_t> gap_thresholds = {-1};
+    set<string> sex_chrs;
 
     ///////////////////////////////////////////////////////////////////////////
     // Parse the inputs
@@ -86,11 +89,12 @@ int taf_coverage_main(int argc, char *argv[]) {
                                                 { "reference", required_argument, 0, 'r' },
                                                 { "genomeNames", required_argument, 0, 'g' },
                                                 { "gapThreshold", required_argument, 0, 'a' },
+                                                { "sexChr", required_argument, 0, 's' },                                                
                                                 { "help", no_argument, 0, 'h' },
                                                 { 0, 0, 0, 0 } };
 
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:r:g:a:", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:r:g:a:s:", long_options, &option_index);
         if (key == -1) {
             break;
         }
@@ -111,6 +115,9 @@ int taf_coverage_main(int argc, char *argv[]) {
             case 'a':
                 gap_thresholds.insert(atol(optarg));
                 break;
+            case 's':
+                sex_chrs.insert(optarg);
+                break;                
             case 'h':
                 usage();
                 return 0;
@@ -181,8 +188,8 @@ int taf_coverage_main(int argc, char *argv[]) {
     // add gaps from last covered base to ends of contigs
     add_final_gap(contig_coverage_map);
     
-    // total up and print coverage
-    update_total_coverage(contig_coverage_map);
+    // total up coverage and add sex chr/autosome breakdown if sex_chrs not empty
+    update_total_coverage(contig_coverage_map, sex_chrs);
 
     // finalize the gap coverage, making it cumulative in bp
     postprocess_gap_hist(contig_coverage_map);
@@ -330,7 +337,7 @@ void update_block_coverage(Alignment* aln, Alignment* prev_aln, const string& re
     }
 }
 
-void update_total_coverage(ContigCoverageMap& contig_cov_map, const string& key) {
+void update_total_coverage(ContigCoverageMap& contig_cov_map, const set<string>& sex_chrs, const string& key) {
     string fixed_key = key;
     if (contig_cov_map.count(key)) {
         string new_key = key + "_";
@@ -361,6 +368,43 @@ void update_total_coverage(ContigCoverageMap& contig_cov_map, const string& key)
             }
         }
     }
+
+    // add in counts for autosomes and sex chromosomes
+    if (!sex_chrs.empty()) {
+        string sex_chr_key = "_Sex_Chroms_";
+        while (contig_cov_map.count(sex_chr_key)) {
+            sex_chr_key += "_";
+        }
+        string autosomes_key = "_Autosomes_";
+        while (contig_cov_map.count(autosomes_key)) {
+            autosomes_key += "_";
+        }
+        CoverageMap& sex_cov = contig_cov_map[sex_chr_key];
+        sex_cov.ref_length = 0;
+        CoverageMap& aut_cov = contig_cov_map[autosomes_key];
+        aut_cov.ref_length = 0;
+        for (const auto& contig_covmap : contig_cov_map) {
+            if (contig_covmap.first == fixed_key ||
+                contig_covmap.first == sex_chr_key || contig_covmap.first == autosomes_key) {
+                continue;
+            }
+            CoverageMap& set_cov = sex_chrs.count(contig_covmap.first) ? sex_cov : aut_cov;
+            assert(contig_covmap.second.ref_length >= 0);
+            set_cov.ref_length += contig_covmap.second.ref_length;
+            for (const auto& genome_counts : contig_covmap.second.genome_map) {
+                CoverageCounts& tot_counts = set_cov[genome_counts.first];
+                tot_counts.tot_aligned += genome_counts.second.tot_aligned;
+                tot_counts.tot_identical += genome_counts.second.tot_identical;
+                tot_counts.single_aligned += genome_counts.second.single_aligned;
+                tot_counts.single_identical += genome_counts.second.single_identical;
+                tot_counts.prev_ref_pos = numeric_limits<int64_t>::max();
+                for (const auto& gc : genome_counts.second.gap_hist) {
+                    tot_counts.gap_hist[gc.first] += gc.second;
+                }
+            }
+        }
+    }
+    
 }
 
 void add_final_gap(ContigCoverageMap& contig_cov_map) {

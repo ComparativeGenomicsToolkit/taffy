@@ -312,7 +312,9 @@ By default, the first `.` character is used to parse out the genome name from a 
 
     taffy view -i MAF_FILE | taffy coverage -g "$(halStats --genomes HAL_FILE)" > COV.tsv
 
-The `-a` option can be used to add rows that ignore gaps greater than the specified size when computing coverage.  So `-a 10 -a 100` would report coverage statistics for the whole genome, as well as ignoring gaps `>10bp` and `>100bp`. There will be `3X` the number of output rows.    
+The `-a` option can be used to add rows that ignore gaps greater than the specified size when computing coverage.  So `-a 10 -a 100` would report coverage statistics for the whole genome, as well as ignoring gaps `>10bp` and `>100bp`. There will be `3X` the number of output rows.
+
+You can also use the `-s` option to add a breakdown of sex chromosomes and autosomes to the output table, ex `-s chrX -s chrY`. 
 
 # Referenced-based MAF/TAF and Indexing
 
