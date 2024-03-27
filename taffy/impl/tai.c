@@ -543,14 +543,12 @@ static unsigned int clip_alignment(Alignment *aln, Alignment *p_aln, int64_t sta
             }
             assert(strlen(row->bases) >= row->length);            
         }
-        aln->column_number -= left_trim;
     }
 
     //clip the right side
     int64_t right_trim = (aln->row->start + aln->row->length) - end;
     if (right_trim > 0) {
         ret = ret | 1;
-        assert(aln->column_number > right_trim);
 
         // we need to find the cut point by counting off right_trim non-gap bases from the end of the reference row
         int64_t cut_point = strlen(aln->row->bases) - 1;
@@ -577,7 +575,6 @@ static unsigned int clip_alignment(Alignment *aln, Alignment *p_aln, int64_t sta
             }
             assert(strlen(row->bases) >= row->length);
         }
-        aln->column_number -= right_trim;                
     }
 
     // now we make sure any deleted rows are unlinked from prev alignment.
@@ -606,8 +603,9 @@ static unsigned int clip_alignment(Alignment *aln, Alignment *p_aln, int64_t sta
             prev = row;
         }
     }
-    assert(aln->column_number > 0);
-    
+
+    aln->column_number = aln->row_number > 0 ? strlen(aln->row->bases) : 0;
+
     return ret;
 }
 
@@ -640,7 +638,7 @@ Alignment *tai_next(TaiIt *tai_it, LI *li) {
             tai_it->alignment = NULL;
         }
     }
-    
+
     return tai_it->p_alignment;
 }
 
