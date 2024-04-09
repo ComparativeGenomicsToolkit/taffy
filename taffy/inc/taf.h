@@ -334,14 +334,14 @@ int64_t alignment_row_get_closest_sequence_prefix(Alignment_Row *row, stList *pr
 
 /*
  * Sorts the rows of an alignment according to the given sequence prefixes. Reconnects the rows
- * with the previous alignment in the process.
+ * with the previous alignment in the process. Optionally ignore the first row so that it is not reordered
  */
-void alignment_sort_the_rows(Alignment *p_alignment, Alignment *alignment, stList *prefixes_to_sort_by);
+void alignment_sort_the_rows(Alignment *p_alignment, Alignment *alignment, stList *prefixes_to_sort_by, bool ignore_first_row);
 
 /*
- * Removes any rows from the alignment whose sequence name prefix matches a string in the prefixes_to_filtet_by list
+ * Removes any rows from the alignment whose sequence name prefix matches a string in the prefixes_to_filter_by list
  */
-void alignment_filter_the_rows(Alignment *alignment, stList *prefixes_to_filter_by);
+void alignment_filter_the_rows(Alignment *alignment, stList *prefixes_to_filter_by, bool ignore_first_row);
 
 /*
  * Load sequences in fasta files into a hash from sequence names to sequences

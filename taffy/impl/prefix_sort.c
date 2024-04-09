@@ -76,13 +76,23 @@ int alignment_sequence_prefix_cmp_fn(Alignment_Row *a1, Alignment_Row *a2,
     return i < j ? -1 : (i > j ? 1 : strcmp(a1->sequence_name, a2->sequence_name));
 }
 
-void alignment_sort_the_rows(Alignment *p_alignment, Alignment *alignment, stList *prefixes_to_sort_by) {
+void alignment_sort_the_rows(Alignment *p_alignment, Alignment *alignment, stList *prefixes_to_sort_by, bool ignore_first_row) {
     // Get the rows
-    stList *rows = alignment_get_rows_in_a_list(alignment->row);
-    assert(stList_length(rows) == alignment->row_number); // Quick sanity check
+    stList *rows = alignment_get_rows_in_a_list(ignore_first_row && alignment->row ? alignment->row->n_row : alignment->row);
+    assert(stList_length(rows) == (ignore_first_row ? alignment->row_number -1 : alignment->row_number)); // Quick sanity check
 
     // Sort the rows by the prefix ordering
     stList_sort2(rows, (int (*)(const void *, const void *, void *))alignment_sequence_prefix_cmp_fn, prefixes_to_sort_by);
+
+    // Add back the first row if ignored
+    if(ignore_first_row && alignment->row) {
+        // hack for now cos no insert method in stList!
+        stList_reverse(rows);
+        stList_append(rows, alignment->row);
+        stList_reverse(rows);
+        assert(stList_get(rows, 0) == alignment->row);
+    }
+    assert(stList_length(rows) == alignment->row_number); // One more sanity check
 
     // Re-connect the rows
     alignment_set_rows(alignment, rows);
@@ -93,8 +103,12 @@ void alignment_sort_the_rows(Alignment *p_alignment, Alignment *alignment, stLis
     }
 }
 
-void alignment_filter_the_rows(Alignment *alignment, stList *prefixes_to_filter_by) {
+void alignment_filter_the_rows(Alignment *alignment, stList *prefixes_to_filter_by, bool ignore_first_row) {
     Alignment_Row *row = alignment->row, **p_row = &(alignment->row);
+    if(ignore_first_row && row != NULL) {  // Keep the first row
+        p_row = &(row->n_row);  // Update pointers
+        row = row->n_row;
+    }
     while(row != NULL) {
         if(alignment_row_get_closest_sequence_prefix(row, prefixes_to_filter_by) != -1) { // Filter the row
             alignment->row_number--; // Reduce the number of rows
