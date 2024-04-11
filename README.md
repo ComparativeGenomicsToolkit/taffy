@@ -288,6 +288,14 @@ Taffy view first converts the input maf to TAF, taffy sort then sorts the rows o
 
 Where here we additionally remove any rows with sequence names with a prefix contained in the given FILTER_FILE.
 
+A common requirement is that a MAF/TAF has exactly one row for every species in the alignment. As Cactus, and other tools, output MAFs that don't necessarily follow this convention it is useful to be able to force this. Using:
+
+    taffy view -i MAF_FILE | taffy sort -n SORT_FILE -p PAD_FILE -r DUP_FILE | taffy view -m
+
+Where the -p specifies the prefixes to "pad", that is any block not containing a row matching a prefix
+in the PAD_FILE will have that row added, using gaps and dummy coordinates to fill in the row. Similarly, the -r specifies that any set of two or more rows whose
+names match a given prefix in the DUP_FILE will be pruned so that only one such row is kept in the block. Using these options (and optionally the filter option) allows you to construct a MAF ordered and with exactly the set of rows expected for every block.
+
 # Referenced-based MAF/TAF and Indexing
 
 Neither format specification requires it, but *in practice* TAF, like MAF, is used to specify alignments
