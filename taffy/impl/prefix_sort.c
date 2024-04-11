@@ -177,3 +177,70 @@ void alignment_show_only_lineage_differences(Alignment *alignment, char mask_cha
     // Clean up
     stHash_destruct(tree_nodes_to_bases);
 }
+
+/*
+ * Functions to pad an alignment block with extra rows
+ */
+
+static int get_closest_row_cmp_fn(Sequence_Prefix *p, Alignment_Row *r) {
+    int64_t i = strcmp(p->prefix, r->sequence_name);
+    if(i < 0) { // If prefix_name is lexicographically smaller than row's sequence could
+        // be a prefix (can not be a prefix is i > 0)
+        for(int64_t j=0; j<p->prefix_length; j++) {
+            if(r->sequence_name[j] != p->prefix[j]) {
+                return -1;
+            }
+        }
+        return 0;
+    }
+    return i;
+}
+
+static int alignment_row_cmp_fn(Alignment_Row *r1, Alignment_Row *r2) {
+    return strcmp(r1->sequence_name, r2->sequence_name);
+}
+
+void alignment_pad_the_rows(Alignment *p_alignment, Alignment *alignment, stList *sequence_prefixes) {
+    // Get the rows in a list
+    stList *rows = alignment_get_rows_in_a_list(alignment->row);
+    assert(stList_length(rows) == (alignment->row_number)); // Quick sanity check
+
+    // Sort the rows by name
+    stList_sort(rows, (int (*)(const void *, const void *))alignment_row_cmp_fn);
+
+    // Get the pointer to the last row of the alignment so we can add rows
+    Alignment_Row **p_r = &(alignment->row);
+    while(*p_r != NULL) {
+        p_r = &((*p_r)->n_row);
+    }
+
+    // For each sequence prefix
+    for(int64_t i=0; i<stList_length(sequence_prefixes); i++) {
+        Sequence_Prefix *sp = stList_get(sequence_prefixes, i);
+
+        // Check if there is a corresponding sequence name using binary search
+        Alignment_Row *r = stList_binarySearch(rows, sp,(int (*)(const void *a, const void *b))get_closest_row_cmp_fn);
+
+        if(r == NULL) { // If there isn't a corresponding row, add one to the alignment at the end setting the coordinates to zero
+            r = st_calloc(1, sizeof(Alignment_Row));
+            alignment->row_number++; // Increment the row number
+            r->sequence_name = stString_copy(sp->prefix);
+            r->bases = st_calloc(alignment->column_number+1, sizeof(char));
+            for(int64_t j=0; j<alignment->column_number; j++) {
+                r->bases[j] = '-';
+            }
+            r->bases[alignment->column_number] = '\0';
+            r->strand = 1;
+            *p_r = r;
+            p_r = &(r->n_row);
+        }
+    }
+
+    // Clean up
+    stList_destruct(rows);
+
+    // Reset the alignment of the rows with the prior row
+    if(p_alignment != NULL) {
+        alignment_link_adjacent(p_alignment, alignment, 1);
+    }
+}

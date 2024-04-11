@@ -344,6 +344,11 @@ void alignment_sort_the_rows(Alignment *p_alignment, Alignment *alignment, stLis
 void alignment_filter_the_rows(Alignment *alignment, stList *prefixes_to_filter_by, bool ignore_first_row);
 
 /*
+ * Adds additional padding rows to an alignment so that every sequence prefix in the list has a row in the alignment block
+ */
+void alignment_pad_the_rows(Alignment *p_alignment, Alignment *alignment, stList *sequence_prefixes);
+
+/*
  * Load sequences in fasta files into a hash from sequence names to sequences
  */
 stHash *load_sequences_from_fasta_files(char **seq_file_names, int64_t seq_file_number);

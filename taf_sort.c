@@ -18,6 +18,7 @@ static void usage(void) {
     fprintf(stderr, "-n --sortFile : File in which each line is a prefix of a sequence name. Rows are sorted accordingly, \n"
                     "with any ties broken by lexicographic sort of the suffixes.\n");
     fprintf(stderr, "-f --filterFile : Remove any rows with sequences matching a prefix in this file\n");
+    fprintf(stderr, "-f --padFile : Add a padding row for any sequence in this file that is not a prefix of an existing row\n");
     fprintf(stderr, "-r --ignoreFirstRow : Do not consider the first row of each maf block - useful if wanting to "
                     "preserve a reference sequence\n");
     fprintf(stderr, "-l --logLevel : Set the log level\n");
@@ -39,14 +40,20 @@ stList *load_sort_file(char *sort_file) {
 }
 
 void process_alignment_block(Alignment *pp_alignment, Alignment *p_alignment, stList *prefixes_to_filter_by,
-                             stList *prefixes_to_sort_by, bool run_length_encode_bases, bool ignore_first_row,
-                             LW *output) {
+                             stList * prefixes_to_pad, stList *prefixes_to_sort_by, bool run_length_encode_bases,
+                             bool ignore_first_row, LW *output) {
     if(p_alignment) {
         if(prefixes_to_filter_by) { //Remove rows matching a prefix
             alignment_filter_the_rows(p_alignment, prefixes_to_filter_by, ignore_first_row);
         }
+        if(prefixes_to_pad) {
+            alignment_pad_the_rows(prefixes_to_sort_by ? NULL : pp_alignment,p_alignment,
+                                   prefixes_to_pad); // Note we only reconnect to the prior alignment
+                                   // if we are not sorting - this is for efficiency (avoid runing O(ND) twice)
+        }
         if(prefixes_to_sort_by) { // Sort the alignment block rows
-            alignment_sort_the_rows(pp_alignment, p_alignment, prefixes_to_sort_by, ignore_first_row);
+            alignment_sort_the_rows(pp_alignment, p_alignment,
+                                    prefixes_to_sort_by, ignore_first_row);
         }
         // Write the block
         taf_write_block(pp_alignment, p_alignment,
@@ -68,6 +75,7 @@ int taf_sort_main(int argc, char *argv[]) {
     char *output_file = NULL;
     char *sort_file = NULL;
     char *filter_file = NULL;
+    char *pad_file = NULL;
     bool ignore_first_row = 0;
 
     ///////////////////////////////////////////////////////////////////////////
@@ -80,12 +88,13 @@ int taf_sort_main(int argc, char *argv[]) {
                                                {"outputFile", required_argument, 0, 'o'},
                                                {"sortFile",   required_argument, 0, 'n'},
                                                {"filterFile", required_argument, 0, 'f'},
-                                               {"filterFile", no_argument, 0, 'r'},
+                                               {"padFile", required_argument, 0, 'p'},
+                                               {"ignoreFirstRow", no_argument, 0, 'r'},
                                                {"help",       no_argument,       0, 'h'},
                                                {0, 0,                            0, 0}};
 
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:o:n:hrf:", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:o:n:hrf:p:", long_options, &option_index);
         if (key == -1) {
             break;
         }
@@ -105,6 +114,9 @@ int taf_sort_main(int argc, char *argv[]) {
                 break;
             case 'f':
                 filter_file = optarg;
+                break;
+            case 'p':
+                pad_file = optarg;
                 break;
             case 'r':
                 ignore_first_row = 1;
@@ -127,6 +139,7 @@ int taf_sort_main(int argc, char *argv[]) {
     st_logInfo("Output file string : %s\n", output_file);
     st_logInfo("Sort file string : %s\n", sort_file);
     st_logInfo("Filter file string : %s\n", filter_file);
+    st_logInfo("Pad file string : %s\n", pad_file);
     st_logInfo("Ignore first row : %s\n", ignore_first_row ? "True" : "False");
 
     //////////////////////////////////////////////
@@ -149,9 +162,10 @@ int taf_sort_main(int argc, char *argv[]) {
     }
     LW *output = LW_construct(output_fh, 0);
 
-    // Sort file
-    stList *prefixes_to_sort_by = load_sort_file(sort_file);
+    // Sort/filter/pad files
     stList *prefixes_to_filter_by = load_sort_file(filter_file);
+    stList *prefixes_to_pad = load_sort_file(pad_file);
+    stList *prefixes_to_sort_by = load_sort_file(sort_file);
 
     // Parse the header
     bool run_length_encode_bases;
@@ -164,13 +178,13 @@ int taf_sort_main(int argc, char *argv[]) {
     // Write the alignment blocks
     Alignment *alignment, *p_alignment = NULL, *pp_alignment = NULL;
     while((alignment = taf_read_block(p_alignment, run_length_encode_bases, li)) != NULL) {
-        process_alignment_block(pp_alignment, p_alignment, prefixes_to_filter_by,
+        process_alignment_block(pp_alignment, p_alignment, prefixes_to_filter_by, prefixes_to_pad,
                                 prefixes_to_sort_by, run_length_encode_bases, ignore_first_row, output);
         pp_alignment = p_alignment;
         p_alignment = alignment;
     }
     if(p_alignment) { // Write the final block
-        process_alignment_block(pp_alignment, p_alignment, prefixes_to_filter_by,
+        process_alignment_block(pp_alignment, p_alignment, prefixes_to_filter_by, prefixes_to_pad,
                                 prefixes_to_sort_by, run_length_encode_bases, ignore_first_row, output);
         alignment_destruct(p_alignment, 1);
     }
