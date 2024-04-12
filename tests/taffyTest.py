@@ -89,22 +89,22 @@ class TafTest(unittest.TestCase):
                  "simCow_chr6.simCow.chr6", "simDog_chr6.simDog.chr6", "simHuman_chr6.simHuman.chr6",
                  "simMouse_chr6.simMouse.chr6", "simRat_chr6.simRat.chr6"]
             # First column
-            sequence_names, column = next(column_it)
+            ref_index, column, sequence_names = next(column_it)
             self.assertEqual(s, list(sequence_names))
             self.assertEqual(column, "GGGGGGGGG")
 
             # Second column
-            sequence_names, column = next(column_it)
+            ref_index, column, sequence_names = next(column_it)
             self.assertEqual(s, list(sequence_names))
             self.assertEqual(column, "TTTTTTTTT")
 
             # Third column
-            sequence_names, column = next(column_it)
+            ref_index, column, sequence_names = next(column_it)
             self.assertEqual(s, list(sequence_names))
             self.assertEqual(column, "CCCCGCCCC")
 
             # Check it works
-            for sequence_names, column in column_it:
+            for ref_index, column, sequence_names in column_it:
                 pass
 
     def test_maf_to_taf(self, compress_file=False):
@@ -190,6 +190,21 @@ class TafTest(unittest.TestCase):
                 self.assertEqual(ref_row.sequence_name(), "Anc0.Anc0refChr0")
                 self.assertTrue(ref_row.start() >= 100)
                 self.assertTrue(ref_row.start() + ref_row.length() <= 600)
+
+        # Test random intervals using the column iterator
+        for test in range(100):
+            start = randint(0, 1000)
+            length = randint(1, 10)
+            print("Picking index", start, length)
+            with AlignmentReader(self.test_taf_file, taf_index=taf_index, sequence_name="Anc0.Anc0refChr0", start=start,
+                                 length=length) as tp:
+                j = start
+                for ref_index, column, seq_names in get_column_iterator(tp):
+                    print(start, ref_index, length)
+                    self.assertEqual(seq_names[0], "Anc0.Anc0refChr0")
+                    self.assertTrue(ref_index == j)
+                    self.assertTrue(ref_index < start + length)
+                    j += 1
 
     def test_taf_index_compression(self):
         self.test_taf_index(compress_file=True)

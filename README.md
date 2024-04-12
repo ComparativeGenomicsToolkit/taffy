@@ -2,7 +2,7 @@
 
 This is a C, Python and CLI library for manipulating/reading/writing TAF (described below) and 
 [MAF](https://genome.ucsc.edu/FAQ/FAQformat.html#format5) format multiple
-sequence alignments. It allows conversion between the formats. The Python library is built
+sequence alignments. It allows conversion between the formats and manipulation of the alignments with a number of useful utilities for preparing them for different use cases. The Python library is built
 on top of the C library and is therefore quite fast.
 
 # The TAF File Format
@@ -252,7 +252,7 @@ s	simMouse_chr6.simMouse.chr6	630640	50	+	636262	*******AT**********************
 s	simRat_chr6.simRat.chr6	642153	50	+	647215	*************A***G*****************************C**
 ```
 
-Note this requires specifying ancestor sequences in the tree and having them correspond to the names of the sequences in the input tree.
+Note this requires specifying ancestor sequences in the tree and having them correspond uniquely to the prefixes of names of the sequences in the input tree.
 
 ## Taffy Add-Gap-Bases
 
@@ -294,7 +294,7 @@ A common requirement is that a MAF/TAF has exactly one row for every species in 
 
 Where the -p specifies the prefixes to "pad", that is any block not containing a row matching a prefix
 in the PAD_FILE will have that row added, using gaps and dummy coordinates to fill in the row. Similarly, the -r specifies that any set of two or more rows whose
-names match a given prefix in the DUP_FILE will be pruned so that only one such row is kept in the block. Using these options (and optionally the filter option) allows you to construct a MAF ordered and with exactly the set of rows expected for every block.
+names match a given prefix in the DUP_FILE will be pruned so that only one such row is kept in the block. The heuristic used for dropping dupes currently is intentionally very simple: all rows after the first occurrence of a row matching the given sequence prefix are dropped. Using these options (and optionally the filter option) allows you to construct a MAF ordered and with exactly the set of rows expected for every block.
 
 # Referenced-based MAF/TAF and Indexing
 
@@ -566,6 +566,81 @@ etc.
 ```
 
 Which gets a particular subrange of blocks within the given reference sequence interval.
+
+If we want to iterate on the columns of the alignment without worrying about
+blocks we can use the column iterator:
+
+```
+from taffy.lib import TafIndex, AlignmentReader, get_column_iterator, get_window_iterator
+import pathlib
+test_taf_file = (pathlib.Path().absolute() / "./evolverMammals.taf.gz").as_posix()
+taf_index = TafIndex(test_taf_file + ".tai", is_maf=False)
+with AlignmentReader(test_taf_file, taf_index=taf_index, sequence_name="Anc0.Anc0refChr0",start=1000,length=50) as mp:
+    for ref_index, column_string in get_window_iterator(mp, include_sequence_names=False):
+        print(ref_index, column_string)
+
+995 GGCGC-GGG
+996 AAAAAAAAA
+997 GGGGGGGGG
+998 GGGTGCGTT
+999 TTTCTCTGC
+1000 GGGGGGGGG
+1001 CCCCCACCC
+1002 GGGAGGGAA
+1003 CCCCCCCC-
+1004 TTTTTTTT-
+```
+
+Or if we wish to get windows of successive columns of the alignment:
+
+```asm
+from taffy.lib import TafIndex, AlignmentReader, get_column_iterator, get_window_iterator
+import pathlib
+test_taf_file = (pathlib.Path().absolute() / "./evolverMammals.taf.gz").as_posix()
+taf_index = TafIndex(test_taf_file + ".tai", is_maf=False)
+with AlignmentReader(test_taf_file, taf_index=taf_index, sequence_name="Anc0.Anc0refChr0",start=1000,length=50) as mp:
+    for columns in get_window_iterator(mp, 
+    window_length=10, step=5,
+    include_sequence_names=False):
+        print(columns)
+...
+[(1000, 'GGGGGGGGG') (1001, 'CCCCCACCC') (1002, 'GGGAGGGAA')
+ (1003, 'CCCCCCCC-') (1004, 'TTTTTTTT-') (1005, 'TTTTTGTT-')
+ (1006, 'AAAAAAAA') (1007, 'CCCCTCTCC') (1008, 'TTTTTTTTT')
+ (1009, 'AATACTAAC')]
+[(1005, 'TTTTTGTT-') (1006, 'AAAAAAAA') (1007, 'CCCCTCTCC')
+ (1008, 'TTTTTTTTT') (1009, 'AATACTAAC') (1010, 'TTTTTTTTT')
+ (1011, 'CCCCCCCCC') (1012, 'TTTTCTTTT') (1013, 'TTTTTTTTT')
+ (1014, 'AAAACAAAA')]
+[(1010, 'TTTTTTTTT') (1011, 'CCCCCCCCC') (1012, 'TTTTCTTTT')
+ (1013, 'TTTTTTTTT') (1014, 'AAAACAAAA') (1015, 'TTTTTTTT-')
+ (1016, 'GGGTGAGT-') (1017, 'CCCCCCCC-') (1018, 'CCCCCCAC')
+ (1019, 'TTTTTTTT')]
+[(1015, 'TTTTTTTT-') (1016, 'GGGTGAGT-') (1017, 'CCCCCCCC-')
+ (1018, 'CCCCCCAC') (1019, 'TTTTTTTT') (1020, 'AAAAAAAA')
+ (1021, 'TTTTTTTTT') (1022, 'CCCCCCCCC') (1023, 'CCCTCCCTT')
+ (1024, 'AAAAAA-AA')]
+[(1020, 'AAAAAAAA') (1021, 'TTTTTTTTT') (1022, 'CCCCCCCCC')
+ (1023, 'CCCTCCCTT') (1024, 'AAAAAA-AA') (1025, 'TTTTTTTTT')
+ (1026, 'AAAAAAAAA') (1027, 'GGGGGGGGG') (1028, 'TTTTTTTTT')
+ (1029, 'AAATAAATT')]
+[(1025, 'TTTTTTTTT') (1026, 'AAAAAAAAA') (1027, 'GGGGGGGGG')
+ (1028, 'TTTTTTTTT') (1029, 'AAATAAATT') (1030, 'TTTTTTTTT')
+ (1031, 'TTTTATTTT') (1032, 'AAATGAATT') (1033, 'TTTTTTTTT')
+ (1034, 'TTTTTTTTT')]
+[(1030, 'TTTTTTTTT') (1031, 'TTTTATTTT') (1032, 'AAATGAATT')
+ (1033, 'TTTTTTTTT') (1034, 'TTTTTTTTT') (1035, 'CCCTCCCTT')
+ (1036, 'CCCCCCCCC') (1037, 'TTTCTTTCC') (1038, 'AAGATGAAG')
+ (1039, 'CCCTCCCTT')]
+[(1035, 'CCCTCCCTT') (1036, 'CCCCCCCCC') (1037, 'TTTCTTTCC')
+ (1038, 'AAGATGAAG') (1039, 'CCCTCCCTT') (1040, 'CCCCCCCCC')
+ (1041, 'TTTTCTTTT') (1042, 'TTTTTTTTT') (1043, 'TTTTTTTTT')
+ (1044, 'TTTTTTTTT')]
+[(1040, 'CCCCCCCCC') (1041, 'TTTTCTTTT') (1042, 'TTTTTTTTT')
+ (1043, 'TTTTTTTTT') (1044, 'TTTTTTTTT') (1045, 'GGGCGGTCC')
+ (1046, 'CCCCCCCCC') (1047, 'TTTTTATTT') (1048, 'TTTTTCTTT')
+ (1049, 'AAAAAAAAA')]
+```
 
 # Comparison Stats
 

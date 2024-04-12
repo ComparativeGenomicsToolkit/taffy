@@ -291,7 +291,7 @@ void alignment_filter_duplicate_rows(Alignment *alignment, stList *prefixes_to_m
         // Where there is a sequence prefix with multiple rows
         if(l != NULL && stList_length(l) > 1) {
 
-            // Rank rows....
+            // TODO: Add option to more intelligently rank rows....
 
             // Add weakest rows to the set to delete
             for(int64_t j=1; j<stList_length(l); j++) {

@@ -1,6 +1,6 @@
 from taffy._taffy_cffi import ffi, lib
 import numpy as np
-
+from collections import deque
 
 def _to_py_string(s):
     """ Convert a cffi string into a Python string in Python3 """
@@ -219,6 +219,9 @@ class AlignmentReader:
         self.taf_index = taf_index  # Store the taf index (if there is one)
         self.header_tags = self._read_header()  # Read the header tags
         self.use_run_length_encoding = "run_length_encode_bases" in self.header_tags  # Use run length encoding
+        self.sequence_name = sequence_name
+        self.start = start
+        self.length = length
 
         if taf_index:
             assert self.taf_not_maf  # Can not be trying to parse maf with a taf index
@@ -229,6 +232,10 @@ class AlignmentReader:
                                                     self.c_li_handle,
                                                     self.use_run_length_encoding,
                                                     _to_c_string(sequence_name), start, length)
+        else:
+            assert not sequence_name  # Sequence name should not be specified if taf index not provided
+            assert start == -1  # Start coordinate should not be specified if taf index not provided
+            assert length == -1  # Length should not be specified if taf index not provided
 
     def get_header(self):
         """ Get tags from the header line as a dictionary of key:value pairs.
@@ -309,17 +316,89 @@ class AlignmentReader:
         self.close()
 
 
-def get_column_iterator(alignment_reader):
+def get_column_iterator(alignment_reader,
+                        include_sequence_names=True,
+                        include_non_ref_columns=True):
     """ Create an alignment column iterator which returns successive
     columns from the alignment from an AlignmentReader object.
 
-    Each is returned as an array of sequence names and a string representing the bases
-    in the column
+    If alignment_reader was created given a sequence interval only the columns from that given reference
+    interval will be returned.
+
+    Each column returned is a reference index and string representing the column.
+    If include_sequence_names is True then a third value, an array of sequence names for the columns, is included.
+
+    If include_non_ref_columns is True then columns not including the reference in the interval will also be returned.
     """
     for alignment in alignment_reader:  # For each alignment block
-        sequence_names = alignment.get_column_sequences()
+        # Get the reference row so we can keep track of the reference coordinates
+        ref_row = alignment.first_row()
+        if ref_row is None:  # Weird case we are on an empty block - technically possible in taf
+            continue
+        ref_index = ref_row.start()
+        ref_bases = ref_row.bases()
+
+        # If we have a specific sequence range stop the iteration if out of range
+        if alignment_reader.sequence_name:
+            if ref_row.sequence_name() != alignment_reader.sequence_name:
+                break  # No longer looking at relevant sequence
+            assert alignment_reader.start <= ref_index
+
+        # If the output wants to match the column entries to the sequences
+        if include_sequence_names:
+            sequence_names = alignment.get_column_sequences()
+
         for i in range(alignment.column_number()):  # For each column
-            yield sequence_names, alignment.get_column(i)
+
+            # If we have a specific sequence range
+            if alignment_reader.sequence_name:
+                assert ref_index >= alignment_reader.start # The index will never return before the start of the query
+                # If beyond the end of the interval, stop
+                if ref_index >= alignment_reader.start + alignment_reader.length:
+                    return  # This stops the iteration
+
+            if ref_bases[i] != '-':  # If a ref column
+                if include_sequence_names:
+                    yield ref_index, alignment.get_column(i), sequence_names
+                else:
+                    yield ref_index, alignment.get_column(i)
+                ref_index += 1
+            elif include_non_ref_columns:  # If we also want non-reference columns
+                if include_sequence_names:
+                    yield ref_index, alignment.get_column(i), sequence_names
+                else:
+                    yield ref_index, alignment.get_column(i)
+
+
+def get_window_iterator(alignment_reader,
+                        window_length=10, step=1,
+                        include_sequence_names=True,
+                        include_non_ref_columns=True):
+    """ Iterate over (overlapping) windows of the alignment.
+
+    :param alignment_reader: An alignment reader to iterate from
+    :param window_length: The number of successive columns to include in a window
+    :param step: The number of columns between successive windows, must be 0 < step <= window_length.
+    If equal to the window length will mean windows are non-overlapping
+    :param include_sequence_names: See get_column_iterator()
+    :param include_non_ref_columns: See get_column_iterator()
+    :return: A numpy array of columns, each column from get_column_iterator()
+    """
+    assert step <= window_length
+    assert step >= 1
+    q = deque()
+    for column in get_column_iterator(alignment_reader,
+                                      include_sequence_names=include_sequence_names,
+                                      include_non_ref_columns=include_non_ref_columns):
+        q.append(column)  # Add to the right end of the window
+        assert len(q) <= window_length
+        if len(q) == window_length:
+            columns = np.empty(window_length, dtype=object)
+            for i in range(len(q)): # Fill out the columns
+                columns[i] = q[i]
+            yield columns
+            for i in range(step):
+                q.popleft()  # Remove from the left end of the window
 
 
 def write_taf_index_file(taf_file, index_file, index_block_size=10000):
