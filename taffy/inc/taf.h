@@ -226,10 +226,10 @@ void taf_write_block(Alignment *p_alignment, Alignment *alignment, bool run_leng
                      int64_t repeat_coordinates_every_n_columns, LW *lw);
 
 /*
- * As taf write block, but with option to pretty print the output
+ * As taf write block, but with option to pretty print the output and/or omit coordinates for viewing
  */
 void taf_write_block2(Alignment *p_alignment, Alignment *alignment, bool run_length_encode_bases,
-                      int64_t repeat_coordinates_every_n_columns, LW *lw, bool color_bases);
+                      int64_t repeat_coordinates_every_n_columns, LW *lw, bool color_bases, bool omit_coordinates);
 
 
 // the following are low-level functions used in indexing.  they could

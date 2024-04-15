@@ -415,21 +415,26 @@ void write_coordinates(Alignment_Row *p_row, Alignment_Row *row, int64_t repeat_
 void write_header(Tag *tag, LW *lw, char *header_prefix, char *delimiter, char *end);
 
 void taf_write_block2(Alignment *p_alignment, Alignment *alignment, bool run_length_encode_bases,
-                     int64_t repeat_coordinates_every_n_columns, LW *lw, bool color_bases) {
+                     int64_t repeat_coordinates_every_n_columns, LW *lw, bool color_bases, bool omit_coordinates) {
     Alignment_Row *row = alignment->row;
     if(row != NULL) {
         int64_t column_no = strlen(row->bases);
         assert(column_no > 0);
         write_column(row, 0, lw, run_length_encode_bases, color_bases);
-        write_coordinates(p_alignment != NULL ? p_alignment->row : NULL, row, repeat_coordinates_every_n_columns, lw);
-        if(alignment->column_tags != NULL && alignment->column_tags[0] != NULL) {
-            write_header(alignment->column_tags[0], lw, " @", ":", "");
+        if(!omit_coordinates) {
+            write_coordinates(p_alignment != NULL ? p_alignment->row : NULL, row, repeat_coordinates_every_n_columns,
+                              lw);
+            if (alignment->column_tags != NULL && alignment->column_tags[0] != NULL) {
+                write_header(alignment->column_tags[0], lw, " @", ":", "");
+            }
+            LW_write(lw, "\n");
         }
-        LW_write(lw, "\n");
         for(int64_t i=1; i<column_no; i++) {
             write_column(row, i, lw, run_length_encode_bases, color_bases);
-            if(alignment->column_tags != NULL && alignment->column_tags[i] != NULL) {
-                write_header(alignment->column_tags[i], lw, " @", ":", "");
+            if(!omit_coordinates) {
+                if (alignment->column_tags != NULL && alignment->column_tags[i] != NULL) {
+                    write_header(alignment->column_tags[i], lw, " @", ":", "");
+                }
             }
             LW_write(lw, "\n");
         }
@@ -438,7 +443,7 @@ void taf_write_block2(Alignment *p_alignment, Alignment *alignment, bool run_len
 
 void taf_write_block(Alignment *p_alignment, Alignment *alignment, bool run_length_encode_bases,
                        int64_t repeat_coordinates_every_n_columns, LW *lw) {
-    taf_write_block2(p_alignment, alignment, run_length_encode_bases, repeat_coordinates_every_n_columns, lw, 0);
+    taf_write_block2(p_alignment, alignment, run_length_encode_bases, repeat_coordinates_every_n_columns, lw, 0, 0);
 }
 
 void taf_write_header(Tag *tag, LW *lw) {

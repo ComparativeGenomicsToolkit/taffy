@@ -3,6 +3,7 @@ import pathlib
 import subprocess
 from random import randint
 from taffy.lib import AlignmentReader, AlignmentWriter, TafIndex, write_taf_index_file, get_column_iterator
+from taffy.newick import PhyloTree
 
 
 class TafTest(unittest.TestCase):
@@ -208,6 +209,29 @@ class TafTest(unittest.TestCase):
 
     def test_taf_index_compression(self):
         self.test_taf_index(compress_file=True)
+
+    def test_newick_parser(self):
+        """ Manually test newick tree parser """
+        a = "((A:0.1,B:0.2)C:0.3,(D:0.4)E:0.5)F:0.6;"
+        t = PhyloTree.newick_tree_parser(a)
+        self.assertEqual(str(t), a)
+
+        a_no_bl = "((A,B)C,(D)E)F;"
+        self.assertEqual(t.tree_string(include_branch_lengths=False), a_no_bl)
+        self.assertEqual(PhyloTree.newick_tree_parser(a_no_bl).tree_string(include_branch_lengths=False), a_no_bl)
+
+        a_no_in = "((A:0.1,B:0.2):0.3,(D:0.4):0.5):0.6;"
+        self.assertEqual(t.tree_string(include_internal_labels=False), a_no_in)
+        self.assertEqual(PhyloTree.newick_tree_parser(a_no_in).tree_string(include_internal_labels=False), a_no_in)
+
+        a_no_nl = "((:0.1,:0.2):0.3,(:0.4):0.5):0.6;"
+        self.assertEqual(t.tree_string(include_internal_labels=False, include_leaf_labels=False), a_no_nl)
+        self.assertEqual(PhyloTree.newick_tree_parser(a_no_nl).tree_string(include_internal_labels=False,
+                                                                           include_leaf_labels=False), a_no_nl)
+
+        a_no_to = "((,),());"
+        self.assertEqual(t.tree_string(include_internal_labels=False, include_leaf_labels=False,
+                                       include_branch_lengths=False), a_no_to)
 
 
 if __name__ == '__main__':

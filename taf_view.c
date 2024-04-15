@@ -34,6 +34,7 @@ static void usage(void) {
                     "Requires the phylogeny to be specified and ancestors to be present\n");
     fprintf(stderr, "-x --colorBases : Color bases in the output. THIS IS FOR VISUALIZATION ONLY - DOES NOT PRODUCE A VALID MAF/TAF\n");
     fprintf(stderr, "-t --phylogeny [newick tree] : Specify a phylogeny for the alignment, where species names must be prefixes of sequence names\n");
+    fprintf(stderr, "-d --omitCoordinates : When printing TAF, just print the columns omitting the coordinates. THIS IS FOR VISUALIZATION ONLY - DOES NOT PRODUCE A VALID TAF \n");
     fprintf(stderr, "-c --useCompression : Write the output using bgzip compression.\n");
     fprintf(stderr, "-n --nameMapFile : Apply the given two-column tab-separated name mapping to all assembly names in alignment\n");
     fprintf(stderr, "-l --logLevel : Set the log level\n");
@@ -90,6 +91,7 @@ int taf_view_main(int argc, char *argv[]) {
     char *nameMapFile = NULL;
     char *phylogeny_string = NULL;
     static bool color_bases = false;
+    bool omit_coordinates = false;
 
     ///////////////////////////////////////////////////////////////////////////
     // Parse the inputs
@@ -108,6 +110,7 @@ int taf_view_main(int argc, char *argv[]) {
                                                 { "showOnlyLineageDifferences", no_argument, 0, 'b' },
                                                 { "colorBases", no_argument, 0, 'x' },
                                                 { "phylogeny", required_argument, 0, 't' },
+                                                { "omitCoordinates", required_argument, 0, 'd' },
                                                 { "repeatCoordinatesEveryNColumns", required_argument, 0, 's' },
                                                 { "region", required_argument, 0, 'r' },
                                                 { "useCompression", no_argument, 0, 'c' },
@@ -116,7 +119,7 @@ int taf_view_main(int argc, char *argv[]) {
                                                 { 0, 0, 0, 0 } };
 
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:o:mPpCaucs:r:n:habxt:", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:o:mPpCaucs:r:n:habxt:d", long_options, &option_index);
         if (key == -1) {
             break;
         }
@@ -157,6 +160,9 @@ int taf_view_main(int argc, char *argv[]) {
                 break;
             case 'x':
                 color_bases = 1;
+                break;
+            case 'd':
+                omit_coordinates = 1;
                 break;
             case 's':
                 repeat_coordinates_every_n_columns = atol(optarg);
@@ -316,7 +322,7 @@ int taf_view_main(int argc, char *argv[]) {
             }
             if (taf_output) {
                 taf_write_block2(p_alignment, alignment, run_length_encode_output_bases,
-                                 repeat_coordinates_every_n_columns, output, color_bases);
+                                 repeat_coordinates_every_n_columns, output, color_bases, omit_coordinates);
             } else if (maf_output) {
                 maf_write_block2(alignment, output, color_bases);
             } else {
@@ -350,7 +356,7 @@ int taf_view_main(int argc, char *argv[]) {
             }
             if (taf_output) {
                 taf_write_block2(p_alignment, alignment, run_length_encode_output_bases,
-                                 repeat_coordinates_every_n_columns, output, color_bases);
+                                 repeat_coordinates_every_n_columns, output, color_bases, omit_coordinates);
             } else if (maf_output) {
                 maf_write_block2(alignment, output, color_bases);
             } else {
@@ -380,7 +386,7 @@ int taf_view_main(int argc, char *argv[]) {
             }
             if (taf_output) {
                 taf_write_block2(p_alignment, alignment, run_length_encode_output_bases,
-                                 repeat_coordinates_every_n_columns, output, color_bases);
+                                 repeat_coordinates_every_n_columns, output, color_bases, omit_coordinates);
             } else if (maf_output) {
                 maf_write_block2(alignment, output, color_bases);
             } else {
