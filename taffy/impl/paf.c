@@ -117,7 +117,6 @@ static void paf_write_row(Alignment_Row *q_row, Alignment_Row *t_row, int64_t nu
 
     // finalize trailing event
     if (current_start < num_col && current_start >= 0 && current_event[0] != '.') {
-        int64_t i = num_col;
         // note, this code block is (must be) identical to above. todo: factor out
         if (cs_cigar) {
             query_buffer[query_buffer_length] = '\0';
