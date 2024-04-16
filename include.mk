@@ -30,7 +30,7 @@ include ${sonLibRootDir}/include.mk
 #Turn asserts back on in spite of sonLib
 #https://github.com/ComparativeGenomicsToolkit/cactus/issues/235
 CFLAGS += -UNDEBUG
-CXXFLAGS += -UNDEBUG
+CXXFLAGS += -UNDEBUG -std=c++11
 
 ifndef TARGETOS
   TARGETOS := $(shell uname -s)
