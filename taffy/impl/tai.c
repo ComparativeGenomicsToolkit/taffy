@@ -52,7 +52,7 @@ char *tai_parse_region(const char *region, int64_t *start, int64_t *length) {
             }
         }
     }
-    return contig_length > 0 ? stString_getSubString(region, 0, contig_length) : NULL;
+    return contig_length > 0 && *length > 0 && *start >=0 ? stString_getSubString(region, 0, contig_length) : NULL;
 }
 
 // gets the "reference" (first row) coordinate information
@@ -393,6 +393,13 @@ TaiIt *tai_iterator(Tai* tai, LI *li, bool run_length_encode_bases, const char *
     tai_it->start = start;
     tai_it->end = length < 0 ? LONG_MAX : start + length;
     tai_it->run_length_encode_bases = run_length_encode_bases;
+    tai_it->alignment = NULL;
+    tai_it->p_alignment = NULL;
+
+    // no sense querying anything if length is empty
+    if (length <= 0) {
+        return tai_it;
+    }
 
     // look up the region in the taf index, which takes a dummy record
     TaiRec qr;
@@ -408,8 +415,7 @@ TaiIt *tai_iterator(Tai* tai, LI *li, bool run_length_encode_bases, const char *
             // there's no chance of finding the region as its contig isn't
             // in the index or its start position is too low
             // up to caller to spit out an error
-            tai_iterator_destruct(tai_it);
-            return NULL;
+            return tai_it;
         }
     }
 
@@ -483,17 +489,6 @@ TaiIt *tai_iterator(Tai* tai, LI *li, bool run_length_encode_bases, const char *
     if (p_alignment != NULL) {
         alignment_destruct(p_alignment, true);
         p_alignment = NULL;
-    }
-
-    // we scanned past our region, which could happen if your taf doesn't contain the whole
-    // sequence -- jsut return nothing
-    if (tai_it->alignment == NULL) {
-        if (tai_it->p_alignment) {
-            alignment_destruct(tai_it->p_alignment, true);
-        }
-        tai_iterator_destruct(tai_it);
-        st_logInfo("Scanned %" PRIi64 " blocks to NOT find region start in %" PRIi64 " seconds\n", scan_block_count, time(NULL) - start_time);
-        return NULL;
     }
 
     st_logInfo("Scanned %" PRIi64 " blocks to find region start in %" PRIi64 " seconds\n", scan_block_count, time(NULL) - start_time);
@@ -642,6 +637,10 @@ Alignment *tai_next(TaiIt *tai_it, LI *li) {
     clip_alignment(tai_it->p_alignment, NULL, tai_it->start, tai_it->end);
     
     return tai_it->p_alignment;
+}
+
+bool tai_has_next(TaiIt *tai_it) {
+    return tai_it->alignment != NULL;
 }
 
 void tai_iterator_destruct(TaiIt *tai_it) {

@@ -63,6 +63,7 @@ void tai_destruct(Tai* idx);
  * Query the taf index
  * start is 0-based
  * length can be -1 for everything
+ * If the given start point is not in the index, returns an "empty" iterator (tai_next returns NULL).
  */
 TaiIt *tai_iterator(Tai* idx, LI *li, bool run_length_encode_bases, const char *contig, int64_t start, int64_t length);
 
@@ -70,7 +71,12 @@ TaiIt *tai_iterator(Tai* idx, LI *li, bool run_length_encode_bases, const char *
  * Iterate through a region as obtained via the iterator
  */
 Alignment *tai_next(TaiIt *tai_it, LI *li);
-                    
+
+/*
+ * Check if tai_next() is not NULL
+ */
+bool tai_has_next(TaiIt *tai_it);
+
 /*
  * Free a tai iterator
  */
