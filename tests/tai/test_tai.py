@@ -79,6 +79,7 @@ Anc0.Anc0refChr9	4824'''
     
 def test_tai(regions_path, taf_path, bgzip, block_size, name_map_path=None, rev_name_map_path=None):
     sys.stderr.write(" * running indexing/extraction tests on {} with bzgip={} and blocksize={} and rename={}".format(taf_path, bgzip, block_size, name_map_path != None))
+    sys.stderr.flush()
     assert (name_map_path == None) == (rev_name_map_path == None)
     
     if bgzip:
@@ -117,6 +118,7 @@ def test_tai(regions_path, taf_path, bgzip, block_size, name_map_path=None, rev_
 
 def test_tai_naming(regions_path, taf_path):
     sys.stderr.write(" * running name mapping tests on {}".format(taf_path))
+    sys.stderr.flush()
 
     # rename the ancesstors
     mapping_path = './tests/name-mapping.tsv'
@@ -133,6 +135,7 @@ def test_tai_taf_1bp_extractions(taf_path, maf_path, step):
     chr_name = 'Anc0.Anc0refChr0'
     chr_length = 4151
     sys.stderr.write(" * running TAF/MAF indexing/extraction comparison tests on {} with step {}".format(chr_name, step))
+    sys.stderr.flush()
 
     create_index(taf_path, 10000)
     create_index(maf_path, 10000)
