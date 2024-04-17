@@ -306,8 +306,9 @@ int taf_view_main(int argc, char *argv[]) {
         Tai* tai = tai_load(tai_fh, !taf_input);
 
         TaiIt *tai_it = tai_iterator(tai, li, run_length_encode_input_bases, region_seq, region_start, region_length);
-        if (tai_it == NULL) {
-            fprintf(stderr, "Region %s:%" PRIi64 "-%" PRIi64 " not found in taffy index\n", region_seq, region_start, region_length);
+        if (!tai_has_next(tai_it)) {
+            fprintf(stderr, "Region %s:%" PRIi64 "-%" PRIi64 " not found in taffy index\n", region_seq, region_start,
+                    region_start + region_length);
             return 1;
         }
         Alignment *alignment = NULL;
