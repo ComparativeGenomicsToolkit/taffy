@@ -1,0 +1,20 @@
+##maf version=1
+
+a score=0 mafExtractor_splicedBlock=true splice_id=35_0
+s Anc0.Anc0refChr0                  400  2 +    4151 Ag
+s Anc1.Anc1refChr1               293116  2 +  296994 Ag
+s Anc2.Anc2refChr1                  432  2 +    4655 Ag
+s simCow_chr6.simCow.chr6        597817  2 +  602619 ag
+s simDog_chr6.simDog.chr6        589523  1 +  593897 A-
+s simHuman_chr6.simHuman.chr6    597786  2 +  601863 AG
+
+a score=0 mafExtractor_splicedBlock=true splice_id=36_0
+s Anc0.Anc0refChr0                  402  3 +    4151 caa
+s Anc1.Anc1refChr1               293118  3 +  296994 Caa
+s Anc2.Anc2refChr1                  434  3 +    4655 caa
+s mr.mrrefChr1                   178613  1 +  182340 C--
+s simCow_chr6.simCow.chr6        597826  3 +  602619 caa
+s simHuman_chr6.simHuman.chr6    597788  3 +  601863 CAA
+s simMouse_chr6.simMouse.chr6    631031  1 +  636262 C--
+s simRat_chr6.simRat.chr6        642483  1 +  647215 C--
+
