@@ -33,7 +33,7 @@ stList *load_sort_file(char *sort_file) {
     FILE *sort_fh = fopen(sort_file, "r");
     if (sort_fh == NULL) {
         fprintf(stderr, "Unable to open sort/filter file: %s\n", sort_file);
-        return NULL;
+        exit(1);
     }
     stList *prefixes_to_sort_by = sequence_prefix_load(sort_fh);
     st_logInfo("Loaded the sort/filter file, got %i rows\n", (int) stList_length(prefixes_to_sort_by));
@@ -79,9 +79,6 @@ int taf_sort_main(int argc, char *argv[]) {
     char *output_file = NULL;
     char *sort_file = NULL;
     char *filter_file = NULL;
-    char *pad_file = NULL;
-    char *dup_filter_file = NULL;
-    bool ignore_first_row = 0;
 
     ///////////////////////////////////////////////////////////////////////////
     // Parse the inputs
