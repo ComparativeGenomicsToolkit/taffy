@@ -79,6 +79,9 @@ int taf_sort_main(int argc, char *argv[]) {
     char *output_file = NULL;
     char *sort_file = NULL;
     char *filter_file = NULL;
+    char *pad_file = NULL;
+    char *dup_filter_file = NULL;
+    bool ignore_first_row = 0;
 
     ///////////////////////////////////////////////////////////////////////////
     // Parse the inputs

@@ -2,7 +2,8 @@ import unittest
 import pathlib
 import subprocess
 from random import randint
-from taffy.lib import AlignmentReader, AlignmentWriter, TafIndex, write_taf_index_file, get_column_iterator
+from taffy.lib import AlignmentReader, AlignmentWriter, TafIndex, write_taf_index_file, \
+    get_column_iterator, get_window_iterator
 from taffy.newick import PhyloTree
 
 
@@ -165,13 +166,14 @@ class TafTest(unittest.TestCase):
     def test_maf_to_taf_compressed(self):
         self.test_maf_to_taf(compress_file=True)
 
-    def test_taf_index(self, compress_file=False):
+    def test_taf_index(self, compress_file=False, taf_not_maf=True):
         """ Index a taf file then load a portion of the file with the
          AlignmentReader """
-        # Convert MAF to TAF
+        # Convert MAF to TAF (or just write MAF if not taf_not_maf)
         with AlignmentReader(self.test_maf_file) as mp:
             maf_header_tags = mp.get_header()  # Get the maf header tags
-            with AlignmentWriter(self.test_taf_file, header_tags=maf_header_tags, use_compression=compress_file) as tw:
+            with AlignmentWriter(self.test_taf_file, header_tags=maf_header_tags,
+                                 use_compression=compress_file, taf_not_maf=taf_not_maf) as tw:
                 tw.write_header()  # Write the header
                 for a in mp:  # For each alignment block in input
                     tw.write_alignment(a)  # Write a corresponding output block
@@ -180,9 +182,9 @@ class TafTest(unittest.TestCase):
         write_taf_index_file(taf_file=self.test_taf_file, index_file=self.test_index_file)
 
         # Make the Taf Index object
-        taf_index = TafIndex(self.test_index_file, False)
+        taf_index = TafIndex(self.test_index_file, not taf_not_maf)
 
-        # Create a taf reader
+        # Create a taf/maf reader
         with AlignmentReader(self.test_taf_file, taf_index=taf_index, sequence_name="Anc0.Anc0refChr0", start=100,
                              length=500) as tp:
 
@@ -195,19 +197,50 @@ class TafTest(unittest.TestCase):
         # Test random intervals using the column iterator
         for test in range(100):
             start = randint(0, 1000)
-            length = randint(1, 10)
+            length = randint(0, 50)
 
             with AlignmentReader(self.test_taf_file, taf_index=taf_index, sequence_name="Anc0.Anc0refChr0", start=start,
                                  length=length) as tp:
                 j = start
-                for ref_index, column, seq_names in get_column_iterator(tp):
+                for ref_index, column, seq_names in get_column_iterator(tp, include_non_ref_columns=False):
                     self.assertEqual(seq_names[0], "Anc0.Anc0refChr0")
-                    self.assertTrue(ref_index == j)
+                    self.assertEqual(ref_index, j)
                     self.assertTrue(ref_index < start + length)
                     j += 1
 
+        # Test random intervals using the window iterator
+        for test in range(100):
+            start = randint(0, 1000)
+            length = randint(0, 50)
+            window_length = randint(1, 10)
+            step = randint(1, window_length)
+
+            with AlignmentReader(self.test_taf_file, taf_index=taf_index, sequence_name="Anc0.Anc0refChr0", start=start,
+                                 length=length) as tp:
+                j = start
+                for columns in get_window_iterator(tp, include_non_ref_columns=False,
+                                                   window_length=window_length, step=step):
+                    # Check that we have the expected number of columns
+                    self.assertEqual(len(columns), window_length)
+
+                    # Check coordinates of columns
+                    k = 0
+                    for ref_index, column, seq_names in columns:
+                        self.assertEqual(seq_names[0], "Anc0.Anc0refChr0")
+                        self.assertEqual(ref_index, j+k)
+                        self.assertTrue(ref_index < start + length)
+                        k += 1
+
+                    j += step
+
     def test_taf_index_compression(self):
         self.test_taf_index(compress_file=True)
+
+    def test_maf_index(self):
+        self.test_taf_index(compress_file=False, taf_not_maf=False)
+
+    def test_maf_index_compression(self):
+        self.test_taf_index(compress_file=True, taf_not_maf=False)
 
     def test_newick_parser(self):
         """ Manually test newick tree parser """

@@ -197,14 +197,14 @@ class AlignmentReader:
     def __init__(self, file, taf_index=None, sequence_name=None, start=-1, length=-1):
         """ Use taf_not_maf to switch between MAF or TAF parsing.
 
-        file can be either a Python file handle or a string giving a path to the file.
+        File can be either a Python file handle or a string giving a path to the file.
         Handing in the file name is much faster as it avoids using a Python file object. If using
         with a file string remember to close the file, either the with keyword or with the close method.
 
         If file is compressed with zip or bgzip will automatically detect that the file is compressed and read it okay.
 
-        Use the taf_index and sequence_name, start and length if you want to extract a region from a taf file using
-        a taf index. Also works with compressed files.
+        Use the taf_index and sequence_name, start and length if you want to extract a region from a taf or
+        (despite the name) maf file using a taf index. Also works with compressed taf or maf files.
         """
         self.p_c_alignment = ffi.NULL  # The previous C alignment returned
         self.p_c_rows_to_py_rows = {}  # Hash from C rows to Python rows of the previous
@@ -224,7 +224,6 @@ class AlignmentReader:
         self.length = length
 
         if taf_index:
-            assert self.taf_not_maf  # Can not be trying to parse maf with a taf index
             assert sequence_name  # The contig name can not be none if using a taf index
             assert start >= 0  # The start coordinate must be valid
             assert length >= 0  # The length must be valid
@@ -257,7 +256,8 @@ class AlignmentReader:
             c_alignment = lib.tai_next(self._c_taf_index_it, self.c_li_handle) if self.taf_index else \
                 lib.taf_read_block(self.p_c_alignment, 0, self.c_li_handle)
         else:  # Is a maf block
-            c_alignment = lib.maf_read_block(self.c_li_handle)
+            c_alignment = lib.tai_next(self._c_taf_index_it, self.c_li_handle) if self.taf_index else \
+                lib.maf_read_block(self.c_li_handle)
 
         if c_alignment == ffi.NULL:  # If the c_alignment is null
             raise StopIteration  # We're done
@@ -377,15 +377,16 @@ def get_window_iterator(alignment_reader,
     """ Iterate over (overlapping) windows of the alignment.
 
     :param alignment_reader: An alignment reader to iterate from
-    :param window_length: The number of successive columns to include in a window
+    :param window_length: The number of successive columns to include in a window, must be > 0
     :param step: The number of columns between successive windows, must be 0 < step <= window_length.
     If equal to the window length will mean windows are non-overlapping
     :param include_sequence_names: See get_column_iterator()
     :param include_non_ref_columns: See get_column_iterator()
     :return: A numpy array of columns, each column from get_column_iterator()
     """
-    assert step <= window_length
-    assert step >= 1
+    assert window_length > 0  # Window length must be positive integer
+    assert step <= window_length  # Step can not exceed the window length
+    assert step >= 1  # Step can not be negative or 0
     q = deque()
     for column in get_column_iterator(alignment_reader,
                                       include_sequence_names=include_sequence_names,
