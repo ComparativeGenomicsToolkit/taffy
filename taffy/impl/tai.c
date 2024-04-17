@@ -52,7 +52,7 @@ char *tai_parse_region(const char *region, int64_t *start, int64_t *length) {
             }
         }
     }
-    return contig_length > 0 ? stString_getSubString(region, 0, contig_length) : NULL;
+    return contig_length > 0 && *length > 0 && *start >=0 ? stString_getSubString(region, 0, contig_length) : NULL;
 }
 
 // gets the "reference" (first row) coordinate information
