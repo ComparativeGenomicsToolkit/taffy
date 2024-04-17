@@ -127,7 +127,24 @@ def test_tai_naming(regions_path, taf_path):
     renamed_taf_path = taf_path + '.renamed'        
     subprocess.check_call(['./bin/taffy', 'view', '-i', taf_path, '-o', renamed_taf_path, '-n', mapping_path])
 
+
+def test_tai_taf_1bp_extractions(taf_path, maf_path, step):
+    """ do a bunch of 1bp queries to make sure taf is same as maf """
+    chr_name = 'Anc0.Anc0refChr0'
+    chr_length = 4151
+    sys.stderr.write(" * running TAF/MAF indexing/extraction comparison tests on {} with step {}".format(chr_name, step))
+
+    create_index(taf_path, 10000)
+    create_index(maf_path, 10000)
+    for pos in range(0, chr_length, step):
+        out_maf_path = './tests/tai/test_{}_{}.maf.taf'.format(chr_name, chr_length)
+        out_taf_path = './tests/tai/test_{}_{}.taf.taf'.format(chr_name, chr_length)        
+        subprocess.check_call(['./bin/taffy', 'view', '-i', maf_path, '-o', out_maf_path, '-r', '{}:{}'.format(chr_name, pos)])
+        subprocess.check_call(['./bin/taffy', 'view', '-i', taf_path, '-o', out_taf_path, '-r', '{}:{}'.format(chr_name, pos)])
+        subprocess.check_call(['diff', out_maf_path, out_taf_path])
+        subprocess.check_call(['rm', '-f', out_maf_path, out_taf_path])
                      
+    sys.stderr.write("\t\t\tOK\n")                     
     
 sys.stderr.write("Running tai tests...\n")
 maf_path_in = './tests/evolverMammals.maf'
@@ -152,6 +169,6 @@ test_tai(regions_path, taf_rle_path, True, 200)
 test_tai(regions_path, maf_path, False, 111)
 test_tai(regions_path, maf_path, True, 200)                         
 test_tai(regions_path, maf_path, True, 200, name_map_path=name_map_path, rev_name_map_path=rev_name_map_path)
-
+test_tai_taf_1bp_extractions(taf_path, maf_path, 5)
 
 subprocess.check_call(['rm', '-f', taf_path, taf_rle_path, maf_path])

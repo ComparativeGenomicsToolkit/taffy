@@ -618,8 +618,7 @@ Alignment *tai_next(TaiIt *tai_it, LI *li) {
 
     // start by clamping the alignment block to the region
     assert(strcmp(tai_it->alignment->row->sequence_name, tai_it->name) == 0);
-    unsigned int ret = clip_alignment(tai_it->alignment, tai_it->p_alignment, tai_it->start, tai_it->end);
-
+    
     // save this alignment, it's what we're gonna return
     tai_it->p_alignment = tai_it->alignment;
 
@@ -629,7 +628,7 @@ Alignment *tai_next(TaiIt *tai_it, LI *li) {
     }
     
     // scan forward
-    if (ret & 1) {
+    if (tai_it->alignment->row->start + tai_it->alignment->row->length > tai_it->end) {
         tai_it->alignment = NULL;
     } else {
         tai_it->alignment = maftaf_read_block(tai_it->p_alignment, tai_it->run_length_encode_bases, li);
@@ -640,6 +639,9 @@ Alignment *tai_next(TaiIt *tai_it, LI *li) {
             tai_it->alignment = NULL;
         }
     }
+
+    // clip the alignment (done after read_block, which needs unclipped prev blocks for coordinate transform)
+    clip_alignment(tai_it->p_alignment, NULL, tai_it->start, tai_it->end);
     
     return tai_it->p_alignment;
 }
