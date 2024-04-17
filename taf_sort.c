@@ -29,7 +29,7 @@ stList *load_sort_file(char *sort_file) {
     FILE *sort_fh = fopen(sort_file, "r");
     if (sort_fh == NULL) {
         fprintf(stderr, "Unable to open sort/filter file: %s\n", sort_file);
-        return 1;
+        exit(1);
     }
     stList *prefixes_to_sort_by = sequence_prefix_load(sort_fh);
     st_logInfo("Loaded the sort/filter file, got %i rows\n", (int) stList_length(prefixes_to_sort_by));
