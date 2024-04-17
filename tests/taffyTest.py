@@ -196,12 +196,11 @@ class TafTest(unittest.TestCase):
         for test in range(100):
             start = randint(0, 1000)
             length = randint(1, 10)
-            print("Picking index", start, length)
+
             with AlignmentReader(self.test_taf_file, taf_index=taf_index, sequence_name="Anc0.Anc0refChr0", start=start,
                                  length=length) as tp:
                 j = start
                 for ref_index, column, seq_names in get_column_iterator(tp):
-                    print(start, ref_index, length)
                     self.assertEqual(seq_names[0], "Anc0.Anc0refChr0")
                     self.assertTrue(ref_index == j)
                     self.assertTrue(ref_index < start + length)
