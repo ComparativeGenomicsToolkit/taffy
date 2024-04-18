@@ -11,11 +11,11 @@ set -x
 # The tree file
 tree_file=./447-way/447-mammalian-2022v1.nh
 
-# Raw alignment file
-alignment_file=./447-way/447-mammalian-2022v1_chr22_22000000_22100000.taf.gz
+# Rerooted tree file
+rerooted_tree_file=./447-way/447-mammalian-2022v1.rerooted.nh
 
-# Normalized taf file
-norm_alignment_file=./447-way/447-mammalian-2022v1_chr22_22000000_22100000.norm.taf.gz
+# Raw alignment file
+alignment_file=./447-way/447-mammalian-2022v1_hg38_chr22_22000000_22100000.anc.norm.taf.gz
 
 # Sorted/deduped/filters taf file
 final_alignment_file=./447-way/447-mammalian-2022v1_chr22_22000000_22100000.final.taf.gz
@@ -29,15 +29,23 @@ filter_file=./447-way/447-filter.txt
 # Ref
 ref=hg38
 
+# Reroot the tree
+time ../scripts/manipulate_tree.py --reroot $ref  --out_file $rerooted_tree_file $tree_file
+
 # Make the sort file
-time ../scripts/tree_to_sort_file.py --traversal pre --reroot $ref --out_file $sort_file --no_internal_nodes --no_check_labels $tree_file
+time ../scripts/tree_to_sort_file.py --traversal pre --reroot $ref --out_file $sort_file --suffix_to_append_to_labels . $tree_file
 
 # Make the filter file
-time ../scripts/tree_to_sort_file.py --out_file $filter_file --no_leaf_nodes --no_check_labels $tree_file
+time ../scripts/tree_to_sort_file.py --out_file $filter_file --no_leaf_nodes --suffix_to_append_to_labels . $tree_file
 
-# Normalize the alignment
-time ../bin/taffy norm -i $alignment_file -c > $norm_alignment_file
+# Now sort/dedup/filter the alignment, using the -b option to taffy view will also only show lineage differences
+time ../bin/taffy sort -i $alignment_file -n $sort_file -p $sort_file -d $sort_file --logLevel DEBUG  | ../bin/taffy view -t $rerooted_tree_file -b --runLengthEncodeBases -c > $final_alignment_file
 
-# Now sort/dedup/filter the alignment
-time ../bin/taffy sort -i $norm_alignment_file -n $sort_file -p $sort_file -d $sort_file -f $filter_file  | ../bin/taffy view -c > $final_alignment_file
+# Print stats about the starting and final alignment as a sanity check
+
+echo "Starting alignment"
+time ../bin/taffy stats -i $alignment_file -a
+
+echo "Final alignment"
+time ../bin/taffy stats -i $final_alignment_file -a
 

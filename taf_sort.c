@@ -40,6 +40,8 @@ stList *load_sort_file(char *sort_file) {
     return prefixes_to_sort_by;
 }
 
+
+
 void process_alignment_block(Alignment *pp_alignment, Alignment *p_alignment, stList *prefixes_to_filter_by,
                              stList * prefixes_to_pad, stList *prefixes_to_sort_by, stList *prefixes_to_dup_filter,
                              bool run_length_encode_bases, bool ignore_first_row, LW *output) {

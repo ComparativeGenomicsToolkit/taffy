@@ -15,6 +15,7 @@ static void usage(void) {
     fprintf(stderr, "Print statistics from a TAF or MAF file\n");
     fprintf(stderr, "-i --inputFile : Input TAF or MAF file. If not specified reads from stdin\n");
     fprintf(stderr, "-s --sequenceLengths : Print length of each *reference* sequence in the (indexed) alignment\n");
+    fprintf(stderr, "-a --alignmentStats : Print stats about block number, aligned bases, etc.\n");
     fprintf(stderr, "-l --logLevel : Set the log level\n");
     fprintf(stderr, "-h --help : Print this help message\n");
 }
@@ -28,6 +29,7 @@ int taf_stats_main(int argc, char *argv[]) {
     char *logLevelString = NULL;
     char *taf_fn = NULL;
     bool seq_lengths = false;
+    bool alignment_stats = false;
 
     ///////////////////////////////////////////////////////////////////////////
     // Parse the inputs
@@ -37,11 +39,12 @@ int taf_stats_main(int argc, char *argv[]) {
         static struct option long_options[] = { { "logLevel", required_argument, 0, 'l' },
                                                 { "inputFile", required_argument, 0, 'i' },
                                                 { "sequenceLengths", no_argument, 0, 's' },
+                                                { "alignmentStats", no_argument, 0, 'a' },
                                                 { "help", no_argument, 0, 'h' },
                                                 { 0, 0, 0, 0 } };
 
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:sh", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:sha", long_options, &option_index);
         if (key == -1) {
             break;
         }
@@ -55,6 +58,9 @@ int taf_stats_main(int argc, char *argv[]) {
                 break;
             case 's':
                 seq_lengths = 1;
+                break;
+            case 'a':
+                alignment_stats = 1;
                 break;
             case 'h':
                 usage();
@@ -76,15 +82,10 @@ int taf_stats_main(int argc, char *argv[]) {
     // Do the stats
     //////////////////////////////////////////////
 
-    if (seq_lengths == false) {
-        fprintf(stderr, "Please pick a stats option from { -s }\n");
-        return 1;
-    }
-    
     // load the input
     FILE *taf_fh = taf_fn == NULL ? stdin : fopen(taf_fn, "r");
     if (taf_fh == NULL) {
-        fprintf(stderr, "Unable to open input TAF file: %s\n", taf_fn);
+        fprintf(stderr, "Unable to open input TAF/MAF file: %s\n", taf_fn);
         return 1;
     }
     LI *li = LI_construct(taf_fh);
@@ -94,6 +95,10 @@ int taf_stats_main(int argc, char *argv[]) {
     if (input_format == 2) {
         fprintf(stderr, "Input not supported: unable to detect ##maf or #taf header\n");
         return 1;
+    }
+    bool run_length_encode_bases = 0;
+    if(input_format == 0) {  // Is taf, check if run_length_encode_bases is set
+        tag_destruct(taf_read_header_2(li, &run_length_encode_bases));
     }
 
     // load the index if it's required by the given options
@@ -123,7 +128,52 @@ int taf_stats_main(int argc, char *argv[]) {
         stList_destruct(seq_names);
     }
 
-        
+    // If want column depth stats (does not currently work with any subregion)
+    if(alignment_stats) {
+        int64_t total_blocks = 0, total_columns = 0, total_aligned_bases = 0, total_gaps = 0, total_column_depth = 0;
+        Alignment *alignment, *p_alignment = NULL;
+        while(1) {
+            if(input_format == 0) {
+                alignment = taf_read_block(p_alignment, run_length_encode_bases, li);
+            }
+            else {
+                alignment = maf_read_block(li);
+            }
+            if(!alignment) {  // No more blocks
+                break;
+            }
+            total_blocks++;
+            total_columns += alignment_length(alignment);
+            total_column_depth += alignment_length(alignment) * alignment->row_number;
+            Alignment_Row *row = alignment->row;
+            while (row != NULL) {
+                for (int64_t i = 0; i < alignment_length(alignment); i++) {
+                    if (row->bases[i] == '-') {
+                        total_gaps++;
+                    } else {
+                        total_aligned_bases++;
+                    }
+                }
+                row = row->n_row;
+            }
+            if(p_alignment != NULL) {
+                alignment_destruct(p_alignment, 1);
+            }
+            p_alignment = alignment;
+        }
+        if(p_alignment != NULL) {
+            alignment_destruct(p_alignment, 1);
+        }
+        fprintf(stdout, "Total blocks:\t%" PRIi64 "\n", total_blocks);
+        fprintf(stdout, "Total columns:\t%" PRIi64 "\n", total_columns);
+        fprintf(stdout, "Avg. columns/block:\t%f\n", (float)total_columns/total_blocks);
+        fprintf(stdout, "Total bases:\t%" PRIi64 "\n", total_aligned_bases);
+        fprintf(stdout, "Total gaps:\t%" PRIi64 "\n", total_gaps);
+        fprintf(stdout, "Avg. column depth:\t%f\n", (float)total_column_depth/total_columns);
+        fprintf(stdout, "Avg. bases/column:\t%f\n", (float)total_aligned_bases/total_columns);
+        fprintf(stdout, "Avg. gaps/column:\t%f\n", (float)total_gaps/total_columns);
+    }
+
     //////////////////////////////////////////////
     // Cleanup
     //////////////////////////////////////////////

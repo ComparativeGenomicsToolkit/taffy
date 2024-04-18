@@ -333,6 +333,24 @@ The `-a` option can be used to add rows that ignore gaps greater than the specif
 
 You can also use the `-s` option to add a breakdown of sex chromosomes and autosomes to the output table, ex `-s chrX -s chrY`. 
 
+## Taffy Stats
+
+Useful for getting course data about a MAF/TAF, e.g.:
+
+```
+taffy stats -i ./447-way/447-mammalian-2022v1_hg38_chr22_22000000_22100000.anc.norm.taf.gz -a
+Total blocks:   3166
+Total columns:  215664
+Avg. columns/block:     68.118759
+Total bases:    67026589
+Total gaps:     226206389
+Avg. column depth:      1359.675171
+Avg. bases/column:      310.791718
+Avg. gaps/column:       1048.883423
+```
+
+Note the -a option is required to print these aggregate stats.
+
 # Referenced-based MAF/TAF and Indexing
 
 Neither format specification requires it, but *in practice* TAF, like MAF, is used to specify alignments

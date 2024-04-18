@@ -7,7 +7,8 @@ from taffy.newick import PhyloTree
 import argparse
 
 
-def traverse_tree(phylo_tree, traversal_type, include_internal_labels=True, include_leaf_labels=True):
+def traverse_tree(phylo_tree, traversal_type, include_internal_labels=True, include_leaf_labels=True,
+                  suffix_to_append_to_labels=""):
     """ Gets a list of the labels in a tree in order of a traversl of the tree.
     """
     assert traversal_type in ("pre", "mid", "post")
@@ -20,16 +21,16 @@ def traverse_tree(phylo_tree, traversal_type, include_internal_labels=True, incl
                          ((t.parent is not None and len(t.children) > 0) or len(t.children) > 1)) or \
                         (include_leaf_labels and (len(t.children) == 0 or (len(t.children) == 1 and t.parent is None)))
         if traversal_type == "pre" and include_label:
-            ordered_labels.append(t.label)
+            ordered_labels.append(t.label + suffix_to_append_to_labels)
         mid_point = len(t.children) // 2
         for i in range(mid_point):
             traverse_tree_recursive(t.children[i])
         if traversal_type == "mid" and include_label:
-            ordered_labels.append(t.label)
+            ordered_labels.append(t.label + suffix_to_append_to_labels)
         for i in range(mid_point, len(t.children)):
             traverse_tree_recursive(t.children[i])
         if traversal_type == "post" and include_label:
-            ordered_labels.append(t.label)
+            ordered_labels.append(t.label + suffix_to_append_to_labels)
 
     traverse_tree_recursive(phylo_tree)
     return ordered_labels
@@ -78,6 +79,12 @@ def main():
         help="Don't check that no label is a prefix of another label."
     )
     parser.add_argument(
+        "--suffix_to_append_to_labels",
+        type=str,
+        default="",
+        help="Append this string to every label to prevent one label being a prefix of another."
+    )
+    parser.add_argument(
         "--out_file",
         type=str,
         default=None,
@@ -98,9 +105,12 @@ def main():
             raise RuntimeError(f"Couldn't fine {args.reroot} to reroot the tree")
         tree.reroot()
 
+    print("wooooo", args.suffix_to_append_to_labels)
+
     # Get the labels
     ordered_labels = traverse_tree(tree, args.traversal, include_internal_labels=args.internal_labels,
-                                   include_leaf_labels=args.leaf_labels)
+                                   include_leaf_labels=args.leaf_labels,
+                                   suffix_to_append_to_labels=args.suffix_to_append_to_labels)
 
     # Check the labels in the tree
     if args.check_labels:

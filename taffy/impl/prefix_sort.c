@@ -1,6 +1,8 @@
 #include "taf.h"
 #include "tai.h"
 #include "sonLib.h"
+#include <stdio.h>
+#include <ctype.h>
 
 /*
  * Functions for sorting alignment rows by prefixes of their sequence name
@@ -172,7 +174,7 @@ void alignment_show_only_lineage_differences(Alignment *alignment, char mask_cha
                     if(base != '-') { // If not a gap base
                         for (int64_t k = 0; k < stList_length(ancestor_sequences); k++) { // For each ancestor base
                             char *ancestor_sequence = stList_get(ancestor_sequences, k);
-                            if(base == ancestor_sequence[j]) { // If identical to ancestor base
+                            if(toupper(base) == toupper(ancestor_sequence[j])) { // If identical to ancestor base
                                 row->bases[j] = mask_char; // Switch to a star character
                                 break;
                             }

@@ -33,7 +33,7 @@ static void usage(void) {
     fprintf(stderr, "-b --showOnlyLineageDifferences : Show only lineage changes, replacing identity with a * character.\n "
                     "Requires the phylogeny to be specified and ancestors to be present\n");
     fprintf(stderr, "-x --colorBases : Color bases in the output. THIS IS FOR VISUALIZATION ONLY - DOES NOT PRODUCE A VALID MAF/TAF\n");
-    fprintf(stderr, "-t --phylogeny [newick tree] : Specify a phylogeny for the alignment, where species names must be prefixes of sequence names\n");
+    fprintf(stderr, "-t --phylogeny [newick tree file] : Specify a file containing the phylogeny for the alignment, where species names must be prefixes of sequence names\n");
     fprintf(stderr, "-d --omitCoordinates : When printing TAF, just print the columns omitting the coordinates. THIS IS FOR VISUALIZATION ONLY - DOES NOT PRODUCE A VALID TAF \n");
     fprintf(stderr, "-c --useCompression : Write the output using bgzip compression.\n");
     fprintf(stderr, "-n --nameMapFile : Apply the given two-column tab-separated name mapping to all assembly names in alignment\n");
@@ -89,7 +89,7 @@ int taf_view_main(int argc, char *argv[]) {
     char *region = NULL;
     bool use_compression = false;
     char *nameMapFile = NULL;
-    char *phylogeny_string = NULL;
+    char *phylogeny_file = NULL;
     static bool color_bases = false;
     bool omit_coordinates = false;
 
@@ -150,7 +150,7 @@ int taf_view_main(int argc, char *argv[]) {
                 run_length_encode_output_bases = 1;
                 break;
             case 't':
-                phylogeny_string = optarg;
+                phylogeny_file = optarg;
                 break;
             case 'a':
                 show_only_reference_differences = 1;
@@ -196,8 +196,8 @@ int taf_view_main(int argc, char *argv[]) {
     if (nameMapFile) {
         st_logInfo("Name map file string : %s\n", nameMapFile);
     }
-    if(phylogeny_string) {
-        st_logInfo("Phylogeny : %s\n", phylogeny_string);
+    if(phylogeny_file) {
+        st_logInfo("Phylogeny file : %s\n", phylogeny_file);
     }
     st_logInfo("Show only reference differences : %s\n", show_only_reference_differences ? "true" : "false");
     st_logInfo("Show only lineage differences : %s\n", show_only_lineage_differences ? "true" : "false");
@@ -225,8 +225,12 @@ int taf_view_main(int argc, char *argv[]) {
     }
 
     // Parse the tree if present
-    if(phylogeny_string) {
+    if(phylogeny_file) {
+        FILE *f = fopen(phylogeny_file, "r");
+        char *phylogeny_string = stFile_getLineFromFile(f);
+        fclose(f);
         phylogeny = stTree_parseNewickString(phylogeny_string);
+        free(phylogeny_string);
         get_sequence_prefixes_for_tree_nodes();
     }
 
@@ -265,6 +269,9 @@ int taf_view_main(int argc, char *argv[]) {
                 tag = tag_remove(tag, "run_length_encode_bases");  // Remove this tag from the maf
                 // output as not relevant
             }
+        }
+        else if(!maf_output && run_length_encode_output_bases) { // If is taf input, taf output and we're turning on RLE
+            tag = tag_construct("run_length_encode_bases", "1", tag);
         }
     }
     if (maf_output) {
@@ -418,7 +425,7 @@ int taf_view_main(int argc, char *argv[]) {
         stHash_destruct(genome_name_map);
     }
 
-    if(phylogeny_string) {
+    if(phylogeny_file) {
         stList_destruct(sequence_prefixes);
         stList_destruct(tree_nodes);
         stTree_destruct(phylogeny);
