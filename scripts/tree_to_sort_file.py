@@ -1,3 +1,5 @@
+#!python3
+
 """ Script to create a sort file for taffy sort from a phylogenetic tree
 """
 

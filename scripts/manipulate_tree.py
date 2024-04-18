@@ -1,3 +1,5 @@
+#!python3
+
 """ Script to re-root a tree so that a chosen node is the root.
 """
 

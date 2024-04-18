@@ -289,6 +289,23 @@ Taffy view first converts the input maf to TAF, taffy sort then sorts the rows o
 
 Where here we additionally remove any rows with sequence names with a prefix contained in the given FILTER_FILE.
 
+A common requirement is that a MAF/TAF has exactly one row for every species in the alignment. As Cactus, and other tools, output MAFs that don't necessarily follow this convention it is useful to be able to force this. Using:
+
+    taffy view -i MAF_FILE | taffy sort -n SORT_FILE -p PAD_FILE -r DUP_FILE | taffy view -m
+
+Where the -p specifies the prefixes to "pad", that is any block not containing a row matching a prefix
+in the PAD_FILE will have that row added, using gaps and dummy coordinates to fill in the row. Similarly, the -r specifies that any set of two or more rows whose
+names match a given prefix in the DUP_FILE will be pruned so that only one such row is kept in the block. The heuristic used for dropping dupes currently is intentionally very simple: all rows after the first occurrence of a row matching the given sequence prefix are dropped. Using these options (and optionally the filter option) allows you to construct a MAF ordered and with exactly the set of rows expected for every block.
+
+In the taffy/scripts directory are some useful utilities for creating the sort/pad/dup-filter files given a guide tree. For example:
+
+    ./scripts/tree_to_sort_file.py --traversal pre --reroot REF_NODE --out_file OUT_FILE NEWICK_TREE_FILE
+
+Will create a sort order based upon a pre-order traversal of the  tree after rerooting the tree so that the given REF_NODE is the reference - this will place REF_NODE first in the sort order and then order remaining nodes from that node in a pre-order traversal.
+Using options to exclude internal nodes or leaf nodes makes it easy
+to use this to only include leaves, or to create a filter to exclude
+internal nodes, say. For an example of usage see ./tests/447-way/example_norm.sh
+
 ## Taffy Coverage
 
 This tool calculates basic coverage and percent identity statistics of a selected reference (defaults to first row) vs all other genomes in the alignment. Whole-genome and reference-contig-level statistics are provided. The values presented are:
@@ -315,14 +332,6 @@ By default, the first `.` character is used to parse out the genome name from a 
 The `-a` option can be used to add rows that ignore gaps greater than the specified size when computing coverage.  So `-a 10 -a 100` would report coverage statistics for the whole genome, as well as ignoring gaps `>10bp` and `>100bp`. There will be `3X` the number of output rows.
 
 You can also use the `-s` option to add a breakdown of sex chromosomes and autosomes to the output table, ex `-s chrX -s chrY`. 
-
-A common requirement is that a MAF/TAF has exactly one row for every species in the alignment. As Cactus, and other tools, output MAFs that don't necessarily follow this convention it is useful to be able to force this. Using:
-
-    taffy view -i MAF_FILE | taffy sort -n SORT_FILE -p PAD_FILE -r DUP_FILE | taffy view -m
-
-Where the -p specifies the prefixes to "pad", that is any block not containing a row matching a prefix
-in the PAD_FILE will have that row added, using gaps and dummy coordinates to fill in the row. Similarly, the -r specifies that any set of two or more rows whose
-names match a given prefix in the DUP_FILE will be pruned so that only one such row is kept in the block. The heuristic used for dropping dupes currently is intentionally very simple: all rows after the first occurrence of a row matching the given sequence prefix are dropped. Using these options (and optionally the filter option) allows you to construct a MAF ordered and with exactly the set of rows expected for every block.
 
 # Referenced-based MAF/TAF and Indexing
 
