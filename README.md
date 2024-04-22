@@ -601,7 +601,7 @@ Given this index file, you can open it as follows:
 ```
 from taffy.lib import TafIndex  # Import the TafIndex
 taf_index = TafIndex(test_taf_file + ".tai", is_maf=False)
-with AlignmentReader(test_taf_file, taf_index=taf_index, sequence_name="Anc0.Anc0refChr0",start=1000,length=50) as mp:
+with AlignmentReader(test_taf_file, taf_index=taf_index, sequence_intervals=(("Anc0.Anc0refChr0", 1000, 50),)) as mp:
     print(mp.get_header())
     for block in mp:
         print(block, "\n")
@@ -620,7 +620,7 @@ simRat_chr6.simRat.chr6 642932  3       +       647215  GCA---
 etc.
 ```
 
-Which gets a particular subrange of blocks within the given reference sequence interval.
+Which gets a particular subrange of blocks within the given reference sequence interval. To specify multiple intervals, just provide a sequence of multiple such intervals. The interval format is (seq_name, start, length).
 
 If we want to iterate on the columns of the alignment without worrying about
 blocks we can use the column iterator:
@@ -630,7 +630,7 @@ from taffy.lib import TafIndex, AlignmentReader, get_column_iterator, get_window
 import pathlib
 test_taf_file = (pathlib.Path().absolute() / "./evolverMammals.taf.gz").as_posix()
 taf_index = TafIndex(test_taf_file + ".tai", is_maf=False)
-with AlignmentReader(test_taf_file, taf_index=taf_index, sequence_name="Anc0.Anc0refChr0",start=1000,length=50) as mp:
+with AlignmentReader(test_taf_file, taf_index=taf_index, sequence_intervals=(("Anc0.Anc0refChr0", 1000, 50),))  as mp:
     for ref_index, column_string in get_window_iterator(mp, include_sequence_names=False):
         print(ref_index, column_string)
 
@@ -653,7 +653,7 @@ from taffy.lib import TafIndex, AlignmentReader, get_column_iterator, get_window
 import pathlib
 test_taf_file = (pathlib.Path().absolute() / "./evolverMammals.taf.gz").as_posix()
 taf_index = TafIndex(test_taf_file + ".tai", is_maf=False)
-with AlignmentReader(test_taf_file, taf_index=taf_index, sequence_name="Anc0.Anc0refChr0",start=1000,length=50) as mp:
+with AlignmentReader(test_taf_file, taf_index=taf_index, sequence_intervals=(("Anc0.Anc0refChr0", 1000, 50),)) as mp:
     for columns in get_window_iterator(mp, 
     window_length=10, step=5,
     include_sequence_names=False):

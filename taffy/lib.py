@@ -120,11 +120,10 @@ class Alignment:
 class Row:
     """ Represents a row of an alignment block. See taf.h """
 
-    def __init__(self, c_row=None, l_row=None, r_row=None, n_row=None):
+    def __init__(self, c_row=None, n_row=None):
         self._c_row = c_row  # The underlying C row
-        self._l_row = l_row  # The prior (left) row in the previous alignment block
-        self._r_row = r_row  # The next (right) row in the next alignemnt clock
         self._n_row = n_row  # The next row in the sequence of rows
+        # Note by choice we do not store pointers to the left and right rows
 
     def sequence_name(self):
         """ The name of the sequence for the row """
@@ -160,14 +159,6 @@ class Row:
         """ Get the next row in the alignment block or None if last row """
         return self._n_row
 
-    def left_row(self):
-        """ Get any left row in the prior alignment block """
-        return self._l_row
-
-    def right_row(self):
-        """ Get any right row in the next alignment block """
-        return self._r_row
-
     def __del__(self):
         lib.alignment_row_destruct(self._c_row)  # Cleans up the underlying C alignment structure
 
@@ -194,21 +185,21 @@ class AlignmentReader:
     """ Taf or maf alignment parser.
     """
 
-    def __init__(self, file, taf_index=None, sequence_name=None, start=-1, length=-1):
-        """ Use taf_not_maf to switch between MAF or TAF parsing.
-
-        File can be either a Python file handle or a string giving a path to the file.
-        Handing in the file name is much faster as it avoids using a Python file object. If using
-        with a file string remember to close the file, either the with keyword or with the close method.
-
-        If file is compressed with zip or bgzip will automatically detect that the file is compressed and read it okay.
-
-        Use the taf_index and sequence_name, start and length if you want to extract a region from a taf or
-        (despite the name) maf file using a taf index. Also works with compressed taf or maf files.
+    def __init__(self, file, taf_index=None,  sequence_intervals=None):
+        """
+        :param file: File can be either a Python file handle or a string giving a path to the file.
+        The underlying file can be either maf or taf. Handing in the file name is much faster as it avoids using a
+        Python file object. If using with a file string remember to close the file, either the with keyword or with
+        the close method. If file is compressed with zip or bgzip will automatically detect that the file is
+        compressed and read it okay.
+        :param taf_index: A taf index object, which is specified allows the retrieval of subranges of the alignment.
+        :param sequence_intervals: A sequence of one or more tuples, each of the form (sequence_name, start, length)
+        that specify the range to retrieve. Will be retrieved in order.
         """
         self.p_c_alignment = ffi.NULL  # The previous C alignment returned
         self.p_c_rows_to_py_rows = {}  # Hash from C rows to Python rows of the previous
         # alignment block, allowing linking of rows between blocks
+        self.file = file
         self.c_file_handle = _get_c_file_handle(file)
         self.file_string_not_handle = isinstance(file, str)  # Will be true if the file is a string, not a file handle
         self.c_li_handle = lib.LI_construct(self.c_file_handle)
@@ -219,22 +210,22 @@ class AlignmentReader:
         self.taf_index = taf_index  # Store the taf index (if there is one)
         self.header_tags = self._read_header()  # Read the header tags
         self.use_run_length_encoding = "run_length_encode_bases" in self.header_tags  # Use run length encoding
-        self.sequence_name = sequence_name
-        self.start = start
-        self.length = length
+        self.sequence_intervals = sequence_intervals
+        self.sequence_interval_index = 0
 
         if taf_index:
+            assert sequence_intervals  # Must not be None
+            sequence_name, start, length = sequence_intervals[0]
             assert sequence_name  # The contig name can not be none if using a taf index
             assert start >= 0  # The start coordinate must be valid
             assert length >= 0  # The length must be valid
+            assert len(sequence_intervals) > 0  # Must contain at least one interval
             self._c_taf_index_it = lib.tai_iterator(taf_index._c_taf_index,
                                                     self.c_li_handle,
                                                     self.use_run_length_encoding,
                                                     _to_c_string(sequence_name), start, length)
         else:
-            assert not sequence_name  # Sequence name should not be specified if taf index not provided
-            assert start == -1  # Start coordinate should not be specified if taf index not provided
-            assert length == -1  # Length should not be specified if taf index not provided
+            assert not sequence_intervals  # Sequence intervals should not be specified if taf index not provided
 
     def get_header(self):
         """ Get tags from the header line as a dictionary of key:value pairs.
@@ -260,27 +251,31 @@ class AlignmentReader:
                 lib.maf_read_block(self.c_li_handle)
 
         if c_alignment == ffi.NULL:  # If the c_alignment is null
-            raise StopIteration  # We're done
+            self.sequence_interval_index += 1
+            if self.sequence_intervals is None or self.sequence_interval_index >= len(self.sequence_intervals):
+                raise StopIteration  # We're done
+            # Otherwise, get next interval
+            sequence_name, start, length = self.sequence_intervals[self.sequence_interval_index]
+            # Make new iterator for next interval
+            self.p_c_alignment = ffi.NULL  # Remove reference to prior alignment
+            lib.tai_iterator_destruct(self._c_taf_index_it)  # Cleanup old iterator
+            self._c_taf_index_it = lib.tai_iterator(self.taf_index._c_taf_index,
+                                                    self.c_li_handle,
+                                                    self.use_run_length_encoding,
+                                                    _to_c_string(sequence_name), start, length)
+            return self.__next__()
 
         # If maf use O(ND) algorithm to link to any prior alignment block
         if (not self.taf_not_maf) and self.p_c_alignment != ffi.NULL:
             lib.alignment_link_adjacent(self.p_c_alignment, c_alignment, 1)
 
         # Now add in the rows
-        c_row, p_py_row, c_rows_to_py_rows = c_alignment.row, None, {}
+        c_row, p_py_row, first_py_row = c_alignment.row, None, None
         while c_row != ffi.NULL:
-            # The previous py row
-
-            # Make the Python row object
-            if c_row.l_row == ffi.NULL:  # If there is no prior left row to connect to
-                py_row = Row(c_row=c_row)
-            else:  # Otherwise, there is a prior left row to connect to
-                l_py_row = self.p_c_rows_to_py_rows[c_row.l_row]
-                py_row = Row(c_row=c_row, l_row=l_py_row)
-                l_py_row._r_row = py_row
-
-            # Add to the map of c rows to python rows
-            c_rows_to_py_rows[c_row] = py_row
+            # Make the Pythob row
+            py_row = Row(c_row=c_row)
+            if first_py_row is None:
+                first_py_row = py_row
 
             # Connect the row object to the chain of row objects for the block
             if p_py_row is not None:
@@ -290,11 +285,10 @@ class AlignmentReader:
             c_row = c_row.n_row  # Move to the next row
 
         # Now convert the new alignment into Python
-        py_alignment = Alignment(c_alignment=c_alignment, py_row=c_rows_to_py_rows[c_alignment.row])
+        py_alignment = Alignment(c_alignment=c_alignment, py_row=first_py_row)
 
         # Set the new prior alignment / rows
         self.p_c_alignment = c_alignment
-        self.p_c_rows_to_py_rows = c_rows_to_py_rows
 
         return py_alignment
 
@@ -338,25 +332,11 @@ def get_column_iterator(alignment_reader,
         ref_index = ref_row.start()
         ref_bases = ref_row.bases()
 
-        # If we have a specific sequence range stop the iteration if out of range
-        if alignment_reader.sequence_name:
-            if ref_row.sequence_name() != alignment_reader.sequence_name:
-                break  # No longer looking at relevant sequence
-            assert alignment_reader.start <= ref_index
-
         # If the output wants to match the column entries to the sequences
         if include_sequence_names:
             sequence_names = alignment.get_column_sequences()
 
         for i in range(alignment.column_number()):  # For each column
-
-            # If we have a specific sequence range
-            if alignment_reader.sequence_name:
-                assert ref_index >= alignment_reader.start # The index will never return before the start of the query
-                # If beyond the end of the interval, stop
-                if ref_index >= alignment_reader.start + alignment_reader.length:
-                    return  # This stops the iteration
-
             if ref_bases[i] != '-':  # If a ref column
                 if include_sequence_names:
                     yield ref_index, alignment.get_column(i), sequence_names

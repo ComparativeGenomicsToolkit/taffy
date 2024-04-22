@@ -75,10 +75,6 @@ class TafTest(unittest.TestCase):
             self.assertEqual(row.bases(), "A")
             self.assertEqual(row.left_gap_sequence(), "")
 
-            # Check left and right connections
-            self.assertEqual(row.left_row(), a.first_row())
-            self.assertEqual(a.first_row().right_row(), row)
-
             # Check column retrieval
             self.assertEqual(b.get_column(0), "AAAATAAAA")
             self.assertEqual(b.get_column(-1), "AAAATAAAA")
@@ -185,8 +181,8 @@ class TafTest(unittest.TestCase):
         taf_index = TafIndex(self.test_index_file, not taf_not_maf)
 
         # Create a taf/maf reader
-        with AlignmentReader(self.test_taf_file, taf_index=taf_index, sequence_name="Anc0.Anc0refChr0", start=100,
-                             length=500) as tp:
+        with AlignmentReader(self.test_taf_file, taf_index=taf_index, sequence_intervals=(("Anc0.Anc0refChr0",
+                                                                                           100, 500),)) as tp:
 
             for a in tp:  # For each alignment block in input
                 ref_row = a.first_row()  # Check the reference row is in the bounds of the search
@@ -196,17 +192,27 @@ class TafTest(unittest.TestCase):
 
         # Test random intervals using the column iterator
         for test in range(100):
-            start = randint(0, 1000)
-            length = randint(0, 50)
+            # Make a bunch of random sequence intervals
+            sequence_intervals = []
+            total_length = 0
+            for i in range(randint(1, 10)):
+                start = randint(0, 1000)
+                length = randint(1, 50)  # Don't include 0 length intervals here, because makes accounting tricky
+                total_length += length
+                sequence_intervals.append(("Anc0.Anc0refChr0", start, length))
 
-            with AlignmentReader(self.test_taf_file, taf_index=taf_index, sequence_name="Anc0.Anc0refChr0", start=start,
-                                 length=length) as tp:
-                j = start
+            with AlignmentReader(self.test_taf_file, taf_index=taf_index, sequence_intervals=sequence_intervals) as tp:
+                i, j, k = 0, 0, 0  # Index of total bases, sequence interval, and offset on sequence interval
                 for ref_index, column, seq_names in get_column_iterator(tp, include_non_ref_columns=False):
-                    self.assertEqual(seq_names[0], "Anc0.Anc0refChr0")
-                    self.assertEqual(ref_index, j)
-                    self.assertTrue(ref_index < start + length)
-                    j += 1
+                    i += 1  # Increment total bases
+                    seq_name, start, length = sequence_intervals[j]
+                    self.assertEqual(seq_names[0], seq_name)
+                    self.assertEqual(ref_index, k + start)
+                    k += 1  # Increment index along sequence
+                    if k >= length:  # If we have walked of the end of a sequence interval, move to the next
+                        j, k = j+1, 0
+                self.assertEqual(j, len(sequence_intervals))
+                self.assertEqual(i, total_length)
 
         # Test random intervals using the window iterator
         for test in range(100):
@@ -215,8 +221,8 @@ class TafTest(unittest.TestCase):
             window_length = randint(1, 10)
             step = randint(1, window_length)
 
-            with AlignmentReader(self.test_taf_file, taf_index=taf_index, sequence_name="Anc0.Anc0refChr0", start=start,
-                                 length=length) as tp:
+            with AlignmentReader(self.test_taf_file, taf_index=taf_index, sequence_intervals=(("Anc0.Anc0refChr0",
+                                                                                               start, length),)) as tp:
                 j = start
                 for columns in get_window_iterator(tp, include_non_ref_columns=False,
                                                    window_length=window_length, step=step):
