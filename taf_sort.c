@@ -20,8 +20,8 @@ static void usage(void) {
     fprintf(stderr, "-f --filterFile : Remove any rows with sequences matching a prefix in this file\n");
     fprintf(stderr, "-p --padFile : Add a padding row for any sequence in this file that is not a prefix of an existing row\n");
     fprintf(stderr, "-d --dupFilterFile : Remove duplicate sequences matching any prefix in this file\n");
-    fprintf(stderr, "-r --ignoreFirstRow : Do not consider the first row of each maf block - useful if wanting to "
-                    "preserve a reference sequence\n");
+    fprintf(stderr, "-r --dontIgnoreFirstRow : Do consider the first (reference) row of each maf block - by default we "
+                    "don't alter the sort of the reference row\n");
     fprintf(stderr, "-l --logLevel : Set the log level\n");
     fprintf(stderr, "-h --help : Print this help message\n");
 }
@@ -83,7 +83,7 @@ int taf_sort_main(int argc, char *argv[]) {
     char *filter_file = NULL;
     char *pad_file = NULL;
     char *dup_filter_file = NULL;
-    bool ignore_first_row = 0;
+    bool ignore_first_row = 1;
 
     ///////////////////////////////////////////////////////////////////////////
     // Parse the inputs
@@ -97,7 +97,7 @@ int taf_sort_main(int argc, char *argv[]) {
                                                {"filterFile", required_argument, 0, 'f'},
                                                {"padFile", required_argument, 0, 'p'},
                                                {"dupFilterFile", required_argument, 0, 'd'},
-                                               {"ignoreFirstRow", no_argument, 0, 'r'},
+                                               {"dontIgnoreFirstRow", no_argument, 0, 'r'},
                                                {"help",       no_argument,       0, 'h'},
                                                {0, 0,                            0, 0}};
 
@@ -130,7 +130,7 @@ int taf_sort_main(int argc, char *argv[]) {
                 dup_filter_file = optarg;
                 break;
             case 'r':
-                ignore_first_row = 1;
+                ignore_first_row = 0;
                 break;
             case 'h':
                 usage();

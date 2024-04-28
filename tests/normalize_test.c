@@ -195,7 +195,7 @@ static void test_norm_pipeline(CuTest *testCase) {
     char *input_file = "./tests/evolverMammals.maf.mini";
     char *filter_file = "./tests/filter_file.txt";
     char *output_file = "./tests/evolverMammals.maf.norm_pipeline";
-    int i = st_system("./bin/taffy view -i %s | ./bin/taffy sort -f %s | ./bin/taffy norm -b ./tests/seqs/* -k > %s",
+    int i = st_system("./bin/taffy view -i %s | ./bin/taffy sort -f %s -r | ./bin/taffy norm -b ./tests/seqs/* -k > %s",
                       input_file, filter_file, output_file);
     CuAssertIntEquals(testCase, 0, i); // return value should be zero
     char *truth_file = "./tests/evolverMammals.maf.mini.filtered.normalized";

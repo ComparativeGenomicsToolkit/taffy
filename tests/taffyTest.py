@@ -5,6 +5,8 @@ from random import randint
 from taffy.lib import AlignmentReader, AlignmentWriter, TafIndex, write_taf_index_file, \
     get_column_iterator, get_window_iterator
 from taffy.newick import PhyloTree
+from taffy.ml import TorchDatasetAlignmentIterator
+from torch.utils.data import DataLoader
 
 
 class TafTest(unittest.TestCase):
@@ -162,9 +164,7 @@ class TafTest(unittest.TestCase):
     def test_maf_to_taf_compressed(self):
         self.test_maf_to_taf(compress_file=True)
 
-    def test_taf_index(self, compress_file=False, taf_not_maf=True):
-        """ Index a taf file then load a portion of the file with the
-         AlignmentReader """
+    def make_taf_and_taf_index(self, compress_file=False, taf_not_maf=True):
         # Convert MAF to TAF (or just write MAF if not taf_not_maf)
         with AlignmentReader(self.test_maf_file) as mp:
             maf_header_tags = mp.get_header()  # Get the maf header tags
@@ -180,6 +180,26 @@ class TafTest(unittest.TestCase):
         # Make the Taf Index object
         taf_index = TafIndex(self.test_index_file, not taf_not_maf)
 
+        return taf_index
+
+    @staticmethod
+    def get_random_sequence_intervals():
+        # Gets a bunch of random sequence intervals for testing the iterators with
+        sequence_intervals = []
+        total_length = 0
+        for i in range(randint(1, 10)):
+            start = randint(0, 1000)
+            length = randint(1, 50)  # Don't include 0 length intervals here, because makes accounting tricky
+            total_length += length
+            sequence_intervals.append(("Anc0.Anc0refChr0", start, length))
+        return sequence_intervals, total_length
+
+    def test_taf_index(self, compress_file=False, taf_not_maf=True):
+        """ Index a taf file then load a portion of the file with the
+         AlignmentReader """
+        # Make the Taf Index object and the taf file
+        taf_index = self.make_taf_and_taf_index(compress_file=False, taf_not_maf=True)
+
         # Create a taf/maf reader
         with AlignmentReader(self.test_taf_file, taf_index=taf_index, sequence_intervals=(("Anc0.Anc0refChr0",
                                                                                            100, 500),)) as tp:
@@ -193,13 +213,7 @@ class TafTest(unittest.TestCase):
         # Test random intervals using the column iterator
         for test in range(100):
             # Make a bunch of random sequence intervals
-            sequence_intervals = []
-            total_length = 0
-            for i in range(randint(1, 10)):
-                start = randint(0, 1000)
-                length = randint(1, 50)  # Don't include 0 length intervals here, because makes accounting tricky
-                total_length += length
-                sequence_intervals.append(("Anc0.Anc0refChr0", start, length))
+            sequence_intervals, total_length = self.get_random_sequence_intervals()
 
             with AlignmentReader(self.test_taf_file, taf_index=taf_index, sequence_intervals=sequence_intervals) as tp:
                 i, j, k = 0, 0, 0  # Index of total bases, sequence interval, and offset on sequence interval
@@ -270,6 +284,48 @@ class TafTest(unittest.TestCase):
         a_no_to = "((,),());"
         self.assertEqual(t.tree_string(include_internal_labels=False, include_leaf_labels=False,
                                        include_branch_lengths=False), a_no_to)
+
+    def test_torchDatasetAlignmentIterator(self, compress_file=False, taf_not_maf=True):
+        """ Tests the PyTorch dataset alignment iterator """
+        # Make the Taf Index object and the taf file
+        taf_index = self.make_taf_and_taf_index(compress_file=compress_file, taf_not_maf=taf_not_maf)
+
+        # Make random examples
+        for test in range(3):
+            # Make a bunch of random sequence intervals
+            sequence_intervals, total_length = self.get_random_sequence_intervals()
+
+            ai = DataLoader(TorchDatasetAlignmentIterator(self.test_taf_file, taf_index_file=self.test_index_file,
+                                                          is_maf=not taf_not_maf,
+                                                          sequence_intervals=sequence_intervals,
+                                                          include_non_ref_columns=False,
+                                                          include_sequence_names=True),
+                            num_workers=1)
+
+            i, j, k = 0, 0, 0  # Index of total bases, sequence interval, and offset on sequence interval
+            for ref_index, column, seq_names in ai:
+                i += 1  # Increment total bases
+                seq_name, start, length = sequence_intervals[j]
+                self.assertEqual(seq_names[0][0], seq_name)
+                self.assertEqual(ref_index, k + start)
+                k += 1  # Increment index along sequence
+                if k >= length:  # If we have walked of the end of a sequence interval, move to the next
+                    j, k = j+1, 0
+            self.assertEqual(j, len(sequence_intervals))
+            self.assertEqual(i, total_length)
+
+            # Now test a multi-processing version of the data loader - here we don't expect the columns to come out
+            # in order, necessarily
+            ai = DataLoader(TorchDatasetAlignmentIterator(self.test_taf_file, taf_index_file=self.test_index_file,
+                                                          is_maf=not taf_not_maf,
+                                                          sequence_intervals=sequence_intervals,
+                                                          include_non_ref_columns=False,
+                                                          include_sequence_names=True),
+                            num_workers=5)
+            i = 0
+            for ref_index, column, seq_names in ai:
+                i += 1
+            self.assertEqual(i, total_length)
 
 
 if __name__ == '__main__':

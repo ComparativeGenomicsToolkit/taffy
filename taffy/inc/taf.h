@@ -369,5 +369,22 @@ stSet *load_sequences_from_hal_file(char *hal_file, int *hal_handle);
 void alignment_add_gap_strings(Alignment *p_alignment, Alignment *alignment, stHash *fastas, int hal_handle, stSet *hal_species,
                                int64_t maximum_gap_string_length);
 
+
+/*
+ * Parse a wiggle file (which may be compressed) returning a hash table from sequence names to nested hashes,
+ * each nested hash being a map from sequence coordinates to floating point values.
+ *
+ * Seq_prefix is prepended to each chromosome name to form the sequence name stored in the
+ * returned hash.
+ *
+ * Not very memory efficient, but used by taffy annotate.
+ */
+stHash *wig_parse(char *file, char *seq_prefix);
+
+/*
+ * Get a value for a specific coordinate. Returns given default_value if coordinate doesn't exist.
+ */
+double wig_get_value(stHash *wig, char *seq, int64_t coordinate, double default_value);
+
 #endif /* STTAF_H_ */
 

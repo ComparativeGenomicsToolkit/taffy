@@ -14,10 +14,16 @@ tree_file=./447-way/447-mammalian-2022v1.nh
 # Rerooted tree file
 rerooted_tree_file=./447-way/447-mammalian-2022v1.rerooted.nh
 
+# Wiggle file
+wig_file=./447-way/447-mammalian-2022v1_hg38_chr22_22000000_22100000.phyloP.wig
+
 # Raw alignment file
 alignment_file=./447-way/447-mammalian-2022v1_hg38_chr22_22000000_22100000.anc.norm.taf.gz
 
-# Sorted/deduped/filters taf file
+# Sorted/deduped/filtered taf file
+rearranged_alignment_file=./447-way/447-mammalian-2022v1_chr22_22000000_22100000.rearranged.taf.gz
+
+# Sorted/deduped/filtered/annotated taf file
 final_alignment_file=./447-way/447-mammalian-2022v1_chr22_22000000_22100000.final.taf.gz
 
 # Sort/dup-filter file
@@ -39,7 +45,10 @@ time ../scripts/tree_to_sort_file.py --traversal pre --reroot $ref --out_file $s
 time ../scripts/tree_to_sort_file.py --out_file $filter_file --no_leaf_nodes --suffix_to_append_to_labels . $tree_file
 
 # Now sort/dedup/filter the alignment, using the -b option to taffy view will also only show lineage differences
-time ../bin/taffy sort -i $alignment_file -n $sort_file -p $sort_file -d $sort_file --logLevel DEBUG  | ../bin/taffy view -t $rerooted_tree_file -b --runLengthEncodeBases -c > $final_alignment_file
+time ../bin/taffy sort -i $alignment_file -n $sort_file -p $sort_file -d $sort_file --logLevel DEBUG | ../bin/taffy view -t $rerooted_tree_file -b -c --runLengthEncodeBases > $rearranged_alignment_file
+
+# Add annotations
+time ../bin/taffy annotate -i $rearranged_alignment_file -w $wig_file --tagName phyloP --refPrefix hg38. -c > $final_alignment_file
 
 # Print stats about the starting and final alignment as a sanity check
 

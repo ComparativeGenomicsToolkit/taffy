@@ -1,5 +1,6 @@
 from taffy._taffy_cffi import ffi, lib
 import numpy as np
+import torch
 from collections import deque
 
 def _to_py_string(s):
@@ -86,9 +87,9 @@ class Alignment:
         return column_string
 
     def get_column_sequences(self):
-        """ Get the names of the sequences in the alignment in order as an array """
+        """ Get the names of the sequences in the alignment in order as a list """
         row = self.first_row()
-        sequence_names = np.empty(self.row_number(), dtype=object)
+        sequence_names = [None]*self.row_number()
         for i in range(self.row_number()):
             sequence_names[i] = row.sequence_name()
             row = row.next_row()
@@ -448,3 +449,4 @@ class AlignmentWriter:
 
     def __exit__(self, exc_type, exc_value, exc_traceback):
         self.close()
+

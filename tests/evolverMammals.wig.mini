@@ -1,0 +1,8 @@
+fixedStep chrom=Anc0refChr0 start=0 step=1 span=1
+5.1
+10
+67
+variableStep chrom=Anc0refChr0 span=2
+50 7
+55 12
+
