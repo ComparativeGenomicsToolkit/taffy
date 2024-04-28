@@ -54,6 +54,7 @@ static void test_maf(CuTest *testCase, bool use_compression) {
     LI_destruct(li_copy);
 
     fclose(file);
+    st_system("rm %s", temp_copy);
 }
 
 static void test_maf_with_compression(CuTest *testCase) {
