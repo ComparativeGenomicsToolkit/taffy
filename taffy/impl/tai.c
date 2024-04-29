@@ -87,7 +87,7 @@ static char *parse_coordinates_line(stList *tokens, int64_t *start, bool *strand
     int64_t n = stList_length(tokens);
 
     ++j;
-    while (j < n) {
+    while (j < n && strcmp(stList_get(tokens, j), "@") != 0) {
         // copied from taf.c
         char *op_type = stList_get(tokens, j++); // This is the operation
         assert(strlen(op_type) == 1); // Must be a single character in length
@@ -137,7 +137,7 @@ static void change_s_coordinates_to_i(char *line) {
         int64_t n = stList_length(tokens);
         bool *mask = st_calloc(n, sizeof(bool));        
         ++j;
-        while (j < n) {
+        while (j < n && strcmp(stList_get(tokens, j), "@") != 0) {
             char *op_type = stList_get(tokens, j++); // This is the operation
             j++; // the row index;
             assert(strlen(op_type) == 1); // Must be a single character in length
