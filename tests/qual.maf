@@ -1,0 +1,35 @@
+##maf version=1
+
+a
+s	x	0	8	+	50	CAA---ATAAG
+q	x					999---99999
+s	ins	0	11	+	11	CAAGGGATAAG
+q	ins					94490049989
+
+a
+s	x	8	1	+	50	G
+
+a
+s	x	9	1	+	50	C
+
+a
+s	x	10	3	+	50	TTG
+
+a
+s	x	13	1	+	50	G
+
+a
+s	x	14	19	+	50	AAATTTTCTGGAGTTCTAT
+
+a
+s	x	33	1	+	50	T
+
+a
+s	x	34	4	+	50	ATAT
+
+a
+s	x	38	1	+	50	T
+
+a
+s	x	39	11	+	50	CCAACTCTCTG
+
