@@ -8,7 +8,7 @@ class TorchDatasetAlignmentIterator(torch.utils.data.IterableDataset):
     """
     def __init__(self, alignment_file, taf_index_file=None, is_maf=False, sequence_intervals=None,
                  window_length=1, step=1, include_sequence_names=True,
-                 include_non_ref_columns=True):
+                 include_non_ref_columns=True, include_column_tags=False):
         """
 
         :param alignment_file: Taf or maf file
@@ -20,6 +20,7 @@ class TorchDatasetAlignmentIterator(torch.utils.data.IterableDataset):
         :param step: Number of bases between the start of each successive window, step <= window_length
         :param include_sequence_names:  Bool, include sequence names in the columns
         :param include_non_ref_columns: Include non-reference columns in the iteration
+        :param include_column_tags: Include any column tags as a final return value
         """
         super(TorchDatasetAlignmentIterator).__init__()
         self.alignment_file = alignment_file
@@ -31,6 +32,7 @@ class TorchDatasetAlignmentIterator(torch.utils.data.IterableDataset):
         self.step = step
         self.include_sequence_names = include_sequence_names
         self.include_non_ref_columns = include_non_ref_columns
+        self.include_column_tags = include_column_tags
 
     def __iter__(self):
         worker_info = torch.utils.data.get_worker_info()
@@ -79,8 +81,10 @@ class TorchDatasetAlignmentIterator(torch.utils.data.IterableDataset):
         if self.window_length > 1:
             return get_window_iterator(alignment_reader, window_length=self.window_length, step=self.step,
                                        include_sequence_names=self.include_sequence_names,
-                                       include_non_ref_columns=self.include_non_ref_columns)
+                                       include_non_ref_columns=self.include_non_ref_columns,
+                                       include_column_tags=self.include_column_tags)
         else:
             return get_column_iterator(alignment_reader, include_sequence_names=self.include_sequence_names,
-                                       include_non_ref_columns=self.include_non_ref_columns)
+                                       include_non_ref_columns=self.include_non_ref_columns,
+                                       include_column_tags=self.include_column_tags)
 

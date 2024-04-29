@@ -313,7 +313,8 @@ class AlignmentReader:
 
 def get_column_iterator(alignment_reader,
                         include_sequence_names=True,
-                        include_non_ref_columns=True):
+                        include_non_ref_columns=True,
+                        include_column_tags=False):
     """ Create an alignment column iterator which returns successive
     columns from the alignment from an AlignmentReader object.
 
@@ -324,6 +325,8 @@ def get_column_iterator(alignment_reader,
     If include_sequence_names is True then a third value, an array of sequence names for the columns, is included.
 
     If include_non_ref_columns is True then columns not including the reference in the interval will also be returned.
+
+    If include_column_tags is True then the last returned value per column will be a dictionary of any tags.
     """
     for alignment in alignment_reader:  # For each alignment block
         # Get the reference row so we can keep track of the reference coordinates
@@ -340,21 +343,34 @@ def get_column_iterator(alignment_reader,
         for i in range(alignment.column_number()):  # For each column
             if ref_bases[i] != '-':  # If a ref column
                 if include_sequence_names:
-                    yield ref_index, alignment.get_column(i), sequence_names
+                    if include_column_tags:
+                        yield ref_index, alignment.get_column(i), sequence_names, alignment.column_tags(i)
+                    else:
+                        yield ref_index, alignment.get_column(i), sequence_names
                 else:
-                    yield ref_index, alignment.get_column(i)
+                    if include_column_tags:
+                        yield ref_index, alignment.get_column(i), alignment.column_tags(i)
+                    else:
+                        yield ref_index, alignment.get_column(i)
                 ref_index += 1
             elif include_non_ref_columns:  # If we also want non-reference columns
                 if include_sequence_names:
-                    yield ref_index, alignment.get_column(i), sequence_names
+                    if include_column_tags:
+                        yield ref_index, alignment.get_column(i), sequence_names, alignment.column_tags(i)
+                    else:
+                        yield ref_index, alignment.get_column(i), sequence_names
                 else:
-                    yield ref_index, alignment.get_column(i)
+                    if include_column_tags:
+                        yield ref_index, alignment.get_column(i), alignment.column_tags(i)
+                    else:
+                        yield ref_index, alignment.get_column(i)
 
 
 def get_window_iterator(alignment_reader,
                         window_length=10, step=1,
                         include_sequence_names=True,
-                        include_non_ref_columns=True):
+                        include_non_ref_columns=True,
+                        include_column_tags=False):
     """ Iterate over (overlapping) windows of the alignment.
 
     :param alignment_reader: An alignment reader to iterate from
@@ -363,6 +379,7 @@ def get_window_iterator(alignment_reader,
     If equal to the window length will mean windows are non-overlapping
     :param include_sequence_names: See get_column_iterator()
     :param include_non_ref_columns: See get_column_iterator()
+    :param include_column_tags: See get_column_iterator()
     :return: A numpy array of columns, each column from get_column_iterator()
     """
     assert window_length > 0  # Window length must be positive integer
@@ -371,7 +388,8 @@ def get_window_iterator(alignment_reader,
     q = deque()
     for column in get_column_iterator(alignment_reader,
                                       include_sequence_names=include_sequence_names,
-                                      include_non_ref_columns=include_non_ref_columns):
+                                      include_non_ref_columns=include_non_ref_columns,
+                                      include_column_tags=include_column_tags):
         q.append(column)  # Add to the right end of the window
         assert len(q) <= window_length
         if len(q) == window_length:

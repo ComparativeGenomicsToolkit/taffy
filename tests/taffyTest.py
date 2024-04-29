@@ -217,11 +217,13 @@ class TafTest(unittest.TestCase):
 
             with AlignmentReader(self.test_taf_file, taf_index=taf_index, sequence_intervals=sequence_intervals) as tp:
                 i, j, k = 0, 0, 0  # Index of total bases, sequence interval, and offset on sequence interval
-                for ref_index, column, seq_names in get_column_iterator(tp, include_non_ref_columns=False):
+                for ref_index, column, seq_names, column_tags in get_column_iterator(tp, include_non_ref_columns=False,
+                                                                                     include_column_tags=True):
                     i += 1  # Increment total bases
                     seq_name, start, length = sequence_intervals[j]
                     self.assertEqual(seq_names[0], seq_name)
                     self.assertEqual(ref_index, k + start)
+                    self.assertEqual(column_tags, {})
                     k += 1  # Increment index along sequence
                     if k >= length:  # If we have walked of the end of a sequence interval, move to the next
                         j, k = j+1, 0
@@ -299,15 +301,17 @@ class TafTest(unittest.TestCase):
                                                           is_maf=not taf_not_maf,
                                                           sequence_intervals=sequence_intervals,
                                                           include_non_ref_columns=False,
-                                                          include_sequence_names=True),
+                                                          include_sequence_names=True,
+                                                          include_column_tags=True),
                             num_workers=1)
 
             i, j, k = 0, 0, 0  # Index of total bases, sequence interval, and offset on sequence interval
-            for ref_index, column, seq_names in ai:
+            for ref_index, column, seq_names, column_tags in ai:
                 i += 1  # Increment total bases
                 seq_name, start, length = sequence_intervals[j]
                 self.assertEqual(seq_names[0][0], seq_name)
                 self.assertEqual(ref_index, k + start)
+                self.assertEqual(column_tags, {})  # Columns tags are empty
                 k += 1  # Increment index along sequence
                 if k >= length:  # If we have walked of the end of a sequence interval, move to the next
                     j, k = j+1, 0
@@ -320,10 +324,11 @@ class TafTest(unittest.TestCase):
                                                           is_maf=not taf_not_maf,
                                                           sequence_intervals=sequence_intervals,
                                                           include_non_ref_columns=False,
-                                                          include_sequence_names=True),
+                                                          include_sequence_names=True,
+                                                          include_column_tags=True),
                             num_workers=5)
             i = 0
-            for ref_index, column, seq_names in ai:
+            for ref_index, column, seq_names, column_tags in ai:
                 i += 1
             self.assertEqual(i, total_length)
 
