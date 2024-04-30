@@ -10,6 +10,8 @@
 #include <getopt.h>
 #include <time.h>
 
+static int64_t repeat_coordinates_every_n_columns = 10000;
+
 static void usage(void) {
     fprintf(stderr, "taffy sort [options]\n");
     fprintf(stderr, "Sort the rows of the TAF alignment file in a specified order\n");
@@ -22,6 +24,8 @@ static void usage(void) {
     fprintf(stderr, "-d --dupFilterFile : Remove duplicate sequences matching any prefix in this file\n");
     fprintf(stderr, "-r --dontIgnoreFirstRow : Do consider the first (reference) row of each maf block - by default we "
                     "don't alter the sort of the reference row\n");
+    fprintf(stderr, "-s --repeatCoordinatesEveryNColumns : Repeat TAF coordinates of each sequence at least every n columns. By default: %" PRIi64 "\n", repeat_coordinates_every_n_columns);
+    fprintf(stderr, "-c --useCompression : Write the output using bgzip compression.\n");    
     fprintf(stderr, "-l --logLevel : Set the log level\n");
     fprintf(stderr, "-h --help : Print this help message\n");
 }
@@ -63,7 +67,7 @@ void process_alignment_block(Alignment *pp_alignment, Alignment *p_alignment, st
         }
         // Write the block
         taf_write_block(pp_alignment, p_alignment,
-                        run_length_encode_bases, -1, output); // Write the block
+                        run_length_encode_bases, repeat_coordinates_every_n_columns, output); // Write the block
     }
     if(pp_alignment != NULL) {
         alignment_destruct(pp_alignment, 1); // Delete the left most block
@@ -84,6 +88,7 @@ int taf_sort_main(int argc, char *argv[]) {
     char *pad_file = NULL;
     char *dup_filter_file = NULL;
     bool ignore_first_row = 1;
+    bool use_compression = 0;
 
     ///////////////////////////////////////////////////////////////////////////
     // Parse the inputs
@@ -98,11 +103,13 @@ int taf_sort_main(int argc, char *argv[]) {
                                                {"padFile", required_argument, 0, 'p'},
                                                {"dupFilterFile", required_argument, 0, 'd'},
                                                {"dontIgnoreFirstRow", no_argument, 0, 'r'},
+                                               {"repeatCoordinatesEveryNColumns", required_argument, 0, 's'},
+                                               {"useCompression", no_argument, 0, 'c'},
                                                {"help",       no_argument,       0, 'h'},
                                                {0, 0,                            0, 0}};
 
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:o:n:hrf:p:d:", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:o:n:hrf:p:d:s:c", long_options, &option_index);
         if (key == -1) {
             break;
         }
@@ -132,6 +139,12 @@ int taf_sort_main(int argc, char *argv[]) {
             case 'r':
                 ignore_first_row = 0;
                 break;
+            case 's':
+                repeat_coordinates_every_n_columns = atol(optarg);
+                break;
+            case 'c':
+                use_compression = 1;
+                break;                                
             case 'h':
                 usage();
                 return 0;
@@ -172,7 +185,7 @@ int taf_sort_main(int argc, char *argv[]) {
         fprintf(stderr, "Unable to open output file: %s\n", output_file);
         return 1;
     }
-    LW *output = LW_construct(output_fh, 0);
+    LW *output = LW_construct(output_fh, use_compression);
 
     // Sort/filter/pad files
     stList *prefixes_to_filter_by = load_sort_file(filter_file);

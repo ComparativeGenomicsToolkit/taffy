@@ -13,7 +13,7 @@ int64_t maximum_block_length_to_merge = 200;
 int64_t maximum_gap_length = 30;
 int64_t minimum_shared_rows = 1;
 float fraction_shared_rows = 0.0;
-int64_t repeat_coordinates_every_n_columns = 1000;
+static int64_t repeat_coordinates_every_n_columns = 10000;
 
 static void usage(void) {
     fprintf(stderr, "taffy norm [options]\n");
