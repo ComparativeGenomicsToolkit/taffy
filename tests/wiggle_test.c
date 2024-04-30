@@ -6,7 +6,7 @@
 static void test_wiggle(CuTest *testCase) {
     // Example wiggle parsing
     char *example_wig = "./tests/evolverMammals.wig.mini";
-    stHash *wig = wig_parse(example_wig, "Anc0.");
+    stHash *wig = wig_parse(example_wig, "Anc0.", 1);
     CuAssertTrue(testCase, wig_get_value(wig, "Anc0.Anc0refChr0", 0, -1) == 5.1);
     CuAssertTrue(testCase, wig_get_value(wig, "Anc0.Anc0refChr0", 1, -1) == 10);
     CuAssertTrue(testCase, wig_get_value(wig, "Anc0.Anc0refChr0", 2, -1) == 67);
@@ -25,7 +25,7 @@ static void test_wiggle(CuTest *testCase) {
 static void test_large_wiggle(CuTest *testCase) {
     // Example wiggle parsing
     char *example_wig = "./tests/447-way/447-mammalian-2022v1_hg38_chr22_22000000_22100000.phyloP.wig";
-    stHash *wig = wig_parse(example_wig, "hg38.");
+    stHash *wig = wig_parse(example_wig, "hg38.", 0);
     CuAssertTrue(testCase, wig_get_value(wig, "hg38.chr22", 22000001, -1) == -1.301);
     CuAssertTrue(testCase, wig_get_value(wig, "hg38.chr22", 22000002, -1) == 0.663);
     CuAssertTrue(testCase, wig_get_value(wig, "hg38.chr22", 22000003, -1) == 0.663);

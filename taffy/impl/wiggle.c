@@ -70,7 +70,7 @@ double wig_get_value(stHash *wig, char *seq, int64_t coordinate, double default_
     return value == NULL ? default_value : *value;
 }
 
-stHash *wig_parse(char *file, char *seq_prefix) {
+stHash *wig_parse(char *file, char *seq_prefix, bool make_zero_based) {
     // Make a hash of string names to nested hashes, each of which is a hash of int64_t to floats
     stHash *seq_intervals = stHash_construct3(stHash_stringKey, stHash_stringEqualKey,
                                               free, (void (*)(void *))stHash_destruct);
@@ -106,7 +106,8 @@ stHash *wig_parse(char *file, char *seq_prefix) {
             int64_t step = atol(get_tag(header, "step", "1"));
             assert(span <= step);  // The span must be less than or equal to the step or we'd have overlapping values
             assert(stHash_search(header, "start") != NULL);  // For a fixed step there must be a start value
-            int64_t i = atol(stHash_search(header, "start"));
+            int64_t i = atol(stHash_search(header, "start")) + (make_zero_based ? -1 : 0);
+            assert(i >= 0); // Sanity check for start coordinate
             while (1) {
                 line = LI_get_next_line(li);
 
@@ -160,7 +161,8 @@ stHash *wig_parse(char *file, char *seq_prefix) {
                 }
 
                 // Case we have a value
-                int64_t i = atol(stList_get(tokens, 0));
+                int64_t i = atol(stList_get(tokens, 0)) + (make_zero_based ? -1 : 0);
+                assert(i >= 0); // Sanity check for coordinate
                 double f = atof(stList_get(tokens, 1));
                 for (int64_t j = 0; j < span; j++) {
                     add_coordinate_value(values, i + j, f);

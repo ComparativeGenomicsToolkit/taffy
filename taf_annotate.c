@@ -161,8 +161,8 @@ int taf_annotate_main(int argc, char *argv[]) {
     bool run_length_encode_bases = 0;
     Tag *tag = taf_read_header_2(li, &run_length_encode_bases);
 
-    // Load the wiggle file
-    stHash *labels = wig_parse(wig_file, ref_prefix);
+    // Load the wiggle file, making coordinates 0 based
+    stHash *labels = wig_parse(wig_file, ref_prefix, 1);
 
     // Open the output file for writing
     FILE *output_fh = output_file == NULL ? stdout : fopen(output_file, "w");

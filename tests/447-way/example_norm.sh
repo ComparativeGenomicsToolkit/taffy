@@ -51,6 +51,9 @@ time ${taffy_root}/bin/taffy sort -i $alignment_file -n $sort_file -p $sort_file
 # Add annotations
 time ${taffy_root}/bin/taffy annotate -i $rearranged_alignment_file -w $wig_file --tagName phyloP --refPrefix hg38. -c > $final_alignment_file
 
+# Add index to final alignment file
+time ${taffy_root}/bin/taffy index -i $final_alignment_file
+
 # Print stats about the starting and final alignment as a sanity check
 
 echo "Starting alignment"

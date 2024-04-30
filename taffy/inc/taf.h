@@ -374,12 +374,14 @@ void alignment_add_gap_strings(Alignment *p_alignment, Alignment *alignment, stH
  * Parse a wiggle file (which may be compressed) returning a hash table from sequence names to nested hashes,
  * each nested hash being a map from sequence coordinates to floating point values.
  *
+ * Make zero based flag will make coordinates 0 based rather than 1 based.
+ *
  * Seq_prefix is prepended to each chromosome name to form the sequence name stored in the
  * returned hash.
  *
  * Not very memory efficient, but used by taffy annotate.
  */
-stHash *wig_parse(char *file, char *seq_prefix);
+stHash *wig_parse(char *file, char *seq_prefix, bool make_zero_based);
 
 /*
  * Get a value for a specific coordinate. Returns given default_value if coordinate doesn't exist.
