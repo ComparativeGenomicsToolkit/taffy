@@ -14,6 +14,7 @@ extern "C" {
 #include "halBlockViz.h"
 #endif
 
+static int64_t repeat_coordinates_every_n_columns = 10000;
 static int64_t maximum_gap_string_length = 50;
 
 static void usage() {
@@ -24,6 +25,8 @@ static void usage() {
     fprintf(stderr, "-a --halFile : HAL file for extracting gap sequence (MAF must be created with hal2maf *without* --onlySequenceNames)\n");
     fprintf(stderr, "-m --maximumGapStringLength : The maximum size of a gap string to add, be default: %" PRIi64 "\n",
             maximum_gap_string_length);
+    fprintf(stderr, "-s --repeatCoordinatesEveryNColumns : Repeat TAF coordinates of each sequence at least every n columns. By default: %" PRIi64 "\n", repeat_coordinates_every_n_columns);
+    fprintf(stderr, "-c --useCompression : Write the output using bgzip compression.\n");
     fprintf(stderr, "-l --logLevel : Set the log level\n");
     fprintf(stderr, "-h --help : Print this help message\n");
 }
@@ -39,6 +42,7 @@ int taf_add_gap_bases_main(int argc, char *argv[]) {
     char *outputFile = NULL;
     char *hal_file = NULL;
     bool run_length_encode_bases = 0;
+    bool use_compression = 0;
 
     ///////////////////////////////////////////////////////////////////////////
     // Parse the inputs
@@ -49,12 +53,14 @@ int taf_add_gap_bases_main(int argc, char *argv[]) {
                                                 { "inputFile", required_argument, 0, 'i' },
                                                 { "outputFile", required_argument, 0, 'o' },
                                                 { "halFile", required_argument, 0, 'a' },
+                                                { "repeatCoordinatesEveryNColumns", required_argument, 0, 's' },
+                                                { "useCompression", no_argument, 0, 'c' },                                                
                                                 { "help", no_argument, 0, 'h' },
                                                 { "maximumGapStringLength", required_argument, 0, 'm' },
                                                 { 0, 0, 0, 0 } };
 
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:o:a:hm:", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:o:a:s:chm:", long_options, &option_index);
         if (key == -1) {
             break;
         }
@@ -72,6 +78,12 @@ int taf_add_gap_bases_main(int argc, char *argv[]) {
             case 'a':
                 hal_file = optarg;
                 break;
+            case 's':
+                repeat_coordinates_every_n_columns = atol(optarg);
+                break;
+            case 'c':
+                use_compression = 1;
+                break;                
             case 'h':
                 usage();
                 return 0;
@@ -128,7 +140,7 @@ int taf_add_gap_bases_main(int argc, char *argv[]) {
     //////////////////////////////////////////////
 
     FILE *input = inputFile == NULL ? stdin : fopen(inputFile, "r");
-    LW *output = LW_construct(outputFile == NULL ? stdout : fopen(outputFile, "w"), 0);
+    LW *output = LW_construct(outputFile == NULL ? stdout : fopen(outputFile, "w"), use_compression);
     LI *li = LI_construct(input);
 
     // Pass the header line to determine parameters and write the updated taf header
@@ -144,7 +156,7 @@ int taf_add_gap_bases_main(int argc, char *argv[]) {
         }
 
         // Write the block
-        taf_write_block(p_alignment, alignment, run_length_encode_bases, -1, output);
+        taf_write_block(p_alignment, alignment, run_length_encode_bases, repeat_coordinates_every_n_columns, output);
 
         // Clean up the previous alignment
         if(p_alignment != NULL) {

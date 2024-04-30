@@ -10,12 +10,15 @@
 #include <getopt.h>
 #include <time.h>
 
+static int64_t repeat_coordinates_every_n_columns = 10000;
+
 static void usage(void) {
     fprintf(stderr, "taffy annotate [options]\n");
     fprintf(stderr, "Annotate the columns of a taf file using wiggle file\n");
     fprintf(stderr, "-i --inputFile : Input TAF file. If not specified reads from stdin\n");
     fprintf(stderr, "-w --wiggle [FILE_NAME] : REQUIRED The input wiggle file\n");
     fprintf(stderr, "-t --tagName [STRING] : REQUIRED: The name of the tag to annotate for the given wiggle\n");
+    fprintf(stderr, "-s --repeatCoordinatesEveryNColumns : Repeat coordinates of each sequence at least every n columns. By default: %" PRIi64 "\n", repeat_coordinates_every_n_columns);
     fprintf(stderr, "-c --useCompression : Write the output using bgzip compression.\n");
     fprintf(stderr, "-r --refPrefix : Prefix to prepend to chrom names in annotation file to form the sequence name.\n");
     fprintf(stderr, "-l --logLevel : Set the log level\n");
@@ -72,13 +75,14 @@ int taf_annotate_main(int argc, char *argv[]) {
                                                 { "outputFile", required_argument, 0, 'o' },
                                                 { "wiggle", required_argument, 0, 'w' },
                                                 { "tagName", required_argument, 0, 't' },
+                                                { "repeatCoordinatesEveryNColumns", required_argument, 0, 's' },
                                                 { "useCompression", no_argument, 0, 'c' },
                                                 { "refPrefix", required_argument, 0, 'r' },
                                                 { "help", no_argument, 0, 'h' },
                                                 { 0, 0, 0, 0 } };
 
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:o:w:cr:ht:", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:o:w:s:cr:ht:", long_options, &option_index);
         if (key == -1) {
             break;
         }
@@ -98,6 +102,9 @@ int taf_annotate_main(int argc, char *argv[]) {
                 break;
             case 't':
                 tag_name = optarg;
+                break;
+            case 's':
+                repeat_coordinates_every_n_columns = atol(optarg);
                 break;
             case 'c':
                 use_compression = 1;
@@ -181,7 +188,7 @@ int taf_annotate_main(int argc, char *argv[]) {
 
         // Write back the labelled taf
         taf_write_block2(p_alignment, alignment, run_length_encode_bases,
-                         0, output, 0, 0);
+                         repeat_coordinates_every_n_columns, output, 0, 0);
 
         // Clean up
         if (p_alignment) {
