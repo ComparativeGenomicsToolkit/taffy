@@ -308,7 +308,7 @@ internal nodes, say. For an example of usage see ./tests/447-way/example_norm.sh
 
 ## Taffy Coverage
 
-This tool calculates basic coverage and percent identity statistics of a selected reference (defaults to first row) vs all other genomes in the alignment. Whole-genome and reference-contig-level statistics are provided. The values presented are:
+This tool, `taffy coverage`, calculates basic coverage and percent identity statistics of a selected reference (defaults to first row) vs all other genomes in the alignment. Whole-genome and reference-contig-level statistics are provided. The values presented are:
 
 * `ref-contig`: full name of reference contig (`_Total_` for whole-genome numbers)
 * `max-gap`: reference bases in alignment gaps greater than this value are not counted in `len`.  
@@ -335,7 +335,10 @@ You can also use the `-s` option to add a breakdown of sex chromosomes and autos
 
 ## Taffy Stats
 
-Useful for getting course data about a MAF/TAF, e.g.:
+`taffy stats` can print some basic statistics about the reference contigs (first row) in the alignment. Options are
+* List the reference contigs and their lengths (maximum end coordinates as found in the alignment -- could be smaller than true contig lengths). This is done quickly using the `.tai` index created with `taffy index`.
+* List all the reference intervals in BED format found in the alignment.  This is done by scanning the whole alignment and is therefore much slower than the above option (but will produce more fine-grained output in the case where the alignment only covers subregions of the contigs).
+In addition, it is useful for getting course data about a MAF/TAF, e.g.:
 
 ```
 taffy stats -i ./447-way/447-mammalian-2022v1_hg38_chr22_22000000_22100000.anc.norm.taf.gz -a

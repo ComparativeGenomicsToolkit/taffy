@@ -16,6 +16,7 @@ static void usage(void) {
     fprintf(stderr, "-i --inputFile : Input TAF or MAF file. If not specified reads from stdin\n");
     fprintf(stderr, "-s --sequenceLengths : Print length of each *reference* sequence in the (indexed) alignment\n");
     fprintf(stderr, "-a --alignmentStats : Print stats about block number, aligned bases, etc.\n");
+    fprintf(stderr, "-b --sequenceIntervals : Print the BED intervals of each *reference* sequence covered by the alignment\n");
     fprintf(stderr, "-l --logLevel : Set the log level\n");
     fprintf(stderr, "-h --help : Print this help message\n");
 }
@@ -29,6 +30,8 @@ int taf_stats_main(int argc, char *argv[]) {
     char *logLevelString = NULL;
     char *taf_fn = NULL;
     bool seq_lengths = false;
+    bool seq_intervals = false;
+    int stat_option_count = 0;
     bool alignment_stats = false;
 
     ///////////////////////////////////////////////////////////////////////////
@@ -40,11 +43,12 @@ int taf_stats_main(int argc, char *argv[]) {
                                                 { "inputFile", required_argument, 0, 'i' },
                                                 { "sequenceLengths", no_argument, 0, 's' },
                                                 { "alignmentStats", no_argument, 0, 'a' },
+                                                { "sequenceIntervals", no_argument, 0, 'b' },
                                                 { "help", no_argument, 0, 'h' },
                                                 { 0, 0, 0, 0 } };
 
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:sha", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:sbah", long_options, &option_index);
         if (key == -1) {
             break;
         }
@@ -58,9 +62,14 @@ int taf_stats_main(int argc, char *argv[]) {
                 break;
             case 's':
                 seq_lengths = 1;
+                ++stat_option_count;
                 break;
             case 'a':
                 alignment_stats = 1;
+                break;
+            case 'b':
+                seq_intervals = 1;
+                ++stat_option_count;
                 break;
             case 'h':
                 usage();
@@ -82,6 +91,11 @@ int taf_stats_main(int argc, char *argv[]) {
     // Do the stats
     //////////////////////////////////////////////
 
+    if (stat_option_count != 1) {
+        fprintf(stderr, "Please pick a stats option from { -s, -b }\n");
+        return 1;
+    }
+
     // load the input
     FILE *taf_fh = taf_fn == NULL ? stdin : fopen(taf_fn, "r");
     if (taf_fh == NULL) {
@@ -89,17 +103,25 @@ int taf_stats_main(int argc, char *argv[]) {
         return 1;
     }
     LI *li = LI_construct(taf_fh);
-    
+
     // sniff the format
     int input_format = check_input_format(LI_peek_at_next_line(li));
     if (input_format == 2) {
         fprintf(stderr, "Input not supported: unable to detect ##maf or #taf header\n");
+        return 1;
+    } else if (input_format != 0 && seq_intervals) {
+        fprintf(stderr, "MAF input detected but -b only works with TAF input. Please use taffy view to convert\n");
         return 1;
     }
     bool run_length_encode_bases = 0;
     if(input_format == 0) {  // Is taf, check if run_length_encode_bases is set
         tag_destruct(taf_read_header_2(li, &run_length_encode_bases));
     }
+
+    // parse the header
+    bool run_length_encode_bases;
+    Tag *tag = taf_read_header_2(li, &run_length_encode_bases);
+    tag_destruct(tag);
 
     // load the index if it's required by the given options
     bool index_required = seq_lengths;
@@ -126,6 +148,38 @@ int taf_stats_main(int argc, char *argv[]) {
         }
         stHash_destruct(seq_to_len);
         stList_destruct(seq_names);
+    } else if (seq_intervals) {
+        Alignment *alignment = NULL;
+        Alignment *p_alignment = NULL;
+        char *cur_seq = NULL;
+        int64_t cur_start = -1;
+        int64_t cur_end = 0;
+        while((alignment = taf_read_block(p_alignment, run_length_encode_bases, li)) != NULL) {
+            if (alignment->row_number > 0) {
+                if (!cur_seq || strcmp(cur_seq, alignment->row->sequence_name) != 0 || alignment->row->start != cur_end) {
+                    if (cur_seq) {
+                        fprintf(stdout, "%s\t%" PRIi64 "\t%" PRIi64 "\n", cur_seq, cur_start, cur_end);
+                        free(cur_seq);
+                    }
+                    cur_seq = stString_copy(alignment->row->sequence_name);
+                    cur_start = alignment->row->start;
+                    cur_end = cur_start + alignment->row->length;
+                } else {
+                    cur_end += alignment->row->length;
+                }
+            }
+            if (p_alignment) {
+                alignment_destruct(p_alignment, true);
+            }
+            p_alignment = alignment;
+        }
+        if (p_alignment) {
+            alignment_destruct(p_alignment, true);
+        }
+        if (cur_seq) {
+            fprintf(stdout, "%s\t%" PRIi64 "\t%" PRIi64 "\n", cur_seq, cur_start, cur_end);
+            free(cur_seq);
+        }
     }
 
     // If want column depth stats (does not currently work with any subregion)

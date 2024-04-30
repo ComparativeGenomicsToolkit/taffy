@@ -3,9 +3,38 @@
 
 /*
  * Index a TAF file.  Modeled on .fai from samtools faidx
- * Index format is 
- * Sequence Length Offset Mean-Row-Length TAF-header
- * where TAF header is everything we need to get going parsing the TAF file at that exact position
+ * 
+ * Each line represents a position on a reference contig as mapped to a position in the TAF/MAF file
+ * 
+ * The lines must be increasing in [Contig-Name, Start-position] order. 
+ *
+ * Lines can reflect absolute coordinates or relative coordinates. 
+ *
+ * Absoluate Coordinates:
+ *
+ * Column 1: Contig Name
+ * Column 2: Position in Contig (0-based)
+ * Column 3: Offset in bytes in MAF/TAF file being indexed (can be bgzipped)
+ *
+ * Relative coordinates (to the previous line):
+ *
+ * Column 1: *
+ * Column 2: Positiion in Contig *relative to previous line*
+ * Column 3: Offset in file *relative to previous line*
+ *
+ * For example, ths index:
+
+Anc0.Anc0refChr11	0	1421634189773
+*	10007	25769835729
+*	10001	30064728450
+*	10077	30064782171
+
+* is equivalent to:
+
+Anc0.Anc0refChr11	0	1421634189773
+Anc0.Anc0refChr11	10007	1447404025502
+Anc0.Anc0refChr11	20008	30064728450
+Anc0.Anc0refChr11	30085	30064782171
  *
  */
 
