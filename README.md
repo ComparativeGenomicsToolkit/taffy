@@ -289,9 +289,15 @@ Taffy view first converts the input maf to TAF, taffy sort then sorts the rows o
 
 Where here we additionally remove any rows with sequence names with a prefix contained in the given FILTER_FILE.
 
+## Taffy Statistics
+
+`taffy stats` can print some basic statistics about the reference contigs (first row) in the alignment. Options are
+* List the reference contigs and their lengths (maximum end coordinates as found in the alignment -- could be smaller than true contig lengths). This is done quickly using the `.tai` index created with `taffy index`.
+* List all the reference intervals in BED format found in the alignment.  This is done by scanning the whole alignment and is therefore much slower than the above option (but will produce more fine-grained output in the case where the alignment only covers subregions of the contigs).
+
 ## Taffy Coverage
 
-This tool calculates basic coverage and percent identity statistics of a selected reference (defaults to first row) vs all other genomes in the alignment. Whole-genome and reference-contig-level statistics are provided. The values presented are:
+This tool, `taffy coverage`, calculates basic coverage and percent identity statistics of a selected reference (defaults to first row) vs all other genomes in the alignment. Whole-genome and reference-contig-level statistics are provided. The values presented are:
 
 * `ref-contig`: full name of reference contig (`_Total_` for whole-genome numbers)
 * `max-gap`: reference bases in alignment gaps greater than this value are not counted in `len`.  
