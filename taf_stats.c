@@ -66,6 +66,7 @@ int taf_stats_main(int argc, char *argv[]) {
                 break;
             case 'a':
                 alignment_stats = 1;
+                ++stat_option_count;
                 break;
             case 'b':
                 seq_intervals = 1;
@@ -92,7 +93,7 @@ int taf_stats_main(int argc, char *argv[]) {
     //////////////////////////////////////////////
 
     if (stat_option_count != 1) {
-        fprintf(stderr, "Please pick a stats option from { -s, -b }\n");
+        fprintf(stderr, "Please pick a stats option from { -s, -b, -a }\n");
         return 1;
     }
 
@@ -113,15 +114,11 @@ int taf_stats_main(int argc, char *argv[]) {
         fprintf(stderr, "MAF input detected but -b only works with TAF input. Please use taffy view to convert\n");
         return 1;
     }
+    // parse the header
     bool run_length_encode_bases = 0;
     if(input_format == 0) {  // Is taf, check if run_length_encode_bases is set
         tag_destruct(taf_read_header_2(li, &run_length_encode_bases));
     }
-
-    // parse the header
-    bool run_length_encode_bases;
-    Tag *tag = taf_read_header_2(li, &run_length_encode_bases);
-    tag_destruct(tag);
 
     // load the index if it's required by the given options
     bool index_required = seq_lengths;

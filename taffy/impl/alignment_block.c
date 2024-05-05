@@ -339,9 +339,48 @@ char *alignment_get_column(Alignment *alignment, int64_t column_index) {
     assert(column_index < alignment->column_number);
     Alignment_Row *row = alignment->row;
     for(int64_t i=0; i<alignment->row_number; i++) {
+        assert(row != NULL);
         column_string[i] = row->bases[column_index];
         row = row->n_row;
     }
     assert(row == NULL);
     return column_string;
+}
+
+int32_t *alignment_get_column_as_int_array(Alignment *alignment, int64_t column_index) {
+    int32_t *column_array = st_malloc(sizeof(int32_t) * alignment->row_number);
+    assert(column_index >= 0);
+    assert(column_index < alignment->column_number);
+    Alignment_Row *row = alignment->row;
+    for(int64_t i=0; i<alignment->row_number; i++) {
+        assert(row != NULL);
+        int32_t j;
+        switch(row->bases[column_index]) {
+            case '-':
+                j = 4;
+                break;
+            case 'a':
+            case 'A':
+                j = 0;
+                break;
+            case 'c':
+            case 'C':
+                j = 1;
+                break;
+            case 'g':
+            case 'G':
+                j = 2;
+                break;
+            case 't':
+            case 'T':
+                j = 3;
+                break;
+            default:
+                j = 5;
+        }
+        column_array[i] = j;
+        row = row->n_row;
+    }
+    assert(row == NULL);
+    return column_array;
 }

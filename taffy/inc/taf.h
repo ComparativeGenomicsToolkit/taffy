@@ -136,6 +136,11 @@ void alignment_get_column_in_buffer(Alignment *alignment, int64_t column_index, 
 char *alignment_get_column(Alignment *alignment, int64_t column_index);
 
 /*
+ * Read a column of the alignment as an integer array where A/a=0, C/c=1, G/g=2, T/t=3, -=4, everything else=5
+ */
+int32_t *alignment_get_column_as_int_array(Alignment *alignment, int64_t column_index);
+
+/*
  * Cleanup a row
  */
 void alignment_row_destruct(Alignment_Row *row);

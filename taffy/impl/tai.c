@@ -584,7 +584,7 @@ static unsigned int clip_alignment(Alignment *aln, Alignment *p_aln, int64_t sta
     }
     
     // then get rid of empty rows as they api doesn't handle them
-    Alignment_Row *prev = NULL;
+    /*Alignment_Row *prev = NULL;
     Alignment_Row *next = NULL;
     for (Alignment_Row *row = aln->row; row != NULL; row = next) {
         next = row->n_row;
@@ -597,7 +597,7 @@ static unsigned int clip_alignment(Alignment *aln, Alignment *p_aln, int64_t sta
         } else {
             prev = row;
         }
-    }
+    }*/
 
     aln->column_number = aln->row_number > 0 ? strlen(aln->row->bases) : 0;
 

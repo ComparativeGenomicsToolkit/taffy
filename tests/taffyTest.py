@@ -2,6 +2,8 @@ import unittest
 import pathlib
 import subprocess
 from random import randint
+
+import taffy.lib
 from taffy.lib import AlignmentReader, AlignmentWriter, TafIndex, write_taf_index_file, \
     get_column_iterator, get_window_iterator
 from taffy.newick import PhyloTree
@@ -89,22 +91,22 @@ class TafTest(unittest.TestCase):
                  "simCow_chr6.simCow.chr6", "simDog_chr6.simDog.chr6", "simHuman_chr6.simHuman.chr6",
                  "simMouse_chr6.simMouse.chr6", "simRat_chr6.simRat.chr6"]
             # First column
-            ref_index, column, sequence_names = next(column_it)
+            column, (ref_index, sequence_names) = next(column_it)
             self.assertEqual(s, list(sequence_names))
             self.assertEqual(column, "GGGGGGGGG")
 
             # Second column
-            ref_index, column, sequence_names = next(column_it)
+            column, (ref_index, sequence_names) = next(column_it)
             self.assertEqual(s, list(sequence_names))
             self.assertEqual(column, "TTTTTTTTT")
 
             # Third column
-            ref_index, column, sequence_names = next(column_it)
+            column, (ref_index, sequence_names) = next(column_it)
             self.assertEqual(s, list(sequence_names))
             self.assertEqual(column, "CCCCGCCCC")
 
             # Check it works
-            for ref_index, column, sequence_names in column_it:
+            for column, label in column_it:
                 pass
 
     def test_maf_to_taf(self, compress_file=False):
@@ -217,8 +219,8 @@ class TafTest(unittest.TestCase):
 
             with AlignmentReader(self.test_taf_file, taf_index=taf_index, sequence_intervals=sequence_intervals) as tp:
                 i, j, k = 0, 0, 0  # Index of total bases, sequence interval, and offset on sequence interval
-                for ref_index, column, seq_names, column_tags in get_column_iterator(tp, include_non_ref_columns=False,
-                                                                                     include_column_tags=True):
+                for column, (ref_index, seq_names, column_tags) in get_column_iterator(tp, include_non_ref_columns=False,
+                                                                                       include_column_tags=True):
                     i += 1  # Increment total bases
                     seq_name, start, length = sequence_intervals[j]
                     self.assertEqual(seq_names[0], seq_name)
@@ -240,14 +242,15 @@ class TafTest(unittest.TestCase):
             with AlignmentReader(self.test_taf_file, taf_index=taf_index, sequence_intervals=(("Anc0.Anc0refChr0",
                                                                                                start, length),)) as tp:
                 j = start
-                for columns in get_window_iterator(tp, include_non_ref_columns=False,
-                                                   window_length=window_length, step=step):
+                for columns, labels in get_window_iterator(tp, include_non_ref_columns=False,
+                                                           window_length=window_length, step=step):
                     # Check that we have the expected number of columns
                     self.assertEqual(len(columns), window_length)
+                    self.assertEqual(len(labels), window_length)
 
                     # Check coordinates of columns
                     k = 0
-                    for ref_index, column, seq_names in columns:
+                    for ref_index, seq_names in labels:
                         self.assertEqual(seq_names[0], "Anc0.Anc0refChr0")
                         self.assertEqual(ref_index, j+k)
                         self.assertTrue(ref_index < start + length)
@@ -287,6 +290,10 @@ class TafTest(unittest.TestCase):
         self.assertEqual(t.tree_string(include_internal_labels=False, include_leaf_labels=False,
                                        include_branch_lengths=False), a_no_to)
 
+    @staticmethod
+    def identity_fn(i):
+        return i
+
     def test_torchDatasetAlignmentIterator(self, compress_file=False, taf_not_maf=True):
         """ Tests the PyTorch dataset alignment iterator """
         # Make the Taf Index object and the taf file
@@ -297,7 +304,10 @@ class TafTest(unittest.TestCase):
             # Make a bunch of random sequence intervals
             sequence_intervals, total_length = self.get_random_sequence_intervals()
 
-            ai = DataLoader(TorchDatasetAlignmentIterator(self.test_taf_file, taf_index_file=self.test_index_file,
+            ai = DataLoader(TorchDatasetAlignmentIterator(self.test_taf_file,
+                                                          column_conversion_function=self.identity_fn,
+                                                          label_conversion_function=self.identity_fn,
+                                                          taf_index_file=self.test_index_file,
                                                           is_maf=not taf_not_maf,
                                                           sequence_intervals=sequence_intervals,
                                                           include_non_ref_columns=False,
@@ -306,7 +316,7 @@ class TafTest(unittest.TestCase):
                             num_workers=1)
 
             i, j, k = 0, 0, 0  # Index of total bases, sequence interval, and offset on sequence interval
-            for ref_index, column, seq_names, column_tags in ai:
+            for column, (ref_index, seq_names, column_tags) in ai:
                 i += 1  # Increment total bases
                 seq_name, start, length = sequence_intervals[j]
                 self.assertEqual(seq_names[0][0], seq_name)
@@ -320,7 +330,10 @@ class TafTest(unittest.TestCase):
 
             # Now test a multi-processing version of the data loader - here we don't expect the columns to come out
             # in order, necessarily
-            ai = DataLoader(TorchDatasetAlignmentIterator(self.test_taf_file, taf_index_file=self.test_index_file,
+            ai = DataLoader(TorchDatasetAlignmentIterator(self.test_taf_file,
+                                                          column_conversion_function=self.identity_fn,
+                                                          label_conversion_function=self.identity_fn,
+                                                          taf_index_file=self.test_index_file,
                                                           is_maf=not taf_not_maf,
                                                           sequence_intervals=sequence_intervals,
                                                           include_non_ref_columns=False,
@@ -328,9 +341,24 @@ class TafTest(unittest.TestCase):
                                                           include_column_tags=True),
                             num_workers=5)
             i = 0
-            for ref_index, column, seq_names, column_tags in ai:
+            for column, labels in ai:
                 i += 1
             self.assertEqual(i, total_length)
+
+    def test_get_reference_sequence_intervals(self):
+        """ Tests the get_reference_sequence_intervals method.
+        """
+        # Make the Taf Index object and the taf file
+        taf_index = self.make_taf_and_taf_index(compress_file=False, taf_not_maf=True)
+
+        # Create a taf/maf reader for a series of random sequence intervals
+        for test in range(100):
+            start = randint(0, 1000)
+            length = randint(1, 50)
+            with AlignmentReader(self.test_taf_file, taf_index=taf_index, sequence_intervals=(("Anc0.Anc0refChr0",
+                                                                                                start, length),)) as tp:
+                seq_intervals = list(taffy.lib.get_reference_sequence_intervals(tp))
+                self.assertEqual(seq_intervals, [("Anc0.Anc0refChr0", start, length)])
 
 
 if __name__ == '__main__':

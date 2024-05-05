@@ -86,6 +86,28 @@ class Alignment:
         lib.free(column)  # Free C string
         return column_string
 
+    def get_column_as_np_array(self, column_index):
+        """ Get a column of the alignment as a numpy int32 array, where we map the bases to
+        consecutive integers, e.g. A/a=0, C/c=1, G/g=2, T/t=3, -=4, everything else=5.
+
+        Use negative coordinates to get columns from the end of the block """
+        column_index = column_index if column_index >= 0 else (self.column_number() + column_index)  # Correct if
+        # requesting a column from the end of the alignment
+        assert 0 <= column_index < self.column_number()
+        column = lib.alignment_get_column_as_int_array(self._c_alignment, column_index)  # Get the column
+        column_length = self.row_number()
+        # Convert the C array to a NumPy array, copying it in process
+        column_np = np.copy(np.frombuffer(ffi.buffer(column, ffi.sizeof("int32_t") * column_length), dtype=np.int32))
+        lib.free(column)  # Free C string
+        return column_np
+
+    def get_column_as_np_array_one_hot(self, column_index):
+        """ As get_column_as_np_array, but encoded one hot, using float32 """
+        column_np = self.get_column_as_np_array(column_index)
+        column_np_one_hot = np.zeros(shape=(len(column_np),6), dtype=np.float32)
+        column_np_one_hot[np.arange(len(column_np)), column_np] = 1.0
+        return column_np
+
     def get_column_sequences(self):
         """ Get the names of the sequences in the alignment in order as a list """
         row = self.first_row()
@@ -210,7 +232,13 @@ class AlignmentReader:
         self.taf_not_maf = i == 0  # Sniff the file header to determine if a taf file
         self.taf_index = taf_index  # Store the taf index (if there is one)
         self.header_tags = self._read_header()  # Read the header tags
-        self.use_run_length_encoding = "run_length_encode_bases" in self.header_tags  # Use run length encoding
+
+        # Parse run length encoding
+        self.use_run_length_encoding = False
+        if "run_length_encode_bases" in self.header_tags:
+            assert self.header_tags["run_length_encode_bases"] in ("0", "1")
+            self.use_run_length_encoding = self.header_tags["run_length_encode_bases"] == "1"
+
         self.sequence_intervals = sequence_intervals
         self.sequence_interval_index = 0
 
@@ -246,7 +274,7 @@ class AlignmentReader:
         if self.taf_not_maf:  # Is a taf block
             # Use the taf index if present
             c_alignment = lib.tai_next(self._c_taf_index_it, self.c_li_handle) if self.taf_index else \
-                lib.taf_read_block(self.p_c_alignment, 0, self.c_li_handle)
+                lib.taf_read_block(self.p_c_alignment, self.use_run_length_encoding, self.c_li_handle)
         else:  # Is a maf block
             c_alignment = lib.tai_next(self._c_taf_index_it, self.c_li_handle) if self.taf_index else \
                 lib.maf_read_block(self.c_li_handle)
@@ -311,23 +339,56 @@ class AlignmentReader:
         self.close()
 
 
+def get_reference_sequence_intervals(alignment_reader):
+    """ Generates a sequence of reference sequence intervals by scanning through the alignment_reader.
+    Each generated value is of the form (seq_name, start, length). Length is the number of
+    reference bases in blocks within the interval (e.g. ignores unaligned ref gaps).
+    """
+    seq_intervals = []
+    p_ref_seq, p_ref_start, p_ref_length = None, 0, 0
+    for alignment in alignment_reader:  # For each alignment block
+        # Get the reference row so we can keep track of the reference coordinates
+        ref_row = alignment.first_row()
+        if ref_row is None:  # Weird case we are on an empty block - technically possible in taf
+            continue
+        seq_name = ref_row.sequence_name()  # Get the sequence name
+        assert seq_name is not None  # Seq name can not be unspecified
+        if seq_name != p_ref_seq:  # If we have a new reference sequence
+            if p_ref_seq is not None:  # If there is a previous reference sequence, add it to the list
+                yield p_ref_seq, p_ref_start, p_ref_length
+            p_ref_seq = seq_name  # Set the new reference sequence interval
+            p_ref_start = ref_row.start()
+            p_ref_length = ref_row.length()
+        else:
+            p_ref_length += ref_row.length()  # If not a new ref sequence, just add the number of ref bases
+            # in the block
+    if p_ref_seq is not None:
+        yield p_ref_seq, p_ref_start, p_ref_length
+
+
 def get_column_iterator(alignment_reader,
                         include_sequence_names=True,
                         include_non_ref_columns=True,
-                        include_column_tags=False):
+                        include_column_tags=False,
+                        column_as_int_array=False,
+                        column_as_int_array_one_hot=False):
     """ Create an alignment column iterator which returns successive
     columns from the alignment from an AlignmentReader object.
 
     If alignment_reader was created given a sequence interval only the columns from that given reference
     interval will be returned.
 
-    Each column returned is a reference index and string representing the column.
-    If include_sequence_names is True then a third value, an array of sequence names for the columns, is included.
+    Each column returned is a column string and a tuple representing the "label" of the column.
+    The label tuple is a composed of the reference index of the column and:
+        If include_sequence_names is True then the second value is an array of sequence names for the columns.
+        If include_column_tags is True then the last value in the label tuple will be a dictionary of any tags.
 
     If include_non_ref_columns is True then columns not including the reference in the interval will also be returned.
 
-    If include_column_tags is True then the last returned value per column will be a dictionary of any tags.
+    If column_as_int_array is True then columns will be returned as numpy arrays, see Alignment.get_column_as_np_array()
     """
+    if column_as_int_array:
+        assert not column_as_int_array_one_hot
     for alignment in alignment_reader:  # For each alignment block
         # Get the reference row so we can keep track of the reference coordinates
         ref_row = alignment.first_row()
@@ -336,41 +397,71 @@ def get_column_iterator(alignment_reader,
         ref_index = ref_row.start()
         ref_bases = ref_row.bases()
 
+        # Determine the kind of column to return
+        if column_as_int_array:
+            get_column = alignment.get_column_as_np_array
+        elif column_as_int_array_one_hot:
+            get_column = alignment.get_column_as_np_array_one_hot
+        else:
+            get_column = alignment.get_column
+
         # If the output wants to match the column entries to the sequences
         if include_sequence_names:
             sequence_names = alignment.get_column_sequences()
-
-        for i in range(alignment.column_number()):  # For each column
-            if ref_bases[i] != '-':  # If a ref column
-                if include_sequence_names:
-                    if include_column_tags:
-                        yield ref_index, alignment.get_column(i), sequence_names, alignment.column_tags(i)
-                    else:
-                        yield ref_index, alignment.get_column(i), sequence_names
+            if include_non_ref_columns:
+                if include_column_tags:
+                    for i in range(alignment.column_number()):
+                        yield get_column(i), (ref_index, sequence_names, alignment.column_tags(i))
+                        if ref_bases[i] != '-':
+                            ref_index += 1
                 else:
-                    if include_column_tags:
-                        yield ref_index, alignment.get_column(i), alignment.column_tags(i)
-                    else:
-                        yield ref_index, alignment.get_column(i)
-                ref_index += 1
-            elif include_non_ref_columns:  # If we also want non-reference columns
-                if include_sequence_names:
-                    if include_column_tags:
-                        yield ref_index, alignment.get_column(i), sequence_names, alignment.column_tags(i)
-                    else:
-                        yield ref_index, alignment.get_column(i), sequence_names
+                    for i in range(alignment.column_number()):
+                        yield get_column(i), (ref_index, sequence_names)
+                        if ref_bases[i] != '-':
+                            ref_index += 1
+            else:
+                if include_column_tags:
+                    for i in range(alignment.column_number()):
+                        if ref_bases[i] != '-':
+                            yield get_column(i), (ref_index, sequence_names, alignment.column_tags(i))
+                            ref_index += 1
                 else:
-                    if include_column_tags:
-                        yield ref_index, alignment.get_column(i), alignment.column_tags(i)
-                    else:
-                        yield ref_index, alignment.get_column(i)
+                    for i in range(alignment.column_number()):
+                        if ref_bases[i] != '-':
+                            yield get_column(i), (ref_index, sequence_names)
+                            ref_index += 1
+        else:
+            if include_non_ref_columns:
+                if include_column_tags:
+                    for i in range(alignment.column_number()):
+                        yield get_column(i), (ref_index, alignment.column_tags(i))
+                        if ref_bases[i] != '-':
+                            ref_index += 1
+                else:
+                    for i in range(alignment.column_number()):
+                        yield get_column(i), (ref_index,)
+                        if ref_bases[i] != '-':
+                            ref_index += 1
+            else:
+                if include_column_tags:
+                    for i in range(alignment.column_number()):
+                        if ref_bases[i] != '-':
+                            yield get_column(i), (ref_index, alignment.column_tags(i))
+                            ref_index += 1
+                else:
+                    for i in range(alignment.column_number()):
+                        if ref_bases[i] != '-':
+                            yield get_column(i), (ref_index,)
+                            ref_index += 1
 
 
 def get_window_iterator(alignment_reader,
                         window_length=10, step=1,
                         include_sequence_names=True,
                         include_non_ref_columns=True,
-                        include_column_tags=False):
+                        include_column_tags=False,
+                        column_as_int_array=False,
+                        column_as_int_array_one_hot=False):
     """ Iterate over (overlapping) windows of the alignment.
 
     :param alignment_reader: An alignment reader to iterate from
@@ -380,23 +471,28 @@ def get_window_iterator(alignment_reader,
     :param include_sequence_names: See get_column_iterator()
     :param include_non_ref_columns: See get_column_iterator()
     :param include_column_tags: See get_column_iterator()
+    :param column_as_int_array: See get_column_iterator()
+    :param column_as_int_array_one_hot: See get_column_iterator()
     :return: A numpy array of columns, each column from get_column_iterator()
     """
     assert window_length > 0  # Window length must be positive integer
     assert step <= window_length  # Step can not exceed the window length
     assert step >= 1  # Step can not be negative or 0
     q = deque()
-    for column in get_column_iterator(alignment_reader,
-                                      include_sequence_names=include_sequence_names,
-                                      include_non_ref_columns=include_non_ref_columns,
-                                      include_column_tags=include_column_tags):
-        q.append(column)  # Add to the right end of the window
+    for column, labels in get_column_iterator(alignment_reader,
+                                              include_sequence_names=include_sequence_names,
+                                              include_non_ref_columns=include_non_ref_columns,
+                                              include_column_tags=include_column_tags,
+                                              column_as_int_array=column_as_int_array,
+                                              column_as_int_array_one_hot=column_as_int_array_one_hot):
+        q.append((column, labels))  # Add to the right end of the window
         assert len(q) <= window_length
         if len(q) == window_length:
-            columns = np.empty(window_length, dtype=object)
-            for i in range(len(q)): # Fill out the columns
-                columns[i] = q[i]
-            yield columns
+            columns, labels = np.empty(window_length, dtype=object), np.empty(window_length, dtype=object)
+            for i in range(window_length):  # Fill out the column and label arrays
+                columns[i] = q[i][0]
+                labels[i] = q[i][1]
+            yield columns, labels
             for i in range(step):
                 q.popleft()  # Remove from the left end of the window
 

@@ -1,29 +1,37 @@
 from taffy.lib import AlignmentReader, get_column_iterator, get_window_iterator, TafIndex
 import torch
 import math
+import numpy as np
 
 
 class TorchDatasetAlignmentIterator(torch.utils.data.IterableDataset):
     """ PyTorch column or window iterator for indexed taf/maf file.
-    """
-    def __init__(self, alignment_file, taf_index_file=None, is_maf=False, sequence_intervals=None,
-                 window_length=1, step=1, include_sequence_names=True,
-                 include_non_ref_columns=True, include_column_tags=False):
-        """
 
-        :param alignment_file: Taf or maf file
+    Returns columns (or windows of columns) and labels.
+    """
+    def __init__(self, alignment_file, label_conversion_function,
+                 taf_index_file=None, is_maf=False, sequence_intervals=None,
+                 window_length=1, step=1,
+                 include_sequence_names=False,
+                 include_non_ref_columns=True,
+                 include_column_tags=False,
+                 column_one_hot=True):
+        """
+        param alignment_file: Taf or maf file
+        :param label_conversion_function Function to convert tuple label to appropriate value for Pytorch
         :param taf_index_file: Index file for alignment file (optional if sequence intervals is None)
         :param is_maf: Used by Taf Index
         :param sequence_intervals: A sequence of reference sequence intervals, each a tuple of (sequence_name (string),
         start (int), length (int))
         :param window_length: Length of window of columns, must be > 0
         :param step: Number of bases between the start of each successive window, step <= window_length
-        :param include_sequence_names:  Bool, include sequence names in the columns
+        :param include_sequence_names:  Bool, include sequence names in the label
         :param include_non_ref_columns: Include non-reference columns in the iteration
-        :param include_column_tags: Include any column tags as a final return value
+        :param include_column_tags: Include any column tags as a final value in the label
         """
         super(TorchDatasetAlignmentIterator).__init__()
         self.alignment_file = alignment_file
+        self.label_conversion_function = label_conversion_function
         self.taf_index_file = taf_index_file  # We pass in the file, not a TafIndex object to avoid trying to serialize
         # a TafIndex object, because pickling doesn't play nice with the C parts of the object through CFI
         self.is_maf = is_maf
@@ -33,6 +41,7 @@ class TorchDatasetAlignmentIterator(torch.utils.data.IterableDataset):
         self.include_sequence_names = include_sequence_names
         self.include_non_ref_columns = include_non_ref_columns
         self.include_column_tags = include_column_tags
+        self.column_one_hot = column_one_hot
 
     def __iter__(self):
         worker_info = torch.utils.data.get_worker_info()
@@ -77,14 +86,33 @@ class TorchDatasetAlignmentIterator(torch.utils.data.IterableDataset):
         alignment_reader = AlignmentReader(file=self.alignment_file,
                                            taf_index=TafIndex(file=self.taf_index_file, is_maf=self.is_maf),
                                            sequence_intervals=subsequence_intervals)
-        #  Return the column or window iterator
+        #  Create either a column or window iterator
         if self.window_length > 1:
-            return get_window_iterator(alignment_reader, window_length=self.window_length, step=self.step,
-                                       include_sequence_names=self.include_sequence_names,
-                                       include_non_ref_columns=self.include_non_ref_columns,
-                                       include_column_tags=self.include_column_tags)
+            it = get_window_iterator(alignment_reader, window_length=self.window_length, step=self.step,
+                                     include_sequence_names=self.include_sequence_names,
+                                     include_non_ref_columns=self.include_non_ref_columns,
+                                     include_column_tags=self.include_column_tags,
+                                     column_as_int_array=not self.column_one_hot,
+                                     column_as_int_array_one_hot=self.column_one_hot)
         else:
-            return get_column_iterator(alignment_reader, include_sequence_names=self.include_sequence_names,
-                                       include_non_ref_columns=self.include_non_ref_columns,
-                                       include_column_tags=self.include_column_tags)
+            it = get_column_iterator(alignment_reader, include_sequence_names=self.include_sequence_names,
+                                     include_non_ref_columns=self.include_non_ref_columns,
+                                     include_column_tags=self.include_column_tags,
+                                     column_as_int_array=not self.column_one_hot,
+                                     column_as_int_array_one_hot=self.column_one_hot)
+        return self._convert_it(it)
 
+    ## Add code to convert windows to tensors
+
+    def _convert_it(self, it):
+        for column, label in it:  # Convert the column and label to appropriate values
+            yield torch.from_numpy(column), self.label_conversion_function(label)
+
+
+def get_phyloP_label(label):
+    """ Gets the phyloP tag from the label and converts it to a float. Otherwise, if not present
+    returns -100000"""
+    tags = label[1]
+    if "phyloP" in tags:
+        return float(tags["phyloP"])
+    return -100000.0
