@@ -582,24 +582,20 @@ static unsigned int clip_alignment(Alignment *aln, Alignment *p_aln, int64_t sta
             }
         }
     }
-    
-    // then get rid of empty rows as they api doesn't handle them
-    Alignment_Row *prev = NULL;
-    Alignment_Row *next = NULL;
-    for (Alignment_Row *row = aln->row; row != NULL; row = next) {
-        next = row->n_row;
-        if (row->length == 0) {
-            assert(strlen(row->bases) == 0);
-            assert(prev != NULL);
-            prev->n_row = next;
-            alignment_row_destruct(row);
-            --aln->row_number;
-        } else {
-            prev = row;
-        }
-    }
 
     aln->column_number = aln->row_number > 0 ? strlen(aln->row->bases) : 0;
+
+    // then fill empty rows with gaps
+    for (Alignment_Row *row = aln->row; row != NULL; row = row->n_row) {
+        if (row->length == 0) {
+            assert(strlen(row->bases) == 0);
+            row->bases = (char*)st_calloc(aln->column_number + 1, sizeof(char));
+            for (int64_t i = 0; i < aln->column_number; ++i) {
+                row->bases[i] = '-';
+            }
+            row->bases[aln->column_number] = '\0';
+        }
+    }
 
     return ret;
 }
