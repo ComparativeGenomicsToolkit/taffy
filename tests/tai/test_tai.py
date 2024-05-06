@@ -9,12 +9,14 @@
 
 import sys, os, subprocess
 
-def maf_compare(maf_path_1, maf_path_2):        
+def maf_compare(maf_path_1, maf_path_2, filter_empty=True):        
     assert os.path.isfile(maf_path_1)
     assert os.path.isfile(maf_path_2)
 
     # strip out whitespace
     clean_cmd = 'sed -e \'s/\\t/ /g\' | sed -e \'s/  */ /g\' | grep -v ^# | sed -r \'/^\\s*$/d\' | grep -v ^a'
+    if filter_empty:
+        clean_cmd += ' | awk \'$4 != 0 {print $0}\''
     subprocess.check_call('cat {} | {} > {}.clean'.format(maf_path_1, clean_cmd, maf_path_1), shell=True)
     subprocess.check_call('cat {} | {} > {}.clean'.format(maf_path_2, clean_cmd, maf_path_2), shell=True)
 
@@ -23,7 +25,7 @@ def maf_compare(maf_path_1, maf_path_2):
 
     subprocess.check_call(['rm', '-f', '{}.clean'.format(maf_path_1)])
     subprocess.check_call(['rm', '-f', '{}.clean'.format(maf_path_2)])
-        
+
         
 def test_region(taf_path, contig, start, end, rev_name_map_path=None):
     assert os.path.isfile(maf_path)
@@ -49,6 +51,21 @@ def test_region(taf_path, contig, start, end, rev_name_map_path=None):
 
     subprocess.check_call(['rm', '-f', out_path])
 
+    # repeat for taf
+    out_path = './tests/tai/{}_{}_{}.out.taf'.format(os.path.basename(os.path.splitext(maf_path)[0]), start, end)
+    cmd = './bin/taffy view -i {} -r {}:{}-{} -o {}'.format(taf_path, contig, start, end, out_path)
+    if rev_name_map_path:
+        cmd += ' -n {}'.format(rev_name_map_path)
+    subprocess.check_call(cmd, shell=True)
+    assert os.path.isfile(out_path)
+
+    truth_path = './tests/tai/{}_{}_{}.taf'.format(os.path.basename(os.path.splitext(maf_path)[0]), start, end)
+    assert os.path.getsize(truth_path) > 100
+    subprocess.check_call(['diff', out_path, truth_path])
+
+    subprocess.check_call(['rm', '-f', out_path])
+    
+    
 def create_index(taf_path, block_size):
     assert os.path.isfile(taf_path)
     subprocess.check_call(['rm', '-f', taf_path + '.tai'])

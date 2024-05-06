@@ -1,0 +1,2 @@
+#taf version:1 scoring:N/A
+CCCTCCCTT ; i 0 Anc0.Anc0refChr1 511 + 3407 i 1 Anc1.Anc1refChr1 293924 - 296994 i 2 Anc2.Anc2refChr2 536 - 50664 i 3 mr.mrrefChr3 83885 + 296991 i 4 simCow_chr6.simCow.chr6 203619 + 602619 i 5 simDog_chr6.simDog.chr6 378892 - 593897 i 6 simHuman_chr6.simHuman.chr6 306936 - 601863 i 7 simMouse_chr6.simMouse.chr6 228676 + 636262 i 8 simRat_chr6.simRat.chr6 219971 + 647215
