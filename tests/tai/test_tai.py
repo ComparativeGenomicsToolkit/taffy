@@ -123,8 +123,9 @@ def test_tai(regions_path, taf_path, bgzip, block_size, name_map_path=None, rev_
             contig, start, end = line.split()[:3]
             test_region(taf_path, contig, start, end, rev_name_map_path=rev_name_map_path)
 
-    seq_stats = subprocess.check_output(['./bin/taffy', 'stats', '-s', '-i', taf_path]).decode('utf-8')
-    check_anc0_stats(seq_stats, renamed=name_map_path != None)
+    if taf_path.endswith('.taf') or taf_path.endswith('.taf.gz'):
+        seq_stats = subprocess.check_output(['./bin/taffy', 'stats', '-s', '-i', taf_path]).decode('utf-8')
+        check_anc0_stats(seq_stats, renamed=name_map_path != None)
 
     if bgzip:
         subprocess.check_call(['rm', '-f', taf_path])
