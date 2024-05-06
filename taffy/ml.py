@@ -102,8 +102,6 @@ class TorchDatasetAlignmentIterator(torch.utils.data.IterableDataset):
                                      column_as_int_array_one_hot=self.column_one_hot)
         return self._convert_it(it)
 
-    ## Add code to convert windows to tensors
-
     def _convert_it(self, it):
         for column, label in it:  # Convert the column and label to appropriate values
             yield torch.from_numpy(column), self.label_conversion_function(label)

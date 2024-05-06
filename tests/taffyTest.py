@@ -305,7 +305,6 @@ class TafTest(unittest.TestCase):
             sequence_intervals, total_length = self.get_random_sequence_intervals()
 
             ai = DataLoader(TorchDatasetAlignmentIterator(self.test_taf_file,
-                                                          column_conversion_function=self.identity_fn,
                                                           label_conversion_function=self.identity_fn,
                                                           taf_index_file=self.test_index_file,
                                                           is_maf=not taf_not_maf,
@@ -331,7 +330,6 @@ class TafTest(unittest.TestCase):
             # Now test a multi-processing version of the data loader - here we don't expect the columns to come out
             # in order, necessarily
             ai = DataLoader(TorchDatasetAlignmentIterator(self.test_taf_file,
-                                                          column_conversion_function=self.identity_fn,
                                                           label_conversion_function=self.identity_fn,
                                                           taf_index_file=self.test_index_file,
                                                           is_maf=not taf_not_maf,

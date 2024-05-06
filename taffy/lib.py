@@ -243,6 +243,7 @@ class AlignmentReader:
         self.sequence_interval_index = 0
 
         if taf_index:
+            # TODO: Handle case that sequence_intervals is empty
             assert sequence_intervals  # Must not be None
             sequence_name, start, length = sequence_intervals[0]
             assert sequence_name  # The contig name can not be none if using a taf index
@@ -462,7 +463,9 @@ def get_window_iterator(alignment_reader,
                         include_column_tags=False,
                         column_as_int_array=False,
                         column_as_int_array_one_hot=False):
-    """ Iterate over (overlapping) windows of the alignment.
+    """ Iterate over (overlapping) windows of the alignment. If columns are numpy arrays the return value
+    will be a multidimensional matrix with the first index being the columns. Otherwise columns are returned
+    as an array.
 
     :param alignment_reader: An alignment reader to iterate from
     :param window_length: The number of successive columns to include in a window, must be > 0
@@ -473,28 +476,44 @@ def get_window_iterator(alignment_reader,
     :param include_column_tags: See get_column_iterator()
     :param column_as_int_array: See get_column_iterator()
     :param column_as_int_array_one_hot: See get_column_iterator()
-    :return: A numpy array of columns, each column from get_column_iterator()
+    :return: A numpy array of columns, each column from get_column_iterator(), and another numpy array of labels
     """
     assert window_length > 0  # Window length must be positive integer
     assert step <= window_length  # Step can not exceed the window length
     assert step >= 1  # Step can not be negative or 0
     q = deque()
-    for column, labels in get_column_iterator(alignment_reader,
-                                              include_sequence_names=include_sequence_names,
-                                              include_non_ref_columns=include_non_ref_columns,
-                                              include_column_tags=include_column_tags,
-                                              column_as_int_array=column_as_int_array,
-                                              column_as_int_array_one_hot=column_as_int_array_one_hot):
-        q.append((column, labels))  # Add to the right end of the window
-        assert len(q) <= window_length
-        if len(q) == window_length:
-            columns, labels = np.empty(window_length, dtype=object), np.empty(window_length, dtype=object)
-            for i in range(window_length):  # Fill out the column and label arrays
-                columns[i] = q[i][0]
-                labels[i] = q[i][1]
-            yield columns, labels
-            for i in range(step):
-                q.popleft()  # Remove from the left end of the window
+    # If we have numpy arrays then we can concatenate them to create a single tensor
+    column_it = get_column_iterator(alignment_reader,
+                                    include_sequence_names=include_sequence_names,
+                                    include_non_ref_columns=include_non_ref_columns,
+                                    include_column_tags=include_column_tags,
+                                    column_as_int_array=column_as_int_array,
+                                    column_as_int_array_one_hot=column_as_int_array_one_hot)
+    if column_as_int_array or column_as_int_array_one_hot:
+        for column, labels in column_it:
+            column.shape = (1,) + column.shape  # As we will be joining the column we add an extra "prefix" dimension
+            q.append((column, labels))  # Add to the right end of the window
+            assert len(q) <= window_length
+            if len(q) == window_length:
+                labels = np.empty(window_length, dtype=object)
+                for i in range(window_length):  # Fill out the column and label arrays
+                    labels[i] = q[i][1]
+                columns = np.concatenate(tuple(i[0] for i in q))  # Concatenate together the column arrays
+                yield columns, labels
+                for i in range(step):
+                    q.popleft()  # Remove from the left end of the window
+    else:  # Otherwise, the columns are strings, and we return them as a 1-d array of strings for each window
+        for column, labels in column_it:
+            q.append((column, labels))  # Add to the right end of the window
+            assert len(q) <= window_length
+            if len(q) == window_length:
+                columns, labels = np.empty(window_length, dtype=object), np.empty(window_length, dtype=object)
+                for i in range(window_length):  # Fill out the column and label arrays
+                    columns[i] = q[i][0]
+                    labels[i] = q[i][1]
+                yield columns, labels
+                for i in range(step):
+                    q.popleft()  # Remove from the left end of the window
 
 
 def write_taf_index_file(taf_file, index_file, index_block_size=10000):
