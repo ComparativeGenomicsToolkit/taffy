@@ -1,3 +1,4 @@
+import torch
 import unittest
 import pathlib
 import subprocess
@@ -357,6 +358,73 @@ class TafTest(unittest.TestCase):
                                                                                                 start, length),)) as tp:
                 seq_intervals = list(taffy.lib.get_reference_sequence_intervals(tp))
                 self.assertEqual(seq_intervals, [("Anc0.Anc0refChr0", start, length)])
+
+    def test_torchDatasetAlignmentIteratorMini_Maf(self, is_maf=True, use_one_hot=False):
+        """ Tests the PyTorch dataset alignment iterator with some hand made examples """
+        test_taf_file = (pathlib.Path().absolute() / "../tests/evolverMammals.taf.mini.annotated").as_posix()
+        ai = TorchDatasetAlignmentIterator(alignment_file=self.test_maf_file if is_maf else test_taf_file,
+                                           label_conversion_function=self.identity_fn,
+                                           is_maf=is_maf,
+                                           include_column_tags=True,
+                                           column_one_hot=use_one_hot)
+        ai = iter(ai)
+
+        # Check sequence of columns are what we expect
+
+        def one_hot(l):
+            m = {0: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                 1: [0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+                 2: [0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+                 3: [0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                 4: [0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                 5: [0.0, 0.0, 0.0, 0.0, 0.0, 1.0]}
+            return [m[i] for i in l]
+
+        def to_nested_list(column):
+            return [list(i) for i in list(column)]
+
+        def check_column(column, expected_column):
+            if use_one_hot:
+                self.assertEqual(to_nested_list(column), one_hot(expected_column))
+            else:
+                self.assertEqual(list(column), expected_column)
+
+        # First column
+        column, (ref_index, column_tags) = next(ai)
+        self.assertEqual(ref_index, 0)
+        check_column(column, [2, 2, 2, 2, 2, 2, 2, 2, 2])
+        if not is_maf:
+            self.assertEqual(column_tags, {"test_label": "5.100000"})
+
+        # Second column
+        column, (ref_index, column_tags) = next(ai)
+        self.assertEqual(ref_index, 1)
+        check_column(column, [3, 3, 3, 3, 3, 3, 3, 3, 3])
+        if not is_maf:
+            self.assertEqual(column_tags, {"test_label": "10.000000"})
+
+        # Third column
+        column, (ref_index, column_tags) = next(ai)
+        self.assertEqual(ref_index, 2)
+        check_column(column, [1, 1, 1, 1, 2, 1, 1, 1, 1])
+        if not is_maf:
+            self.assertEqual(column_tags, {"test_label": "67.000000"})
+
+        # Fourth column
+        column, (ref_index, column_tags) = next(ai)
+        self.assertEqual(ref_index, 3)
+        check_column(column, [0, 0, 0, 0, 0, 0, 0, 0, 0])
+        if not is_maf:
+            self.assertEqual(column_tags, {})
+
+    def test_torchDatasetAlignmentIteratorMini_Taf(self):
+        self.test_torchDatasetAlignmentIteratorMini_Maf(is_maf=False)  # Do the same test with a taf file
+
+    def test_torchDatasetAlignmentIteratorMini_Taf_OneHot(self):
+        self.test_torchDatasetAlignmentIteratorMini_Maf(is_maf=False, use_one_hot=True)
+
+    def test_torchDatasetAlignmentIteratorMini_Maf_OneHot(self):
+        self.test_torchDatasetAlignmentIteratorMini_Maf(use_one_hot=True)
 
 
 if __name__ == '__main__':

@@ -43,6 +43,10 @@ class TorchDatasetAlignmentIterator(torch.utils.data.IterableDataset):
         self.include_column_tags = include_column_tags
         self.column_one_hot = column_one_hot
 
+        # Checks
+        if self.sequence_intervals is not None:
+            assert self.taf_index_file  # Must be specified if there are sequence intervals to iterate on
+
     def __iter__(self):
         worker_info = torch.utils.data.get_worker_info()
         if worker_info is None or self.taf_index_file is None:  # If not doing anything in parallel or no taf index
@@ -84,7 +88,8 @@ class TorchDatasetAlignmentIterator(torch.utils.data.IterableDataset):
 
         # Make the alignment reader
         alignment_reader = AlignmentReader(file=self.alignment_file,
-                                           taf_index=TafIndex(file=self.taf_index_file, is_maf=self.is_maf),
+                                           taf_index=TafIndex(file=self.taf_index_file, is_maf=self.is_maf) if
+                                           self.taf_index_file is not None else None,
                                            sequence_intervals=subsequence_intervals)
         #  Create either a column or window iterator
         if self.window_length > 1:

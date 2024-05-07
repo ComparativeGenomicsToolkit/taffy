@@ -106,7 +106,7 @@ class Alignment:
         column_np = self.get_column_as_np_array(column_index)
         column_np_one_hot = np.zeros(shape=(len(column_np),6), dtype=np.float32)
         column_np_one_hot[np.arange(len(column_np)), column_np] = 1.0
-        return column_np
+        return column_np_one_hot
 
     def get_column_sequences(self):
         """ Get the names of the sequences in the alignment in order as a list """
@@ -243,17 +243,19 @@ class AlignmentReader:
         self.sequence_interval_index = 0
 
         if taf_index:
-            # TODO: Handle case that sequence_intervals is empty
-            assert sequence_intervals  # Must not be None
-            sequence_name, start, length = sequence_intervals[0]
-            assert sequence_name  # The contig name can not be none if using a taf index
-            assert start >= 0  # The start coordinate must be valid
-            assert length >= 0  # The length must be valid
-            assert len(sequence_intervals) > 0  # Must contain at least one interval
-            self._c_taf_index_it = lib.tai_iterator(taf_index._c_taf_index,
-                                                    self.c_li_handle,
-                                                    self.use_run_length_encoding,
-                                                    _to_c_string(sequence_name), start, length)
+            assert self.sequence_intervals is not None  # Must not be None
+            if len(self.sequence_intervals) > 0:
+                sequence_name, start, length = sequence_intervals[0]
+                assert sequence_name  # The contig name can not be none if using a taf index
+                assert start >= 0  # The start coordinate must be valid
+                assert length >= 0  # The length must be valid
+                assert len(sequence_intervals) > 0  # Must contain at least one interval
+                self._c_taf_index_it = lib.tai_iterator(taf_index._c_taf_index,
+                                                        self.c_li_handle,
+                                                        self.use_run_length_encoding,
+                                                        _to_c_string(sequence_name), start, length)
+            else:
+                self._c_taf_index_it = None  # Case we have an empty iteration
         else:
             assert not sequence_intervals  # Sequence intervals should not be specified if taf index not provided
 
@@ -271,6 +273,10 @@ class AlignmentReader:
 
     def __next__(self):
         """ Get the next alignment block """
+        if self.taf_index and not self.sequence_intervals:  # Case we have a taf index but no sequence intervals, we're
+            # immediately done
+            raise StopIteration  # We're done
+
         # Read a taf/maf block
         if self.taf_not_maf:  # Is a taf block
             # Use the taf index if present
