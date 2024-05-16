@@ -1,7 +1,45 @@
 from taffy.lib import AlignmentReader, get_column_iterator, get_window_iterator, TafIndex
 import torch
 import math
-import numpy as np
+
+
+def get_subsequence_intervals(sequence_intervals, number_of_partitions, partition_index):
+    """ Partition a set of sequence intervals into non-overlapping sets.
+    """
+    total_length = sum([length for (name, start, length) in sequence_intervals])
+    partition_length = int(math.ceil(total_length / float(number_of_partitions)))
+    assert partition_length > 0
+
+    # Get set of sub-intervals for the worker
+    begin = partition_index * partition_length
+    end = begin + partition_length
+    offset = 0
+    subsequence_intervals = []
+    for seq, start, length in sequence_intervals:
+        if begin < offset + length:  # Interval ends at or after desired beginning
+            mod_length = length  # Variable representing the size of the interval after any shrinking (see
+            # below)
+
+            # If the offset (left end of the interval) starts before begin, update the start coordinate
+            # and trim the length (we store this in mod_length so as not to alter the original length, which
+            # we need to track the total interval length with respect to the end
+            if offset < begin:
+                start += begin - offset
+                mod_length -= begin - offset
+                assert mod_length >= 0  # This should be true because begin - offset < length
+
+            if end <= offset + length:  # The end of the interval is beyond the end of the desired interval
+                # Trim the end of the interval
+                mod_length -= offset + length - end
+                assert mod_length >= 0  # This similarly must be true assuming begin <= end
+                subsequence_intervals.append((seq, start, mod_length))  # Add modified interval to set
+                break  # Break at the point because no further intervals can overlap this one
+            else:
+                subsequence_intervals.append((seq, start, mod_length))  # End is beyond this interval, so add
+                # to list and keep going
+        offset += length
+    # We're done
+    return subsequence_intervals
 
 
 class TorchDatasetAlignmentIterator(torch.utils.data.IterableDataset):
@@ -52,39 +90,9 @@ class TorchDatasetAlignmentIterator(torch.utils.data.IterableDataset):
         if worker_info is None or self.taf_index_file is None:  # If not doing anything in parallel or no taf index
             subsequence_intervals = self.sequence_intervals
         else:
-            total_length = sum([length for (name, start, length) in self.sequence_intervals])
-            per_worker_length = int(math.ceil(total_length / float(worker_info.num_workers)))
-            assert per_worker_length > 0
-            worker_id = worker_info.id
-
-            # Get set of sub-intervals for the worker
-            begin = worker_id * per_worker_length
-            end = begin + per_worker_length
-            offset = 0
-            subsequence_intervals = []
-            for seq, start, length in self.sequence_intervals:
-                if begin < offset + length:  # Interval ends at or after desired beginning
-                    mod_length = length  # Variable representing the size of the interval after any shrinking (see
-                    # below)
-
-                    # If the offset (left end of the interval) starts before begin, update the start coordinate
-                    # and trim the length (we store this in mod_length so as not to alter the original length, which
-                    # we need to track the total interval length with respect to the end
-                    if offset < begin:
-                        start += begin - offset
-                        mod_length -= begin - offset
-                        assert mod_length >= 0  # This should be true because begin - offset < length
-
-                    if end <= offset + length:  # The end of the interval is beyond the end of the desired interval
-                        # Trim the end of the interval
-                        mod_length -= offset + length - end
-                        assert mod_length >= 0  # This similarly must be true assuming begin <= end
-                        subsequence_intervals.append((seq, start, mod_length))  # Add modified interval to set
-                        break  # Break at the point because no further intervals can overlap this one
-                    else:
-                        subsequence_intervals.append((seq, start, mod_length))  # End is beyond this interval, so add
-                        # to list and keep going
-                offset += length
+            subsequence_intervals = get_subsequence_intervals(self.sequence_intervals,
+                                                              number_of_partitions=worker_info.num_workers,
+                                                              partition_index=worker_info.id)
 
         # Make the alignment reader
         alignment_reader = AlignmentReader(file=self.alignment_file,
@@ -112,10 +120,20 @@ class TorchDatasetAlignmentIterator(torch.utils.data.IterableDataset):
             yield torch.from_numpy(column), self.label_conversion_function(label)
 
 
-def get_phyloP_label(label):
+def get_phyloP_label(label, default_value=0.0):
     """ Gets the phyloP tag from the label and converts it to a float. Otherwise, if not present
-    returns -100000"""
+    returns default_value"""
     tags = label[1]
     if "phyloP" in tags:
         return float(tags["phyloP"])
-    return -100000.0
+    return default_value
+
+
+def get_phyloP_labels(label, default_value=0.0):
+    """ Gets the phyloP tags from the label of a window of columns and converts it to a torch tensor of floats.
+    Any value not present returns default_value"""
+    phyloPs = torch.empty(len(label))
+    for i, column_label in enumerate(label):
+        tags = column_label[1]
+        phyloPs[i] = float(tags["phyloP"]) if "phyloP" in tags else default_value
+    return phyloPs
