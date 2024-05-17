@@ -377,7 +377,7 @@ Tai *tai_load(FILE* idx_fh, bool maf) {
 // maf reader with same interface as taf reader)
 static Alignment *maf_read_block_3(Alignment *p_block, bool run_length_encode_bases, LI *li) {
     Alignment *alignment = maf_read_block(li);
-    if(p_block != NULL) {
+    if(p_block != NULL && alignment != NULL) {
         alignment_link_adjacent(p_block, alignment, 1);
     }
     return alignment;
