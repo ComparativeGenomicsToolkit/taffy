@@ -44,21 +44,24 @@ ancestors, and normalize by lineage mutations
       - Include and exclude ancestors
       - Linage mutation encoding [deferring this]
 
----- IN QUEUE
 
-(13) Add a very simple NN notebook example for learning phyloP scores to the examples, adding to docs and test to show performance
+(18) [DONE] Add a very simple NN notebook example for learning phyloP scores to the examples, adding to docs and test to show performance
     - Cleanup the notebook
     - Get architecture of model to be better (look at regression examples)
     - Get split of train and test working
-    - Get it to make plots
 
-----
+---- In progress ---
 
-(14) Break up the taffy docs into pages on different topics
+(19) Break up the taffy docs into pages on different topics
+
+(20) Push a new version of Taffy Python API.
+
+(21) [in progress] Get taffy working in colab
+
+---
 
 (15) Create transformer with embedding of alignment columns into lower rank space, predict phyloP scores as test
 
-(16) Push a new version of Taffy Python API.
 
 (17) Predict variant pathogenicity.
 
