@@ -7,17 +7,17 @@ on top of the C library and is therefore quite fast.
 
 ###Taf Format Specification
 
-See the [Taf format page](https://github.com/ComparativeGenomicsToolkit/taffy/docs/taf_format.md) for a specification of the taf format and example.
+See the [Taf format page](https://github.com/ComparativeGenomicsToolkit/taffy/blob/main/docs/taf_format.md) for a specification of the taf format and example.
 
 ###Installation
 
-See [C/CLI Install](https://github.com/ComparativeGenomicsToolkit/taffy/docs/c_cli_lib_install.md) for how to build and install this source for using the C library and CLI utilities.
+See [C/CLI Install](https://github.com/ComparativeGenomicsToolkit/taffy/blob/main/docs/c_cli_lib_install.md) for how to build and install this source for using the C library and CLI utilities.
 
-See [Python install](https://github.com/ComparativeGenomicsToolkit/taffy/docs/py_install.md) for how to install the Python library.
+See [Python install](https://github.com/ComparativeGenomicsToolkit/taffy/blob/main/docs/py_install.md) for how to install the Python library.
 
 ### CLI Utilities
 
-See [taffy utilities](https://github.com/ComparativeGenomicsToolkit/taffy/docs/taffy_utilities.md) for a description of the many useful taffy utilities, including:
+See [taffy utilities](https://github.com/ComparativeGenomicsToolkit/taffy/blob/main/docs/taffy_utilities.md) for a description of the many useful taffy utilities, including:
 
  * [view]()     -      MAF / TAF conversion and region extraction
  * [norm]()     -      normalize TAF blocks 
@@ -29,9 +29,9 @@ See [taffy utilities](https://github.com/ComparativeGenomicsToolkit/taffy/docs/t
 
 ### Using the Python API
 
-See [using the Python API](https://github.com/ComparativeGenomicsToolkit/taffy/docs/py_usage.md) for how to work with MAF/TAF alignments using a convenient Python API designed to complement the CLI.
+See [using the Python API](https://github.com/ComparativeGenomicsToolkit/taffy/blob/main/docs/py_usage.md) for how to work with MAF/TAF alignments using a convenient Python API designed to complement the CLI.
 
-See [the example notebook](https://github.com/ComparativeGenomicsToolkit/taffy/examples/learning_phyloP.ipynb) for a quick worked example of using the Python API for machine learning with PyTorch.
+See [the example notebook](https://github.com/ComparativeGenomicsToolkit/taffy/blob/main/examples/learning_phyloP.ipynb) for a quick worked example of using the Python API for machine learning with PyTorch.
 
 ### Using the C Library
 
@@ -40,7 +40,7 @@ inc directory.
 
 ### Comparing MAF and TAF file sizes
 
-See [quick file size comparison](https://github.com/ComparativeGenomicsToolkit/taffy/docs/comparison_stats.md).
+See [quick file size comparison](https://github.com/ComparativeGenomicsToolkit/taffy/blob/main/docs/comparison_stats.md).
 
 
 
