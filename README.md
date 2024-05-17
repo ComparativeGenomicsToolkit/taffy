@@ -19,19 +19,19 @@ See [Python install](https://github.com/ComparativeGenomicsToolkit/taffy/blob/ma
 
 See [taffy utilities](https://github.com/ComparativeGenomicsToolkit/taffy/blob/main/docs/taffy_utilities.md) for a description of the many useful taffy utilities, including:
 
- * [view]()     -      MAF / TAF conversion and region extraction
- * [norm]()     -      normalize TAF blocks 
- * [add-gap-bases]() - add sequences from HAL or FASTA files into TAF gaps
- * [index]()   -       create a .tai index (required for region extraction)
- * [sort]()    -       sort the rows of a TAF file to a desired order           
- * [stats]()   -       print statistics of a TAF file
- * [coverage]() -      print coverage statistics of a given genome in a TAF file
+ * [view](https://github.com/ComparativeGenomicsToolkit/taffy/blob/main/docs/taffy_utilities.md#taffy-view)     -      MAF / TAF conversion and region extraction
+ * [norm](https://github.com/ComparativeGenomicsToolkit/taffy/blob/main/docs/taffy_utilities.md#taffy-norm)     -      normalize TAF blocks 
+ * [add-gap-bases](https://github.com/ComparativeGenomicsToolkit/taffy/blob/main/docs/taffy_utilities.md#taffy-add-gap-bases) - add sequences from HAL or FASTA files into TAF gaps
+ * [index](https://github.com/ComparativeGenomicsToolkit/taffy/blob/main/docs/taffy_utilities.md#referenced-based-maftaf-and-indexing)   -       create a .tai index (required for region extraction)
+ * [sort](https://github.com/ComparativeGenomicsToolkit/taffy/blob/main/docs/taffy_utilities.md#taffy-sort)    -       sort the rows of a TAF file to a desired order           
+ * [stats](https://github.com/ComparativeGenomicsToolkit/taffy/blob/main/docs/taffy_utilities.md#taffy-stats)   -       print statistics of a TAF file
+ * [coverage](https://github.com/ComparativeGenomicsToolkit/taffy/blob/main/docs/taffy_utilities.md#taffy-coverage) -      print coverage statistics of a given genome in a TAF file
 
 ### Using the Python API
 
 See [using the Python API](https://github.com/ComparativeGenomicsToolkit/taffy/blob/main/docs/py_usage.md) for how to work with MAF/TAF alignments using a convenient Python API designed to complement the CLI.
 
-See [the example notebook](https://github.com/ComparativeGenomicsToolkit/taffy/blob/main/examples/learning_phyloP.ipynb) for a quick worked example of using the Python API for machine learning with PyTorch.
+See [the example notebook](https://github.com/ComparativeGenomicsToolkit/taffy/blob/main/examples/learning_phlyoP.ipynb) for a quick worked example of using the Python API for machine learning with PyTorch.
 
 ### Using the C Library
 
