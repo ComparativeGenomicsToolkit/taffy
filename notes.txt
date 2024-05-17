@@ -1,0 +1,140 @@
+# Plan for transformer
+
+(1) DONE Add a "pad" option to taffy sort, so after sorting there is at least one row for every species
+  - If there is a line in the sort file and no sequence in the block adds a line with the relevant prefix name but no
+    valid sequence coordinates. Sequence coordinates will all be 0, bases appear as gaps/stars (depending on option).
+
+(2) DONE Add a "filter duplicates" option to taffy sort, to remove duplicates for any species
+   - Remove any excess rows
+
+(3) DONE Add an option to taffy view to omit coordinates (so you can just see a stream of columns
+
+(4) DONE Add script for rooting newick tree for a given chosen reference species (e.g. hg38)
+
+(5) DONE Add a script for creating the sort file from a newick tree and checking the prefixes are not prefixes of each other
+
+(6) DONE Modify Python API to make column iteration efficient
+
+(7) DONE Fix docs with changes to Python API
+
+(8) DONE Test a norm | sort | pad | filter | lineage_changes_only pipeline to create a TAF file representing one large alignment matrix
+
+(9) DONE Add to the docs examples for normalizing an alignment to a constant number of columns
+
+(10) DONE Normalize the 447 chunk - add a suffix character to make sure prefixes are not shared between labels, don't remove
+ancestors, and normalize by lineage mutations
+
+(11) [DONE] Update the pytorch library to support learning from a sequence of windows, add tests
+-- add to alignment reader ability to read multiple contiguous intervals
+
+(12) [DONE] Check memory model of Python API
+
+(13) [DONE] Add an taffy annotate command that adds a wiggle annotation to an alignment and provide tests tests
+
+(14) [DONE] Add support for extracting annotations within the pyTorch column/window iterators
+
+(15) [DONE] Add python API function to extract reference sequence intervals.
+
+(16) [MAKE Column to Tensor encoding fast]
+     - [DONE] Make it work for windows of bases
+     - [DONE] Add tests
+
+(17) [DONE] Experiment with different representations for learning from
+      - Adapt script to try different kinds of masking (no masking, ref masking, lineage masking)
+      - Include and exclude ancestors
+      - Linage mutation encoding [deferring this]
+
+---- IN QUEUE
+
+(13) Add a very simple NN notebook example for learning phyloP scores to the examples, adding to docs and test to show performance
+    - Cleanup the notebook
+    - Get architecture of model to be better (look at regression examples)
+    - Get split of train and test working
+    - Get it to make plots
+
+----
+
+(14) Break up the taffy docs into pages on different topics
+
+(15) Create transformer with embedding of alignment columns into lower rank space, predict phyloP scores as test
+
+(16) Push a new version of Taffy Python API.
+
+(17) Predict variant pathogenicity.
+
+
+Stash:
+
+char lineage_change_encoding(char ancestor_base, char descendant_base) {
+    /*
+     * Encode lineage changes using the following encoding:
+     *
+     *        Ancestor
+     *       A  C  G  T  -  N
+     * C  A  A  Y  P  H  A  A
+     * h  C  Q  C  S  J  C  C
+     * i  G  W  U  G  K  G  G
+     * l  T  E  I  D  T  T  T
+     * d  -  -  -  -  -  -  -
+     *    N  N  N  N  N  N  N
+     *
+     *  Where case is used to represent repeat masking status of the child lineage (upper case: not
+     *  masked, lower-case: soft-masked)
+     */
+    ancestor_base = toupper(ancestor_base);
+    if(ancestor_base == 'A') {
+        switch(toupper(descendant_base)) {
+            case 'C':
+                return match_case(descendant_base, 'Q');
+            case 'G':
+                return match_case(descendant_base, 'W');
+            case 'T':
+                return match_case(descendant_base, 'E');
+            default:
+                return descendant_base;
+        }
+    }
+    if(ancestor_base == 'C') {
+        switch(toupper(descendant_base)) {
+            case 'A':
+                return match_case(descendant_base, 'Y');
+            case 'G':
+                return match_case(descendant_base, 'U');
+            case 'T':
+                return match_case(descendant_base, 'I');
+            default:
+                return descendant_base;
+        }
+    }
+    if(ancestor_base == 'G') {
+        switch(toupper(descendant_base)) {
+            case 'A':
+                return match_case(descendant_base, 'P');
+            case 'C':
+                return match_case(descendant_base, 'S');
+            case 'G':
+                return match_case(descendant_base, 'D');
+            default:
+                return descendant_base;
+        }
+    }
+    if(ancestor_base == 'T') {
+        switch(toupper(descendant_base)) {
+            case 'A':
+                return match_case(descendant_base, 'H');
+            case 'C':
+                return match_case(descendant_base, 'J');
+            case 'T':
+                return match_case(descendant_base, 'K');
+            default:
+                return descendant_base;
+        }
+    }
+    return descendant_base;
+}
+
+
+
+
+
+

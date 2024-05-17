@@ -136,6 +136,11 @@ void alignment_get_column_in_buffer(Alignment *alignment, int64_t column_index, 
 char *alignment_get_column(Alignment *alignment, int64_t column_index);
 
 /*
+ * Read a column of the alignment as an integer array where A/a=0, C/c=1, G/g=2, T/t=3, -=4, everything else=5
+ */
+int32_t *alignment_get_column_as_int_array(Alignment *alignment, int64_t column_index);
+
+/*
  * Cleanup a row
  */
 void alignment_row_destruct(Alignment_Row *row);
@@ -226,10 +231,10 @@ void taf_write_block(Alignment *p_alignment, Alignment *alignment, bool run_leng
                      int64_t repeat_coordinates_every_n_columns, LW *lw);
 
 /*
- * As taf write block, but with option to pretty print the output
+ * As taf write block, but with option to pretty print the output and/or omit coordinates for viewing
  */
 void taf_write_block2(Alignment *p_alignment, Alignment *alignment, bool run_length_encode_bases,
-                      int64_t repeat_coordinates_every_n_columns, LW *lw, bool color_bases);
+                      int64_t repeat_coordinates_every_n_columns, LW *lw, bool color_bases, bool omit_coordinates);
 
 
 // the following are low-level functions used in indexing.  they could
@@ -334,14 +339,24 @@ int64_t alignment_row_get_closest_sequence_prefix(Alignment_Row *row, stList *pr
 
 /*
  * Sorts the rows of an alignment according to the given sequence prefixes. Reconnects the rows
- * with the previous alignment in the process.
+ * with the previous alignment in the process. Optionally ignore the first row so that it is not reordered
  */
-void alignment_sort_the_rows(Alignment *p_alignment, Alignment *alignment, stList *prefixes_to_sort_by);
+void alignment_sort_the_rows(Alignment *p_alignment, Alignment *alignment, stList *prefixes_to_sort_by, bool ignore_first_row);
 
 /*
- * Removes any rows from the alignment whose sequence name prefix matches a string in the prefixes_to_filtet_by list
+ * Removes any rows from the alignment whose sequence name prefix matches a string in the prefixes_to_filter_by list
  */
-void alignment_filter_the_rows(Alignment *alignment, stList *prefixes_to_filter_by);
+void alignment_filter_the_rows(Alignment *alignment, stList *prefixes_to_filter_by, bool ignore_first_row);
+
+/*
+ * Ensure there is at most one row per sequence prefix.
+ */
+void alignment_filter_duplicate_rows(Alignment *alignment, stList *prefixes_to_match_on, bool ignore_first_row);
+
+/*
+ * Adds additional padding rows to an alignment so that every sequence prefix in the list has a row in the alignment block
+ */
+void alignment_pad_the_rows(Alignment *p_alignment, Alignment *alignment, stList *sequence_prefixes);
 
 /*
  * Load sequences in fasta files into a hash from sequence names to sequences
@@ -358,6 +373,25 @@ stSet *load_sequences_from_hal_file(char *hal_file, int *hal_handle);
  */
 void alignment_add_gap_strings(Alignment *p_alignment, Alignment *alignment, stHash *fastas, int hal_handle, stSet *hal_species,
                                int64_t maximum_gap_string_length);
+
+
+/*
+ * Parse a wiggle file (which may be compressed) returning a hash table from sequence names to nested hashes,
+ * each nested hash being a map from sequence coordinates to floating point values.
+ *
+ * Make zero based flag will make coordinates 0 based rather than 1 based.
+ *
+ * Seq_prefix is prepended to each chromosome name to form the sequence name stored in the
+ * returned hash.
+ *
+ * Not very memory efficient, but used by taffy annotate.
+ */
+stHash *wig_parse(char *file, char *seq_prefix, bool make_zero_based);
+
+/*
+ * Get a value for a specific coordinate. Returns given default_value if coordinate doesn't exist.
+ */
+double wig_get_value(stHash *wig, char *seq, int64_t coordinate, double default_value);
 
 #endif /* STTAF_H_ */
 

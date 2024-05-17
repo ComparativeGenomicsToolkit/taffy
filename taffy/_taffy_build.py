@@ -149,6 +149,11 @@ ffibuilder.cdef("""
     char *alignment_get_column(Alignment *alignment, int64_t column_index);
 
     /*
+     * Read a column of the alignment as an integer array where A/a=0, C/c=1, G/g=2, T/t=3, -=4, everything else=5
+     */
+    int32_t *alignment_get_column_as_int_array(Alignment *alignment, int64_t column_index);
+
+    /*
      * Returns a pretty-printed string representing the alignment. Useful for debugging.
     */
     char *alignment_to_string(Alignment *alignment);

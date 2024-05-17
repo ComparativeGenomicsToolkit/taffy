@@ -160,6 +160,7 @@ static void test_maf_norm_to_maf(CuTest *testCase) {
     stHash_destruct(fastas);
     fclose(file);
     LI_destruct(li);
+    st_system("rm %s", output_file);
 }
 
 static void test_maf_norm(CuTest *testCase) {
@@ -172,6 +173,7 @@ static void test_maf_norm(CuTest *testCase) {
     int i = st_system("./bin/taffy view -i %s | ./bin/taffy add-gap-bases ./tests/seqs/* | ./bin/taffy norm > %s",
                       example_file, output_file);
     CuAssertIntEquals(testCase, 0, i); // return value should be zero
+    st_system("rm %s", output_file);
 }
 
 static void test_dupe_filter(CuTest *testCase) {
@@ -186,6 +188,7 @@ static void test_dupe_filter(CuTest *testCase) {
     char *truth_file = "./tests/dupe_test_truth.maf";
     int diff_ret = st_system("diff %s %s", output_file, truth_file);
     CuAssertIntEquals(testCase, 0, diff_ret); // return value should be zero if files sames
+    st_system("rm %s", output_file);
 }
 
 static void test_norm_pipeline(CuTest *testCase) {
@@ -195,12 +198,13 @@ static void test_norm_pipeline(CuTest *testCase) {
     char *input_file = "./tests/evolverMammals.maf.mini";
     char *filter_file = "./tests/filter_file.txt";
     char *output_file = "./tests/evolverMammals.maf.norm_pipeline";
-    int i = st_system("./bin/taffy view -i %s | ./bin/taffy sort -f %s | ./bin/taffy norm -b ./tests/seqs/* -k > %s",
+    int i = st_system("./bin/taffy view -i %s | ./bin/taffy sort -f %s -r | ./bin/taffy norm -b ./tests/seqs/* -k > %s",
                       input_file, filter_file, output_file);
     CuAssertIntEquals(testCase, 0, i); // return value should be zero
     char *truth_file = "./tests/evolverMammals.maf.mini.filtered.normalized";
     int diff_ret = st_system("diff %s %s", output_file, truth_file);
     CuAssertIntEquals(testCase, 0, diff_ret); // return value should be zero if files sames
+    st_system("rm %s", output_file);
 }
 
 CuSuite* normalize_test_suite(void) {

@@ -33,7 +33,8 @@ static void usage(void) {
     fprintf(stderr, "-b --showOnlyLineageDifferences : Show only lineage changes, replacing identity with a * character.\n "
                     "Requires the phylogeny to be specified and ancestors to be present\n");
     fprintf(stderr, "-x --colorBases : Color bases in the output. THIS IS FOR VISUALIZATION ONLY - DOES NOT PRODUCE A VALID MAF/TAF\n");
-    fprintf(stderr, "-t --phylogeny [newick tree] : Specify a phylogeny for the alignment, where species names must be prefixes of sequence names\n");
+    fprintf(stderr, "-t --phylogeny [newick tree file] : Specify a file containing the phylogeny for the alignment, where species names must be prefixes of sequence names\n");
+    fprintf(stderr, "-d --omitCoordinates : When printing TAF, just print the columns omitting the coordinates. THIS IS FOR VISUALIZATION ONLY - DOES NOT PRODUCE A VALID TAF \n");
     fprintf(stderr, "-c --useCompression : Write the output using bgzip compression.\n");
     fprintf(stderr, "-n --nameMapFile : Apply the given two-column tab-separated name mapping to all assembly names in alignment\n");
     fprintf(stderr, "-l --logLevel : Set the log level\n");
@@ -88,8 +89,9 @@ int taf_view_main(int argc, char *argv[]) {
     char *region = NULL;
     bool use_compression = false;
     char *nameMapFile = NULL;
-    char *phylogeny_string = NULL;
+    char *phylogeny_file = NULL;
     static bool color_bases = false;
+    bool omit_coordinates = false;
 
     ///////////////////////////////////////////////////////////////////////////
     // Parse the inputs
@@ -108,6 +110,7 @@ int taf_view_main(int argc, char *argv[]) {
                                                 { "showOnlyLineageDifferences", no_argument, 0, 'b' },
                                                 { "colorBases", no_argument, 0, 'x' },
                                                 { "phylogeny", required_argument, 0, 't' },
+                                                { "omitCoordinates", required_argument, 0, 'd' },
                                                 { "repeatCoordinatesEveryNColumns", required_argument, 0, 's' },
                                                 { "region", required_argument, 0, 'r' },
                                                 { "useCompression", no_argument, 0, 'c' },
@@ -116,7 +119,7 @@ int taf_view_main(int argc, char *argv[]) {
                                                 { 0, 0, 0, 0 } };
 
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:o:mPpCaucs:r:n:habxt:", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:o:mPpCaucs:r:n:habxt:d", long_options, &option_index);
         if (key == -1) {
             break;
         }
@@ -147,7 +150,7 @@ int taf_view_main(int argc, char *argv[]) {
                 run_length_encode_output_bases = 1;
                 break;
             case 't':
-                phylogeny_string = optarg;
+                phylogeny_file = optarg;
                 break;
             case 'a':
                 show_only_reference_differences = 1;
@@ -157,6 +160,9 @@ int taf_view_main(int argc, char *argv[]) {
                 break;
             case 'x':
                 color_bases = 1;
+                break;
+            case 'd':
+                omit_coordinates = 1;
                 break;
             case 's':
                 repeat_coordinates_every_n_columns = atol(optarg);
@@ -190,8 +196,8 @@ int taf_view_main(int argc, char *argv[]) {
     if (nameMapFile) {
         st_logInfo("Name map file string : %s\n", nameMapFile);
     }
-    if(phylogeny_string) {
-        st_logInfo("Phylogeny : %s\n", phylogeny_string);
+    if(phylogeny_file) {
+        st_logInfo("Phylogeny file : %s\n", phylogeny_file);
     }
     st_logInfo("Show only reference differences : %s\n", show_only_reference_differences ? "true" : "false");
     st_logInfo("Show only lineage differences : %s\n", show_only_lineage_differences ? "true" : "false");
@@ -219,8 +225,12 @@ int taf_view_main(int argc, char *argv[]) {
     }
 
     // Parse the tree if present
-    if(phylogeny_string) {
+    if(phylogeny_file) {
+        FILE *f = fopen(phylogeny_file, "r");
+        char *phylogeny_string = stFile_getLineFromFile(f);
+        fclose(f);
         phylogeny = stTree_parseNewickString(phylogeny_string);
+        free(phylogeny_string);
         get_sequence_prefixes_for_tree_nodes();
     }
 
@@ -259,6 +269,9 @@ int taf_view_main(int argc, char *argv[]) {
                 tag = tag_remove(tag, "run_length_encode_bases");  // Remove this tag from the maf
                 // output as not relevant
             }
+        }
+        else if(!maf_output && run_length_encode_output_bases) { // If is taf input, taf output and we're turning on RLE
+            tag = tag_construct("run_length_encode_bases", "1", tag);
         }
     }
     if (maf_output) {
@@ -317,7 +330,7 @@ int taf_view_main(int argc, char *argv[]) {
             }
             if (taf_output) {
                 taf_write_block2(p_alignment, alignment, run_length_encode_output_bases,
-                                 repeat_coordinates_every_n_columns, output, color_bases);
+                                 repeat_coordinates_every_n_columns, output, color_bases, omit_coordinates);
             } else if (maf_output) {
                 maf_write_block2(alignment, output, color_bases);
             } else {
@@ -351,7 +364,7 @@ int taf_view_main(int argc, char *argv[]) {
             }
             if (taf_output) {
                 taf_write_block2(p_alignment, alignment, run_length_encode_output_bases,
-                                 repeat_coordinates_every_n_columns, output, color_bases);
+                                 repeat_coordinates_every_n_columns, output, color_bases, omit_coordinates);
             } else if (maf_output) {
                 maf_write_block2(alignment, output, color_bases);
             } else {
@@ -381,7 +394,7 @@ int taf_view_main(int argc, char *argv[]) {
             }
             if (taf_output) {
                 taf_write_block2(p_alignment, alignment, run_length_encode_output_bases,
-                                 repeat_coordinates_every_n_columns, output, color_bases);
+                                 repeat_coordinates_every_n_columns, output, color_bases, omit_coordinates);
             } else if (maf_output) {
                 maf_write_block2(alignment, output, color_bases);
             } else {
@@ -412,7 +425,7 @@ int taf_view_main(int argc, char *argv[]) {
         stHash_destruct(genome_name_map);
     }
 
-    if(phylogeny_string) {
+    if(phylogeny_file) {
         stList_destruct(sequence_prefixes);
         stList_destruct(tree_nodes);
         stTree_destruct(phylogeny);

@@ -2,7 +2,7 @@
 
 This is a C, Python and CLI library for manipulating/reading/writing TAF (described below) and 
 [MAF](https://genome.ucsc.edu/FAQ/FAQformat.html#format5) format multiple
-sequence alignments. It allows conversion between the formats. The Python library is built
+sequence alignments. It allows conversion between the formats and manipulation of the alignments with a number of useful utilities for preparing them for different use cases. The Python library is built
 on top of the C library and is therefore quite fast.
 
 # The TAF File Format
@@ -253,7 +253,7 @@ s	simMouse_chr6.simMouse.chr6	630640	50	+	636262	*******AT**********************
 s	simRat_chr6.simRat.chr6	642153	50	+	647215	*************A***G*****************************C**
 ```
 
-Note this requires specifying ancestor sequences in the tree and having them correspond to the names of the sequences in the input tree.
+Note this requires specifying ancestor sequences in the tree and having them correspond uniquely to the prefixes of names of the sequences in the input tree.
 
 ## Taffy Add-Gap-Bases
 
@@ -289,11 +289,22 @@ Taffy view first converts the input maf to TAF, taffy sort then sorts the rows o
 
 Where here we additionally remove any rows with sequence names with a prefix contained in the given FILTER_FILE.
 
-## Taffy Statistics
+A common requirement is that a MAF/TAF has exactly one row for every species in the alignment. As Cactus, and other tools, output MAFs that don't necessarily follow this convention it is useful to be able to force this. Using:
 
-`taffy stats` can print some basic statistics about the reference contigs (first row) in the alignment. Options are
-* List the reference contigs and their lengths (maximum end coordinates as found in the alignment -- could be smaller than true contig lengths). This is done quickly using the `.tai` index created with `taffy index`.
-* List all the reference intervals in BED format found in the alignment.  This is done by scanning the whole alignment and is therefore much slower than the above option (but will produce more fine-grained output in the case where the alignment only covers subregions of the contigs).
+    taffy view -i MAF_FILE | taffy sort -n SORT_FILE -p PAD_FILE -r DUP_FILE | taffy view -m
+
+Where the -p specifies the prefixes to "pad", that is any block not containing a row matching a prefix
+in the PAD_FILE will have that row added, using gaps and dummy coordinates to fill in the row. Similarly, the -r specifies that any set of two or more rows whose
+names match a given prefix in the DUP_FILE will be pruned so that only one such row is kept in the block. The heuristic used for dropping dupes currently is intentionally very simple: all rows after the first occurrence of a row matching the given sequence prefix are dropped. Using these options (and optionally the filter option) allows you to construct a MAF ordered and with exactly the set of rows expected for every block.
+
+In the taffy/scripts directory are some useful utilities for creating the sort/pad/dup-filter files given a guide tree. For example:
+
+    ./scripts/tree_to_sort_file.py --traversal pre --reroot REF_NODE --out_file OUT_FILE NEWICK_TREE_FILE
+
+Will create a sort order based upon a pre-order traversal of the  tree after rerooting the tree so that the given REF_NODE is the reference - this will place REF_NODE first in the sort order and then order remaining nodes from that node in a pre-order traversal.
+Using options to exclude internal nodes or leaf nodes makes it easy
+to use this to only include leaves, or to create a filter to exclude
+internal nodes, say. For an example of usage see ./tests/447-way/example_norm.sh
 
 ## Taffy Coverage
 
@@ -321,6 +332,27 @@ By default, the first `.` character is used to parse out the genome name from a 
 The `-a` option can be used to add rows that ignore gaps greater than the specified size when computing coverage.  So `-a 10 -a 100` would report coverage statistics for the whole genome, as well as ignoring gaps `>10bp` and `>100bp`. There will be `3X` the number of output rows.
 
 You can also use the `-s` option to add a breakdown of sex chromosomes and autosomes to the output table, ex `-s chrX -s chrY`. 
+
+## Taffy Stats
+
+`taffy stats` can print some basic statistics about the reference contigs (first row) in the alignment. Options are
+* List the reference contigs and their lengths (maximum end coordinates as found in the alignment -- could be smaller than true contig lengths). This is done quickly using the `.tai` index created with `taffy index`.
+* List all the reference intervals in BED format found in the alignment.  This is done by scanning the whole alignment and is therefore much slower than the above option (but will produce more fine-grained output in the case where the alignment only covers subregions of the contigs).
+In addition, it is useful for getting course data about a MAF/TAF, e.g.:
+
+```
+taffy stats -i ./447-way/447-mammalian-2022v1_hg38_chr22_22000000_22100000.anc.norm.taf.gz -a
+Total blocks:   3166
+Total columns:  215664
+Avg. columns/block:     68.118759
+Total bases:    67026589
+Total gaps:     226206389
+Avg. column depth:      1359.675171
+Avg. bases/column:      310.791718
+Avg. gaps/column:       1048.883423
+```
+
+Note the -a option is required to print these aggregate stats.
 
 # Referenced-based MAF/TAF and Indexing
 
@@ -572,7 +604,7 @@ Given this index file, you can open it as follows:
 ```
 from taffy.lib import TafIndex  # Import the TafIndex
 taf_index = TafIndex(test_taf_file + ".tai", is_maf=False)
-with AlignmentReader(test_taf_file, taf_index=taf_index, sequence_name="Anc0.Anc0refChr0",start=1000,length=50) as mp:
+with AlignmentReader(test_taf_file, taf_index=taf_index, sequence_intervals=(("Anc0.Anc0refChr0", 1000, 50),)) as mp:
     print(mp.get_header())
     for block in mp:
         print(block, "\n")
@@ -591,7 +623,82 @@ simRat_chr6.simRat.chr6 642932  3       +       647215  GCA---
 etc.
 ```
 
-Which gets a particular subrange of blocks within the given reference sequence interval.
+Which gets a particular subrange of blocks within the given reference sequence interval. To specify multiple intervals, just provide a sequence of multiple such intervals. The interval format is (seq_name, start, length).
+
+If we want to iterate on the columns of the alignment without worrying about
+blocks we can use the column iterator:
+
+```
+from taffy.lib import TafIndex, AlignmentReader, get_column_iterator, get_window_iterator
+import pathlib
+test_taf_file = (pathlib.Path().absolute() / "./evolverMammals.taf.gz").as_posix()
+taf_index = TafIndex(test_taf_file + ".tai", is_maf=False)
+with AlignmentReader(test_taf_file, taf_index=taf_index, sequence_intervals=(("Anc0.Anc0refChr0", 1000, 50),))  as mp:
+    for ref_index, column_string in get_window_iterator(mp, include_sequence_names=False):
+        print(ref_index, column_string)
+
+995 GGCGC-GGG
+996 AAAAAAAAA
+997 GGGGGGGGG
+998 GGGTGCGTT
+999 TTTCTCTGC
+1000 GGGGGGGGG
+1001 CCCCCACCC
+1002 GGGAGGGAA
+1003 CCCCCCCC-
+1004 TTTTTTTT-
+```
+
+Or if we wish to get windows of successive columns of the alignment:
+
+```asm
+from taffy.lib import TafIndex, AlignmentReader, get_column_iterator, get_window_iterator
+import pathlib
+test_taf_file = (pathlib.Path().absolute() / "./evolverMammals.taf.gz").as_posix()
+taf_index = TafIndex(test_taf_file + ".tai", is_maf=False)
+with AlignmentReader(test_taf_file, taf_index=taf_index, sequence_intervals=(("Anc0.Anc0refChr0", 1000, 50),)) as mp:
+    for columns in get_window_iterator(mp, 
+    window_length=10, step=5,
+    include_sequence_names=False):
+        print(columns)
+...
+[(1000, 'GGGGGGGGG') (1001, 'CCCCCACCC') (1002, 'GGGAGGGAA')
+ (1003, 'CCCCCCCC-') (1004, 'TTTTTTTT-') (1005, 'TTTTTGTT-')
+ (1006, 'AAAAAAAA') (1007, 'CCCCTCTCC') (1008, 'TTTTTTTTT')
+ (1009, 'AATACTAAC')]
+[(1005, 'TTTTTGTT-') (1006, 'AAAAAAAA') (1007, 'CCCCTCTCC')
+ (1008, 'TTTTTTTTT') (1009, 'AATACTAAC') (1010, 'TTTTTTTTT')
+ (1011, 'CCCCCCCCC') (1012, 'TTTTCTTTT') (1013, 'TTTTTTTTT')
+ (1014, 'AAAACAAAA')]
+[(1010, 'TTTTTTTTT') (1011, 'CCCCCCCCC') (1012, 'TTTTCTTTT')
+ (1013, 'TTTTTTTTT') (1014, 'AAAACAAAA') (1015, 'TTTTTTTT-')
+ (1016, 'GGGTGAGT-') (1017, 'CCCCCCCC-') (1018, 'CCCCCCAC')
+ (1019, 'TTTTTTTT')]
+[(1015, 'TTTTTTTT-') (1016, 'GGGTGAGT-') (1017, 'CCCCCCCC-')
+ (1018, 'CCCCCCAC') (1019, 'TTTTTTTT') (1020, 'AAAAAAAA')
+ (1021, 'TTTTTTTTT') (1022, 'CCCCCCCCC') (1023, 'CCCTCCCTT')
+ (1024, 'AAAAAA-AA')]
+[(1020, 'AAAAAAAA') (1021, 'TTTTTTTTT') (1022, 'CCCCCCCCC')
+ (1023, 'CCCTCCCTT') (1024, 'AAAAAA-AA') (1025, 'TTTTTTTTT')
+ (1026, 'AAAAAAAAA') (1027, 'GGGGGGGGG') (1028, 'TTTTTTTTT')
+ (1029, 'AAATAAATT')]
+[(1025, 'TTTTTTTTT') (1026, 'AAAAAAAAA') (1027, 'GGGGGGGGG')
+ (1028, 'TTTTTTTTT') (1029, 'AAATAAATT') (1030, 'TTTTTTTTT')
+ (1031, 'TTTTATTTT') (1032, 'AAATGAATT') (1033, 'TTTTTTTTT')
+ (1034, 'TTTTTTTTT')]
+[(1030, 'TTTTTTTTT') (1031, 'TTTTATTTT') (1032, 'AAATGAATT')
+ (1033, 'TTTTTTTTT') (1034, 'TTTTTTTTT') (1035, 'CCCTCCCTT')
+ (1036, 'CCCCCCCCC') (1037, 'TTTCTTTCC') (1038, 'AAGATGAAG')
+ (1039, 'CCCTCCCTT')]
+[(1035, 'CCCTCCCTT') (1036, 'CCCCCCCCC') (1037, 'TTTCTTTCC')
+ (1038, 'AAGATGAAG') (1039, 'CCCTCCCTT') (1040, 'CCCCCCCCC')
+ (1041, 'TTTTCTTTT') (1042, 'TTTTTTTTT') (1043, 'TTTTTTTTT')
+ (1044, 'TTTTTTTTT')]
+[(1040, 'CCCCCCCCC') (1041, 'TTTTCTTTT') (1042, 'TTTTTTTTT')
+ (1043, 'TTTTTTTTT') (1044, 'TTTTTTTTT') (1045, 'GGGCGGTCC')
+ (1046, 'CCCCCCCCC') (1047, 'TTTTTATTT') (1048, 'TTTTTCTTT')
+ (1049, 'AAAAAAAAA')]
+```
 
 # Comparison Stats
 

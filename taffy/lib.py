@@ -1,6 +1,7 @@
 from taffy._taffy_cffi import ffi, lib
 import numpy as np
-
+import torch
+from collections import deque
 
 def _to_py_string(s):
     """ Convert a cffi string into a Python string in Python3 """
@@ -85,10 +86,32 @@ class Alignment:
         lib.free(column)  # Free C string
         return column_string
 
+    def get_column_as_np_array(self, column_index):
+        """ Get a column of the alignment as a numpy int32 array, where we map the bases to
+        consecutive integers, e.g. A/a=0, C/c=1, G/g=2, T/t=3, -=4, everything else=5.
+
+        Use negative coordinates to get columns from the end of the block """
+        column_index = column_index if column_index >= 0 else (self.column_number() + column_index)  # Correct if
+        # requesting a column from the end of the alignment
+        assert 0 <= column_index < self.column_number()
+        column = lib.alignment_get_column_as_int_array(self._c_alignment, column_index)  # Get the column
+        column_length = self.row_number()
+        # Convert the C array to a NumPy array, copying it in process
+        column_np = np.copy(np.frombuffer(ffi.buffer(column, ffi.sizeof("int32_t") * column_length), dtype=np.int32))
+        lib.free(column)  # Free C string
+        return column_np
+
+    def get_column_as_np_array_one_hot(self, column_index):
+        """ As get_column_as_np_array, but encoded one hot, using float32 """
+        column_np = self.get_column_as_np_array(column_index)
+        column_np_one_hot = np.zeros(shape=(len(column_np),6), dtype=np.float32)
+        column_np_one_hot[np.arange(len(column_np)), column_np] = 1.0
+        return column_np_one_hot
+
     def get_column_sequences(self):
-        """ Get the names of the sequences in the alignment in order as an array """
+        """ Get the names of the sequences in the alignment in order as a list """
         row = self.first_row()
-        sequence_names = np.empty(self.row_number(), dtype=object)
+        sequence_names = [None]*self.row_number()
         for i in range(self.row_number()):
             sequence_names[i] = row.sequence_name()
             row = row.next_row()
@@ -120,11 +143,10 @@ class Alignment:
 class Row:
     """ Represents a row of an alignment block. See taf.h """
 
-    def __init__(self, c_row=None, l_row=None, r_row=None, n_row=None):
+    def __init__(self, c_row=None, n_row=None):
         self._c_row = c_row  # The underlying C row
-        self._l_row = l_row  # The prior (left) row in the previous alignment block
-        self._r_row = r_row  # The next (right) row in the next alignemnt clock
         self._n_row = n_row  # The next row in the sequence of rows
+        # Note by choice we do not store pointers to the left and right rows
 
     def sequence_name(self):
         """ The name of the sequence for the row """
@@ -160,14 +182,6 @@ class Row:
         """ Get the next row in the alignment block or None if last row """
         return self._n_row
 
-    def left_row(self):
-        """ Get any left row in the prior alignment block """
-        return self._l_row
-
-    def right_row(self):
-        """ Get any right row in the next alignment block """
-        return self._r_row
-
     def __del__(self):
         lib.alignment_row_destruct(self._c_row)  # Cleans up the underlying C alignment structure
 
@@ -194,21 +208,21 @@ class AlignmentReader:
     """ Taf or maf alignment parser.
     """
 
-    def __init__(self, file, taf_index=None, sequence_name=None, start=-1, length=-1):
-        """ Use taf_not_maf to switch between MAF or TAF parsing.
-
-        file can be either a Python file handle or a string giving a path to the file.
-        Handing in the file name is much faster as it avoids using a Python file object. If using
-        with a file string remember to close the file, either the with keyword or with the close method.
-
-        If file is compressed with zip or bgzip will automatically detect that the file is compressed and read it okay.
-
-        Use the taf_index and sequence_name, start and length if you want to extract a region from a taf file using
-        a taf index. Also works with compressed files.
+    def __init__(self, file, taf_index=None,  sequence_intervals=None):
+        """
+        :param file: File can be either a Python file handle or a string giving a path to the file.
+        The underlying file can be either maf or taf. Handing in the file name is much faster as it avoids using a
+        Python file object. If using with a file string remember to close the file, either the with keyword or with
+        the close method. If file is compressed with zip or bgzip will automatically detect that the file is
+        compressed and read it okay.
+        :param taf_index: A taf index object, which is specified allows the retrieval of subranges of the alignment.
+        :param sequence_intervals: A sequence of one or more tuples, each of the form (sequence_name, start, length)
+        that specify the range to retrieve. Will be retrieved in order.
         """
         self.p_c_alignment = ffi.NULL  # The previous C alignment returned
         self.p_c_rows_to_py_rows = {}  # Hash from C rows to Python rows of the previous
         # alignment block, allowing linking of rows between blocks
+        self.file = file
         self.c_file_handle = _get_c_file_handle(file)
         self.file_string_not_handle = isinstance(file, str)  # Will be true if the file is a string, not a file handle
         self.c_li_handle = lib.LI_construct(self.c_file_handle)
@@ -218,17 +232,32 @@ class AlignmentReader:
         self.taf_not_maf = i == 0  # Sniff the file header to determine if a taf file
         self.taf_index = taf_index  # Store the taf index (if there is one)
         self.header_tags = self._read_header()  # Read the header tags
-        self.use_run_length_encoding = "run_length_encode_bases" in self.header_tags  # Use run length encoding
+
+        # Parse run length encoding
+        self.use_run_length_encoding = False
+        if "run_length_encode_bases" in self.header_tags:
+            assert self.header_tags["run_length_encode_bases"] in ("0", "1")
+            self.use_run_length_encoding = self.header_tags["run_length_encode_bases"] == "1"
+
+        self.sequence_intervals = sequence_intervals
+        self.sequence_interval_index = 0
 
         if taf_index:
-            assert self.taf_not_maf  # Can not be trying to parse maf with a taf index
-            assert sequence_name  # The contig name can not be none if using a taf index
-            assert start >= 0  # The start coordinate must be valid
-            assert length >= 0  # The length must be valid
-            self._c_taf_index_it = lib.tai_iterator(taf_index._c_taf_index,
-                                                    self.c_li_handle,
-                                                    self.use_run_length_encoding,
-                                                    _to_c_string(sequence_name), start, length)
+            assert self.sequence_intervals is not None  # Must not be None
+            if len(self.sequence_intervals) > 0:
+                sequence_name, start, length = sequence_intervals[0]
+                assert sequence_name  # The contig name can not be none if using a taf index
+                assert start >= 0  # The start coordinate must be valid
+                assert length >= 0  # The length must be valid
+                assert len(sequence_intervals) > 0  # Must contain at least one interval
+                self._c_taf_index_it = lib.tai_iterator(taf_index._c_taf_index,
+                                                        self.c_li_handle,
+                                                        self.use_run_length_encoding,
+                                                        _to_c_string(sequence_name), start, length)
+            else:
+                self._c_taf_index_it = None  # Case we have an empty iteration
+        else:
+            assert not sequence_intervals  # Sequence intervals should not be specified if taf index not provided
 
     def get_header(self):
         """ Get tags from the header line as a dictionary of key:value pairs.
@@ -244,36 +273,45 @@ class AlignmentReader:
 
     def __next__(self):
         """ Get the next alignment block """
+        if self.taf_index and not self.sequence_intervals:  # Case we have a taf index but no sequence intervals, we're
+            # immediately done
+            raise StopIteration  # We're done
+
         # Read a taf/maf block
         if self.taf_not_maf:  # Is a taf block
             # Use the taf index if present
             c_alignment = lib.tai_next(self._c_taf_index_it, self.c_li_handle) if self.taf_index else \
-                lib.taf_read_block(self.p_c_alignment, 0, self.c_li_handle)
+                lib.taf_read_block(self.p_c_alignment, self.use_run_length_encoding, self.c_li_handle)
         else:  # Is a maf block
-            c_alignment = lib.maf_read_block(self.c_li_handle)
+            c_alignment = lib.tai_next(self._c_taf_index_it, self.c_li_handle) if self.taf_index else \
+                lib.maf_read_block(self.c_li_handle)
 
         if c_alignment == ffi.NULL:  # If the c_alignment is null
-            raise StopIteration  # We're done
+            self.sequence_interval_index += 1
+            if self.sequence_intervals is None or self.sequence_interval_index >= len(self.sequence_intervals):
+                raise StopIteration  # We're done
+            # Otherwise, get next interval
+            sequence_name, start, length = self.sequence_intervals[self.sequence_interval_index]
+            # Make new iterator for next interval
+            self.p_c_alignment = ffi.NULL  # Remove reference to prior alignment
+            lib.tai_iterator_destruct(self._c_taf_index_it)  # Cleanup old iterator
+            self._c_taf_index_it = lib.tai_iterator(self.taf_index._c_taf_index,
+                                                    self.c_li_handle,
+                                                    self.use_run_length_encoding,
+                                                    _to_c_string(sequence_name), start, length)
+            return self.__next__()
 
         # If maf use O(ND) algorithm to link to any prior alignment block
         if (not self.taf_not_maf) and self.p_c_alignment != ffi.NULL:
             lib.alignment_link_adjacent(self.p_c_alignment, c_alignment, 1)
 
         # Now add in the rows
-        c_row, p_py_row, c_rows_to_py_rows = c_alignment.row, None, {}
+        c_row, p_py_row, first_py_row = c_alignment.row, None, None
         while c_row != ffi.NULL:
-            # The previous py row
-
-            # Make the Python row object
-            if c_row.l_row == ffi.NULL:  # If there is no prior left row to connect to
-                py_row = Row(c_row=c_row)
-            else:  # Otherwise, there is a prior left row to connect to
-                l_py_row = self.p_c_rows_to_py_rows[c_row.l_row]
-                py_row = Row(c_row=c_row, l_row=l_py_row)
-                l_py_row._r_row = py_row
-
-            # Add to the map of c rows to python rows
-            c_rows_to_py_rows[c_row] = py_row
+            # Make the Pythob row
+            py_row = Row(c_row=c_row)
+            if first_py_row is None:
+                first_py_row = py_row
 
             # Connect the row object to the chain of row objects for the block
             if p_py_row is not None:
@@ -283,11 +321,10 @@ class AlignmentReader:
             c_row = c_row.n_row  # Move to the next row
 
         # Now convert the new alignment into Python
-        py_alignment = Alignment(c_alignment=c_alignment, py_row=c_rows_to_py_rows[c_alignment.row])
+        py_alignment = Alignment(c_alignment=c_alignment, py_row=first_py_row)
 
         # Set the new prior alignment / rows
         self.p_c_alignment = c_alignment
-        self.p_c_rows_to_py_rows = c_rows_to_py_rows
 
         return py_alignment
 
@@ -309,17 +346,180 @@ class AlignmentReader:
         self.close()
 
 
-def get_column_iterator(alignment_reader):
+def get_reference_sequence_intervals(alignment_reader):
+    """ Generates a sequence of reference sequence intervals by scanning through the alignment_reader.
+    Each generated value is of the form (seq_name, start, length). Length is the number of
+    reference bases in blocks within the interval (e.g. ignores unaligned ref gaps).
+    """
+    seq_intervals = []
+    p_ref_seq, p_ref_start, p_ref_length = None, 0, 0
+    for alignment in alignment_reader:  # For each alignment block
+        # Get the reference row so we can keep track of the reference coordinates
+        ref_row = alignment.first_row()
+        if ref_row is None:  # Weird case we are on an empty block - technically possible in taf
+            continue
+        seq_name = ref_row.sequence_name()  # Get the sequence name
+        assert seq_name is not None  # Seq name can not be unspecified
+        if seq_name != p_ref_seq:  # If we have a new reference sequence
+            if p_ref_seq is not None:  # If there is a previous reference sequence, add it to the list
+                yield p_ref_seq, p_ref_start, p_ref_length
+            p_ref_seq = seq_name  # Set the new reference sequence interval
+            p_ref_start = ref_row.start()
+            p_ref_length = ref_row.length()
+        else:
+            p_ref_length += ref_row.length()  # If not a new ref sequence, just add the number of ref bases
+            # in the block
+    if p_ref_seq is not None:
+        yield p_ref_seq, p_ref_start, p_ref_length
+
+
+def get_column_iterator(alignment_reader,
+                        include_sequence_names=True,
+                        include_non_ref_columns=True,
+                        include_column_tags=False,
+                        column_as_int_array=False,
+                        column_as_int_array_one_hot=False):
     """ Create an alignment column iterator which returns successive
     columns from the alignment from an AlignmentReader object.
 
-    Each is returned as an array of sequence names and a string representing the bases
-    in the column
+    If alignment_reader was created given a sequence interval only the columns from that given reference
+    interval will be returned.
+
+    Each column returned is a column string and a tuple representing the "label" of the column.
+    The label tuple is a composed of the reference index of the column and:
+        If include_sequence_names is True then the second value is an array of sequence names for the columns.
+        If include_column_tags is True then the last value in the label tuple will be a dictionary of any tags.
+
+    If include_non_ref_columns is True then columns not including the reference in the interval will also be returned.
+
+    If column_as_int_array is True then columns will be returned as numpy arrays, see Alignment.get_column_as_np_array()
     """
+    if column_as_int_array:
+        assert not column_as_int_array_one_hot
     for alignment in alignment_reader:  # For each alignment block
-        sequence_names = alignment.get_column_sequences()
-        for i in range(alignment.column_number()):  # For each column
-            yield sequence_names, alignment.get_column(i)
+        # Get the reference row so we can keep track of the reference coordinates
+        ref_row = alignment.first_row()
+        if ref_row is None:  # Weird case we are on an empty block - technically possible in taf
+            continue
+        ref_index = ref_row.start()
+        ref_bases = ref_row.bases()
+
+        # Determine the kind of column to return
+        if column_as_int_array:
+            get_column = alignment.get_column_as_np_array
+        elif column_as_int_array_one_hot:
+            get_column = alignment.get_column_as_np_array_one_hot
+        else:
+            get_column = alignment.get_column
+
+        # If the output wants to match the column entries to the sequences
+        if include_sequence_names:
+            sequence_names = alignment.get_column_sequences()
+            if include_non_ref_columns:
+                if include_column_tags:
+                    for i in range(alignment.column_number()):
+                        yield get_column(i), (ref_index, sequence_names, alignment.column_tags(i))
+                        if ref_bases[i] != '-':
+                            ref_index += 1
+                else:
+                    for i in range(alignment.column_number()):
+                        yield get_column(i), (ref_index, sequence_names)
+                        if ref_bases[i] != '-':
+                            ref_index += 1
+            else:
+                if include_column_tags:
+                    for i in range(alignment.column_number()):
+                        if ref_bases[i] != '-':
+                            yield get_column(i), (ref_index, sequence_names, alignment.column_tags(i))
+                            ref_index += 1
+                else:
+                    for i in range(alignment.column_number()):
+                        if ref_bases[i] != '-':
+                            yield get_column(i), (ref_index, sequence_names)
+                            ref_index += 1
+        else:
+            if include_non_ref_columns:
+                if include_column_tags:
+                    for i in range(alignment.column_number()):
+                        yield get_column(i), (ref_index, alignment.column_tags(i))
+                        if ref_bases[i] != '-':
+                            ref_index += 1
+                else:
+                    for i in range(alignment.column_number()):
+                        yield get_column(i), (ref_index,)
+                        if ref_bases[i] != '-':
+                            ref_index += 1
+            else:
+                if include_column_tags:
+                    for i in range(alignment.column_number()):
+                        if ref_bases[i] != '-':
+                            yield get_column(i), (ref_index, alignment.column_tags(i))
+                            ref_index += 1
+                else:
+                    for i in range(alignment.column_number()):
+                        if ref_bases[i] != '-':
+                            yield get_column(i), (ref_index,)
+                            ref_index += 1
+
+
+def get_window_iterator(alignment_reader,
+                        window_length=10, step=1,
+                        include_sequence_names=True,
+                        include_non_ref_columns=True,
+                        include_column_tags=False,
+                        column_as_int_array=False,
+                        column_as_int_array_one_hot=False):
+    """ Iterate over (overlapping) windows of the alignment. If columns are numpy arrays the return value
+    will be a multidimensional matrix with the first index being the columns. Otherwise columns are returned
+    as an array.
+
+    :param alignment_reader: An alignment reader to iterate from
+    :param window_length: The number of successive columns to include in a window, must be > 0
+    :param step: The number of columns between successive windows, must be 0 < step <= window_length.
+    If equal to the window length will mean windows are non-overlapping
+    :param include_sequence_names: See get_column_iterator()
+    :param include_non_ref_columns: See get_column_iterator()
+    :param include_column_tags: See get_column_iterator()
+    :param column_as_int_array: See get_column_iterator()
+    :param column_as_int_array_one_hot: See get_column_iterator()
+    :return: A numpy array of columns, each column from get_column_iterator(), and another numpy array of labels
+    """
+    assert window_length > 0  # Window length must be positive integer
+    assert step <= window_length  # Step can not exceed the window length
+    assert step >= 1  # Step can not be negative or 0
+    q = deque()
+    # If we have numpy arrays then we can concatenate them to create a single tensor
+    column_it = get_column_iterator(alignment_reader,
+                                    include_sequence_names=include_sequence_names,
+                                    include_non_ref_columns=include_non_ref_columns,
+                                    include_column_tags=include_column_tags,
+                                    column_as_int_array=column_as_int_array,
+                                    column_as_int_array_one_hot=column_as_int_array_one_hot)
+    if column_as_int_array or column_as_int_array_one_hot:
+        for column, labels in column_it:
+            column.shape = (1,) + column.shape  # As we will be joining the column we add an extra "prefix" dimension
+            q.append((column, labels))  # Add to the right end of the window
+            assert len(q) <= window_length
+            if len(q) == window_length:
+                labels = np.empty(window_length, dtype=object)
+                for i in range(window_length):  # Fill out the column and label arrays
+                    labels[i] = q[i][1]
+                columns = np.concatenate(tuple(i[0] for i in q))  # Concatenate together the column arrays
+                yield columns, labels
+                for i in range(step):
+                    q.popleft()  # Remove from the left end of the window
+    else:  # Otherwise, the columns are strings, and we return them as a 1-d array of strings for each window
+        for column, labels in column_it:
+            q.append((column, labels))  # Add to the right end of the window
+            assert len(q) <= window_length
+            if len(q) == window_length:
+                columns, labels = np.empty(window_length, dtype=object), np.empty(window_length, dtype=object)
+                for i in range(window_length):  # Fill out the column and label arrays
+                    columns[i] = q[i][0]
+                    labels[i] = q[i][1]
+                yield columns, labels
+                for i in range(step):
+                    q.popleft()  # Remove from the left end of the window
 
 
 def write_taf_index_file(taf_file, index_file, index_block_size=10000):
@@ -388,3 +588,4 @@ class AlignmentWriter:
 
     def __exit__(self, exc_type, exc_value, exc_traceback):
         self.close()
+

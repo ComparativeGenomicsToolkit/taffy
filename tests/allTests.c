@@ -14,6 +14,7 @@ CuSuite* normalize_test_suite(void);
 CuSuite* view_test_suite(void);
 CuSuite* sort_test_suite(void);
 CuSuite* coverage_test_suite(void);
+CuSuite* wiggle_test_suite(void);
 
 static int allTests(void) {
     CuString *output = CuStringNew();
@@ -25,6 +26,7 @@ static int allTests(void) {
     CuSuiteAddSuite(suite, view_test_suite());
     CuSuiteAddSuite(suite, sort_test_suite());
     CuSuiteAddSuite(suite, coverage_test_suite());
+    CuSuiteAddSuite(suite, wiggle_test_suite());
 
     CuSuiteRun(suite);
     CuSuiteSummary(suite, output);

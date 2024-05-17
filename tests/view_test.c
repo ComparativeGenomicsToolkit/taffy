@@ -75,10 +75,11 @@ static void test_paf(CuTest *testCase) {
 static void test_lineage_diffs(CuTest *testCase) {
     {
         char *example_file = "./tests/evolverMammals.maf.mini";
+        char *tree_file = "./tests/evolverMammals.nh";
         char *output_file = "./tests/lineage_diffs_test.maf.out";
         char *truth_file = "./tests/evolverMammals.maf.mini.lineage_diffs";
-        int i = st_system("./bin/taffy view -i %s -t '((simHuman_chr6:0.144018,(simMouse_chr6:0.084509,simRat_chr6:0.091589)mr:0.271974)Anc1:0.020593,(simCow_chr6:0.18908,simDog_chr6:0.16303)Anc2:0.032898)Anc0;' -b -m > %s",
-                          example_file, output_file);
+        int i = st_system("./bin/taffy view -i %s -t %s -b -m > %s",
+                          example_file, tree_file, output_file);
         CuAssertIntEquals(testCase, 0, i); // return value should be zero
         int diff_ret = st_system("diff %s %s", output_file, truth_file);
         CuAssertIntEquals(testCase, 0, diff_ret); // return value should be zero if files sames

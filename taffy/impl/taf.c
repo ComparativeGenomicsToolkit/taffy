@@ -104,7 +104,8 @@ static Alignment *parse_coordinates_and_establish_block(Alignment *p_block, stLi
  */
 char *get_bases(int64_t column_length, stList *tokens, bool run_length_encode_bases) {
     if(run_length_encode_bases) { // Case the bases are encoded using run length encoding
-        char *column = st_calloc(column_length, sizeof(char));
+        char *column = st_calloc(column_length+1, sizeof(char));
+        column[column_length] = '\0'; // Make into a properly terminated string
         int64_t i=0, j=0;
         while(j < column_length) {
             assert(i < stList_length(tokens));
@@ -118,6 +119,8 @@ char *get_bases(int64_t column_length, stList *tokens, bool run_length_encode_ba
             assert(j <= column_length);
         }
         assert(j == column_length);
+        assert(strlen(column) == column_length); // Final sanity check: Must be a contiguous run of bases equal
+        // in length to the number of rows
         return column;
     }
     // Otherwise column is just a string of bases without whitespace
@@ -238,9 +241,9 @@ Alignment *taf_read_block(Alignment *p_block, bool run_length_encode_bases, LI *
     //Now parse the actual alignments into the rows
     Alignment_Row *row = block->row;
     int64_t j = 0, k = block->column_number;
-    char bases[k+1];
-    bases[k] = '\0';
     while(row != NULL) {
+        char *bases = st_malloc(sizeof(char) * (k+1));
+        bases[k] = '\0';
         int64_t length = 0;
         for(int64_t i=0; i<k; i++) {
             char *column = stList_get(alignment_columns, i);
@@ -249,7 +252,7 @@ Alignment *taf_read_block(Alignment *p_block, bool run_length_encode_bases, LI *
                 length++;
             }
         }
-        row->bases = stString_copy(bases);
+        row->bases = bases;
         row->length = length;
         row = row->n_row; j++;
     }
@@ -309,39 +312,12 @@ void write_column(Alignment_Row *row, int64_t column, LW *lw, bool run_length_en
         }
         else {
             write_base(base, base_count, lw, run_length_encode_bases, color_bases);
-            /*if(base != '\0') {
-                if(run_length_encode_bases) {
-                    LW_write(lw, "%c %" PRIi64 " ", base, base_count);
-                }
-                else {
-                    for (int64_t i = 0; i < base_count; i++) {
-                        if(color_bases) {
-                            char *colored_base_string = color_base_char(base);
-                            LW_write(lw, colored_base_string);
-                            free(colored_base_string);
-                        }
-                        else {
-                            LW_write(lw, "%c", base);
-                        }
-                    }
-                }
-            }*/
             base = row->bases[column];
             base_count = 1;
         }
         row = row->n_row;
     }
     write_base(base, base_count, lw, run_length_encode_bases, color_bases);
-    /*if(base != '\0') {
-        if(run_length_encode_bases) {
-            LW_write(lw, "%c %" PRIi64 " ", base, base_count);
-        }
-        else {
-            for (int64_t i = 0; i < base_count; i++) {
-                LW_write(lw, "%c", base);
-            }
-        }
-    }*/
 }
 
 void write_coordinates(Alignment_Row *p_row, Alignment_Row *row, int64_t repeat_coordinates_every_n_columns, LW *lw) {
@@ -415,21 +391,26 @@ void write_coordinates(Alignment_Row *p_row, Alignment_Row *row, int64_t repeat_
 void write_header(Tag *tag, LW *lw, char *header_prefix, char *delimiter, char *end);
 
 void taf_write_block2(Alignment *p_alignment, Alignment *alignment, bool run_length_encode_bases,
-                     int64_t repeat_coordinates_every_n_columns, LW *lw, bool color_bases) {
+                     int64_t repeat_coordinates_every_n_columns, LW *lw, bool color_bases, bool omit_coordinates) {
     Alignment_Row *row = alignment->row;
     if(row != NULL) {
         int64_t column_no = strlen(row->bases);
         assert(column_no > 0);
         write_column(row, 0, lw, run_length_encode_bases, color_bases);
-        write_coordinates(p_alignment != NULL ? p_alignment->row : NULL, row, repeat_coordinates_every_n_columns, lw);
-        if(alignment->column_tags != NULL && alignment->column_tags[0] != NULL) {
-            write_header(alignment->column_tags[0], lw, " @", ":", "");
+        if(!omit_coordinates) {
+            write_coordinates(p_alignment != NULL ? p_alignment->row : NULL, row, repeat_coordinates_every_n_columns,
+                              lw);
+            if (alignment->column_tags != NULL && alignment->column_tags[0] != NULL) {
+                write_header(alignment->column_tags[0], lw, " @", ":", "");
+            }
+            LW_write(lw, "\n");
         }
-        LW_write(lw, "\n");
         for(int64_t i=1; i<column_no; i++) {
             write_column(row, i, lw, run_length_encode_bases, color_bases);
-            if(alignment->column_tags != NULL && alignment->column_tags[i] != NULL) {
-                write_header(alignment->column_tags[i], lw, " @", ":", "");
+            if(!omit_coordinates) {
+                if (alignment->column_tags != NULL && alignment->column_tags[i] != NULL) {
+                    write_header(alignment->column_tags[i], lw, " @", ":", "");
+                }
             }
             LW_write(lw, "\n");
         }
@@ -438,7 +419,7 @@ void taf_write_block2(Alignment *p_alignment, Alignment *alignment, bool run_len
 
 void taf_write_block(Alignment *p_alignment, Alignment *alignment, bool run_length_encode_bases,
                        int64_t repeat_coordinates_every_n_columns, LW *lw) {
-    taf_write_block2(p_alignment, alignment, run_length_encode_bases, repeat_coordinates_every_n_columns, lw, 0);
+    taf_write_block2(p_alignment, alignment, run_length_encode_bases, repeat_coordinates_every_n_columns, lw, 0, 0);
 }
 
 void taf_write_header(Tag *tag, LW *lw) {
