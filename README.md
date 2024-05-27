@@ -1,6 +1,6 @@
 # Taffy
 
-This is a MIT license C, Python and CLI library for manipulating/reading/writing [TAF](https://github.com/ComparativeGenomicsToolkit/taffy/docs/taf_format.md) (described below) and 
+This is a MIT licensed C and Python library with a CLI for manipulating/reading/writing [TAF](https://github.com/ComparativeGenomicsToolkit/taffy/docs/taf_format.md) (described below) and 
 [MAF](https://genome.ucsc.edu/FAQ/FAQformat.html#format5) format multiple
 sequence alignments. It allows conversion between the formats and manipulation of the alignments with a number of useful utilities for preparing them for different use cases. The Python library is built
 on top of the C library and is therefore quite fast.
