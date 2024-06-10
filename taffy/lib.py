@@ -193,15 +193,29 @@ class TafIndex:
     """ Taf Index (.tai)
     """
 
-    def __init__(self, file, is_maf):
-        """ Load from a file. Can be a file name or a Python file handle """
-        c_file_handle = _get_c_file_handle(file)
+    def __init__(self, index_file, is_maf):
+        """ Load index from a file (index_file). Can be a file name or a Python file handle."""
+        c_file_handle = _get_c_file_handle(index_file)
         self._c_taf_index = lib.tai_load(c_file_handle, is_maf)
-        if isinstance(file, str):  # Close the underlying file handle if opened
+        if isinstance(index_file, str):  # Close the underlying file handle if opened
             lib.fclose(c_file_handle)
 
     def __del__(self):
         lib.tai_destruct(self._c_taf_index)  # Clean up the underlying C
+
+    @staticmethod
+    def is_maf(alignment_file):
+        """ Returns 0 if taf file or 1 if maf.
+        """
+        c_file_handle = _get_c_file_handle(alignment_file)
+        c_li_handle = lib.LI_construct(c_file_handle)
+        i = lib.check_input_format(lib.LI_peek_at_next_line(c_li_handle))
+        if i not in (0, 1):
+            raise RuntimeError(f"Input file is not a TAF or MAF file, code: {i}")
+        lib.LI_destruct(c_li_handle)
+        if isinstance(alignment_file, str):  # Close the underlying file handle if opened
+            lib.fclose(c_file_handle)
+        return i
 
 
 class AlignmentReader:
