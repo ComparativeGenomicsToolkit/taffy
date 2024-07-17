@@ -126,6 +126,10 @@ int taf_stats_main(int argc, char *argv[]) {
     FILE *tai_fh = NULL;
     Tai *tai = NULL;
     if (index_required) {
+        if (taf_fn == NULL) {
+            fprintf(stderr, "An index is needed to compute the requested stats so an input filename must be specified with -i\n");
+            return 1;
+        }
         tai_fn = tai_path(taf_fn);
         tai_fh = fopen(tai_fn, "r");
         if (tai_fh == NULL) {
