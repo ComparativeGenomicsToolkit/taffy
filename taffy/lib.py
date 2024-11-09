@@ -143,10 +143,11 @@ class Alignment:
 class Row:
     """ Represents a row of an alignment block. See taf.h """
 
-    def __init__(self, c_row=None, n_row=None):
+    def __init__(self, c_row=None, l_row=None, r_row=None, n_row=None):
         self._c_row = c_row  # The underlying C row
+        self._l_row = l_row  # The prior (left) row in the previous alignment block
+        self._r_row = r_row  # The next (right) row in the next alignemnt clock
         self._n_row = n_row  # The next row in the sequence of rows
-        # Note by choice we do not store pointers to the left and right rows
 
     def sequence_name(self):
         """ The name of the sequence for the row """
@@ -181,6 +182,14 @@ class Row:
     def next_row(self):
         """ Get the next row in the alignment block or None if last row """
         return self._n_row
+
+    def left_row(self):
+        """ Get any left row in the prior alignment block """
+        return self._l_row
+
+    def right_row(self):
+        """ Get any right row in the next alignment block """
+        return self._r_row
 
     def __del__(self):
         lib.alignment_row_destruct(self._c_row)  # Cleans up the underlying C alignment structure
@@ -222,7 +231,7 @@ class AlignmentReader:
     """ Taf or maf alignment parser.
     """
 
-    def __init__(self, file, taf_index=None,  sequence_intervals=None):
+    def __init__(self, file, taf_index=None,  sequence_intervals=None, make_row_links=False):
         """
         :param file: File can be either a Python file handle or a string giving a path to the file.
         The underlying file can be either maf or taf. Handing in the file name is much faster as it avoids using a
@@ -232,10 +241,13 @@ class AlignmentReader:
         :param taf_index: A taf index object, which is specified allows the retrieval of subranges of the alignment.
         :param sequence_intervals: A sequence of one or more tuples, each of the form (sequence_name, start, length)
         that specify the range to retrieve. Will be retrieved in order.
+        :param make_row_links: Link rows adjacent together - use carefully as can cause the whole
+        alignment to be stored in memory
         """
         self.p_c_alignment = ffi.NULL  # The previous C alignment returned
         self.p_c_rows_to_py_rows = {}  # Hash from C rows to Python rows of the previous
         # alignment block, allowing linking of rows between blocks
+        self.make_row_links = make_row_links  # Optionally store links between rows
         self.file = file
         self.c_file_handle = _get_c_file_handle(file)
         self.file_string_not_handle = isinstance(file, str)  # Will be true if the file is a string, not a file handle
@@ -320,12 +332,18 @@ class AlignmentReader:
             lib.alignment_link_adjacent(self.p_c_alignment, c_alignment, 1)
 
         # Now add in the rows
-        c_row, p_py_row, first_py_row = c_alignment.row, None, None
+        c_row, p_py_row, c_rows_to_py_rows = c_alignment.row, None, {}
         while c_row != ffi.NULL:
-            # Make the Pythob row
-            py_row = Row(c_row=c_row)
-            if first_py_row is None:
-                first_py_row = py_row
+            # Make the Python row object
+            if c_row.l_row == ffi.NULL or not self.make_row_links:  # If there is no prior left row to connect to
+                py_row = Row(c_row=c_row)
+            else:  # Otherwise, there is a prior left row to connect to
+                l_py_row = self.p_c_rows_to_py_rows[c_row.l_row]
+                py_row = Row(c_row=c_row, l_row=l_py_row)
+                l_py_row._r_row = py_row
+
+            # Add to the map of c rows to python rows
+            c_rows_to_py_rows[c_row] = py_row
 
             # Connect the row object to the chain of row objects for the block
             if p_py_row is not None:
@@ -335,10 +353,11 @@ class AlignmentReader:
             c_row = c_row.n_row  # Move to the next row
 
         # Now convert the new alignment into Python
-        py_alignment = Alignment(c_alignment=c_alignment, py_row=first_py_row)
+        py_alignment = Alignment(c_alignment=c_alignment, py_row=c_rows_to_py_rows[c_alignment.row])
 
         # Set the new prior alignment / rows
         self.p_c_alignment = c_alignment
+        self.p_c_rows_to_py_rows = c_rows_to_py_rows
 
         return py_alignment
 
