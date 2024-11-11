@@ -9,6 +9,8 @@ import argparse
 import taffy.lib
 
 # Todos:
+# Fix 447 way dot plot?
+
 # Add support to show a wig and or bed
 # Make it easy to integrate into a Jupyter notebook
 
@@ -282,6 +284,15 @@ def main():
         sub_plot.set_title(seq_name, x=0.2, y=0.6)  # Show the sequence name within the plot
         sub_plot.set_xlim(0, total_ref_length + total_ref_gap_length)  # Set the x-axis scale
 
+        # Optionally, draw the sequence ends on the plot (these should be accurate with respect to bins)
+        if args.show_sequence_boundaries:
+            ref_offset = 0
+            for ref_seq_name, start, length in reference_sequence_intervals:
+                if ref_offset != 0:
+                    sub_plot.axvline(x=(ref_offset/total_ref_length) * (total_ref_length + total_ref_gap_length),
+                                     linewidth=0.5, linestyle='dashed', color='grey')
+                ref_offset += length
+
         # Plot the coverage as a blue points
         if not args.hide_coverage:
             color = '#0C7BDC'
@@ -344,12 +355,6 @@ def main():
                         subsequence_offsets[first_non_ref_row.sequence_name()] = non_ref_offset
                         non_ref_offset += first_non_ref_row.sequence_length()
 
-            # Optionally, draw the sequence ends on the plot
-            if args.show_sequence_boundaries:
-                for non_ref_seq_name, non_ref_offset in subsequence_offsets.items():
-                    if non_ref_offset != 0:
-                        sub_plot.axhline(y=non_ref_offset, linewidth=0.5, linestyle='dashed', color='grey')
-
             # Make a squashed dot plot to show the approx coordinate of the bin on the non-ref sequence(s)
             sub_plot_4 = sub_plot.twinx()
             forward_color, reverse_color = 'xkcd:blue green', 'xkcd:periwinkle'
@@ -376,13 +381,11 @@ def main():
             sub_plot_4.set_ylabel('non-ref position', color=forward_color)
             sub_plot_4.spines['right'].set_position(('outward', y_axis_offset))
 
-        # Optionally, draw the sequence ends on the plot
-        if args.show_sequence_boundaries:
-            ref_offset = 0
-            for ref_seq_name, start, length in reference_sequence_intervals:
-                if ref_offset != 0:
-                    sub_plot.axvline(x=ref_offset, linewidth=0.5, linestyle='dashed', color='grey')
-                ref_offset += length
+            # Optionally, draw the sequence ends on the plot
+            if args.show_sequence_boundaries:
+                for non_ref_seq_name, non_ref_offset in subsequence_offsets.items():
+                    if non_ref_offset != 0:
+                        sub_plot_4.axhline(y=non_ref_offset, linewidth=0.5, linestyle='dashed', color='grey')
 
     # Turn off the x-axis tick labels for everything except the last plot
     for sub_plot in sub_plots[:-1]:
