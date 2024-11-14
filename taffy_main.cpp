@@ -58,7 +58,7 @@ int main(int argc, char *argv[]) {
     } else if (strcmp(argv[1], "stats") == 0) {
         return taf_stats_main(argc - 1, argv + 1);
     } else if (strcmp(argv[1], "coverage") == 0) {
-        return taf_coverage_main(argc - 1, argv + 1);        
+        return taf_coverage_main(argc - 1, argv + 1);
     } else if (strcmp(argv[1], "annotate") == 0) {
         return taf_annotate_main(argc - 1, argv + 1);
     } else {

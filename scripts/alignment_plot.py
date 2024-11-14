@@ -9,9 +9,9 @@ import argparse
 import taffy.lib
 
 # Todos:
-# Fix 447 way dot plot?
 
-# Add support to show a wig and or bed
+# Add support to show alignment annotations
+# Add support for rearrangement bi-partite view
 # Make it easy to integrate into a Jupyter notebook
 
 def main():
@@ -116,6 +116,13 @@ def main():
         default=False,
         help="Show dotted lines to illustrate the boundaries between contigs"
     )
+    parser.add_argument(
+        "--output_format",
+        type=str,
+        default="pdf",
+        help="Output format for plot, works with pdf/png"
+    )
+
 
     # Parse arguments
     args = parser.parse_args()
@@ -396,7 +403,7 @@ def main():
 
     # If an output filename is given then save it as a PDF in that file
     if args.out_file:
-        plt.savefig(args.out_file, format="pdf", bbox_inches="tight")
+        plt.savefig(args.out_file, format=args.output_format, bbox_inches="tight")
     else:  # Otherwise, show it as a canvas
         plt.show()
 
