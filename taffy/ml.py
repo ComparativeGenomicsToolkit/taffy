@@ -1,3 +1,4 @@
+import taffy.lib
 from taffy.lib import AlignmentReader, get_column_iterator, get_window_iterator, TafIndex
 import torch
 import math
@@ -48,7 +49,7 @@ class TorchDatasetAlignmentIterator(torch.utils.data.IterableDataset):
     Returns columns (or windows of columns) and labels.
     """
     def __init__(self, alignment_file, label_conversion_function,
-                 taf_index_file=None, is_maf=False, sequence_intervals=None,
+                 taf_index_file=None, sequence_intervals=None,
                  window_length=1, step=1,
                  include_sequence_names=False,
                  include_non_ref_columns=True,
@@ -58,7 +59,6 @@ class TorchDatasetAlignmentIterator(torch.utils.data.IterableDataset):
         param alignment_file: Taf or maf file
         :param label_conversion_function Function to convert tuple label to appropriate value for Pytorch
         :param taf_index_file: Index file for alignment file (optional if sequence intervals is None)
-        :param is_maf: Used by Taf Index
         :param sequence_intervals: A sequence of reference sequence intervals, each a tuple of (sequence_name (string),
         start (int), length (int))
         :param window_length: Length of window of columns, must be > 0
@@ -70,9 +70,9 @@ class TorchDatasetAlignmentIterator(torch.utils.data.IterableDataset):
         super(TorchDatasetAlignmentIterator).__init__()
         self.alignment_file = alignment_file
         self.label_conversion_function = label_conversion_function
+        self.is_maf = taffy.lib.TafIndex.is_maf(alignment_file)
         self.taf_index_file = taf_index_file  # We pass in the file, not a TafIndex object to avoid trying to serialize
         # a TafIndex object, because pickling doesn't play nice with the C parts of the object through CFI
-        self.is_maf = is_maf
         self.sequence_intervals = sequence_intervals
         self.window_length = window_length
         self.step = step
@@ -96,7 +96,7 @@ class TorchDatasetAlignmentIterator(torch.utils.data.IterableDataset):
 
         # Make the alignment reader
         alignment_reader = AlignmentReader(file=self.alignment_file,
-                                           taf_index=TafIndex(file=self.taf_index_file, is_maf=self.is_maf) if
+                                           taf_index=TafIndex(index_file=self.taf_index_file, is_maf=self.is_maf) if
                                            self.taf_index_file is not None else None,
                                            sequence_intervals=subsequence_intervals)
         #  Create either a column or window iterator

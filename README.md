@@ -27,7 +27,13 @@ See [taffy utilities](https://github.com/ComparativeGenomicsToolkit/taffy/blob/m
  * [stats](https://github.com/ComparativeGenomicsToolkit/taffy/blob/main/docs/taffy_utilities.md#taffy-stats)   -       print statistics of a TAF file
  * [coverage](https://github.com/ComparativeGenomicsToolkit/taffy/blob/main/docs/taffy_utilities.md#taffy-coverage) -      print coverage statistics of a given genome in a TAF file
 
-## Using the Python API
+### Python scripts
+
+See [taffy scripts](https://github.com/ComparativeGenomicsToolkit/taffy/blob/main/docs/taffy_scripts.md) for a description of useful Python scripts, including:
+
+* [alignment plot](https://github.com/ComparativeGenomicsToolkit/taffy/blob/main/docs/taffy_scripts.md#alignment-plot)     -      A (relatively) fast MSA visualization, with coverage, copy-number, identity, and dotplot options.
+
+### Using the Python API
 
 See [using the Python API](https://github.com/ComparativeGenomicsToolkit/taffy/blob/main/docs/py_usage.md) for how to work with MAF/TAF alignments using a convenient Python API designed to complement the CLI.
 

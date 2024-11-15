@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "taffy"
-version = "0.0.2"
+version = "0.0.3"
 authors = [
   { name="Benedict Paten", email="bpaten@ucsc.edu" },
   { name="Glenn Hickey", email="glenn.hickey@gmail.com" },
@@ -13,7 +13,7 @@ description = "For manipulating taf and maf format alignments"
 readme = "README.md"
 requires-python = ">=3.7"
 dependencies = [
-    "cffi>=1.0.0", "numpy", "torch"
+    "cffi>=1.0.0", "numpy", "torch", "matplotlib"
 ]
 classifiers = [
     "Programming Language :: Python :: 3",

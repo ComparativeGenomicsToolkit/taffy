@@ -50,11 +50,13 @@ ancestors, and normalize by lineage mutations
     - Get architecture of model to be better (look at regression examples)
     - Get split of train and test working
 
+(19) [DONE] Break up the taffy docs into pages on different topics
+
 ---- In progress ---
 
-(19) Break up the taffy docs into pages on different topics
-
 (20) Push a new version of Taffy Python API.
+   - get versions working on ubuntu
+
 
 (21) [in progress] Get taffy working in colab
 

@@ -308,7 +308,6 @@ class TafTest(unittest.TestCase):
             ai = DataLoader(TorchDatasetAlignmentIterator(self.test_taf_file,
                                                           label_conversion_function=self.identity_fn,
                                                           taf_index_file=self.test_index_file,
-                                                          is_maf=not taf_not_maf,
                                                           sequence_intervals=sequence_intervals,
                                                           include_non_ref_columns=False,
                                                           include_sequence_names=True,
@@ -333,7 +332,6 @@ class TafTest(unittest.TestCase):
             ai = DataLoader(TorchDatasetAlignmentIterator(self.test_taf_file,
                                                           label_conversion_function=self.identity_fn,
                                                           taf_index_file=self.test_index_file,
-                                                          is_maf=not taf_not_maf,
                                                           sequence_intervals=sequence_intervals,
                                                           include_non_ref_columns=False,
                                                           include_sequence_names=True,
@@ -364,7 +362,6 @@ class TafTest(unittest.TestCase):
         test_taf_file = (pathlib.Path().absolute() / "../tests/evolverMammals.taf.mini.annotated").as_posix()
         ai = TorchDatasetAlignmentIterator(alignment_file=self.test_maf_file if is_maf else test_taf_file,
                                            label_conversion_function=self.identity_fn,
-                                           is_maf=is_maf,
                                            include_column_tags=True,
                                            column_one_hot=use_one_hot)
         ai = iter(ai)

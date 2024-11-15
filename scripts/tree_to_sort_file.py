@@ -9,7 +9,7 @@ import argparse
 
 def traverse_tree(phylo_tree, traversal_type, include_internal_labels=True, include_leaf_labels=True,
                   suffix_to_append_to_labels=""):
-    """ Gets a list of the labels in a tree in order of a traversl of the tree.
+    """ Gets a list of the labels in a tree in order of a traversal of the tree.
     """
     assert traversal_type in ("pre", "mid", "post")
     ordered_labels = []
