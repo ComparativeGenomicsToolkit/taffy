@@ -274,6 +274,12 @@ int taf_view_main(int argc, char *argv[]) {
             tag = tag_construct("run_length_encode_bases", "1", tag);
         }
     }
+
+    if (region && inputFile == NULL) {
+        fprintf(stderr, "An input file must be specified with -i in order to perform region queries.\n");
+        return 1;
+    }
+    
     if (maf_output) {
         maf_write_header(tag, output);
     } else if (taf_output) {
@@ -301,7 +307,7 @@ int taf_view_main(int argc, char *argv[]) {
         }
         
         st_logInfo("Region: contig=%s start=%" PRIi64 " length=%" PRIi64 "\n", region_seq, region_start, region_length);
-        
+
         char *tai_fn = tai_path(inputFile);        
         FILE *tai_fh = fopen(tai_fn, "r");
         

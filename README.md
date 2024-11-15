@@ -1,15 +1,15 @@
 # Taffy
 
-This is a MIT license C, Python and CLI library for manipulating/reading/writing [TAF](https://github.com/ComparativeGenomicsToolkit/taffy/docs/taf_format.md) (described below) and 
+This is a MIT licensed C and Python library with a CLI for manipulating/reading/writing [TAF](https://github.com/ComparativeGenomicsToolkit/taffy/blob/main/docs/taf_format.md) (described below) and 
 [MAF](https://genome.ucsc.edu/FAQ/FAQformat.html#format5) format multiple
 sequence alignments. It allows conversion between the formats and manipulation of the alignments with a number of useful utilities for preparing them for different use cases. The Python library is built
 on top of the C library and is therefore quite fast.
 
-###Taf Format Specification
+## Taf Format Specification
 
 See the [Taf format page](https://github.com/ComparativeGenomicsToolkit/taffy/blob/main/docs/taf_format.md) for a specification of the taf format and example.
 
-###Installation
+## Installation
 
 See [C/CLI Install](https://github.com/ComparativeGenomicsToolkit/taffy/blob/main/docs/c_cli_lib_install.md) for how to build and install this source for using the C library and CLI utilities.
 
@@ -27,7 +27,7 @@ See [taffy utilities](https://github.com/ComparativeGenomicsToolkit/taffy/blob/m
  * [stats](https://github.com/ComparativeGenomicsToolkit/taffy/blob/main/docs/taffy_utilities.md#taffy-stats)   -       print statistics of a TAF file
  * [coverage](https://github.com/ComparativeGenomicsToolkit/taffy/blob/main/docs/taffy_utilities.md#taffy-coverage) -      print coverage statistics of a given genome in a TAF file
 
-### Scripts
+### Python scripts
 
 See [taffy scripts](https://github.com/ComparativeGenomicsToolkit/taffy/blob/main/docs/taffy_scripts.md) for a description of useful Python scripts, including:
 
@@ -39,11 +39,11 @@ See [using the Python API](https://github.com/ComparativeGenomicsToolkit/taffy/b
 
 See [the example notebook](https://github.com/ComparativeGenomicsToolkit/taffy/blob/main/examples/learning_phlyoP.ipynb) for a quick worked example of using the Python API for machine learning with PyTorch.
 
-### Using the C Library
+## Using the C Library
 
 There is also a simple C library for working with taf/maf files. See taf.h in the
 inc directory.
 
-### Comparing MAF and TAF file sizes
+## Comparing MAF and TAF file sizes
 
 See [quick file size comparison](https://github.com/ComparativeGenomicsToolkit/taffy/blob/main/docs/comparison_stats.md).
