@@ -6,6 +6,7 @@
 #include <time.h>
 
 char *tai_path(const char *taf_path) {
+    assert(taf_path != NULL);
     char *ret = (char*)st_calloc(strlen(taf_path) + 5, sizeof(char));
     sprintf(ret, "%s.tai", taf_path);
     return ret;    
