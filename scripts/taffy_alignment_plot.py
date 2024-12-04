@@ -9,10 +9,9 @@ import argparse
 import taffy.lib
 
 # Todos:
-
 # Add support to show alignment annotations
-# Add support for rearrangement bi-partite view
 # Make it easy to integrate into a Jupyter notebook
+
 
 def main():
     # Set script arguments
@@ -105,6 +104,12 @@ def main():
         help="Show a dot plot of the alignment"
     )
     parser.add_argument(
+        "--show_synteny_plot",
+        action='store_true',
+        default=False,
+        help="Show a synteny of the alignment"
+    )
+    parser.add_argument(
         "--show_secondary_alignments",
         action='store_true',
         default=False,
@@ -122,7 +127,6 @@ def main():
         default="pdf",
         help="Output format for plot, works with pdf/png"
     )
-
 
     # Parse arguments
     args = parser.parse_args()
@@ -284,21 +288,21 @@ def main():
     # Bin coordinates gives the x-axis scale, where we account for the length of the skipped blocks, assuming
     # equally distributed among bins
     bin_coordinates = [i*((total_ref_length + total_ref_gap_length) / args.bin_number) for i in range(args.bin_number)]
-    for sub_plot, seq_name in zip(sub_plots, sampled_seq_names):
+    for plot_no, (sub_plot, seq_name) in enumerate(zip(sub_plots, sampled_seq_names)):
         bins = seq_name_to_bins[seq_name]
         matches = seq_name_to_matches[seq_name]
         max_alignments = max(1, max([len(runs) for runs in bins]))  # Maximum number of runs in any bin
-        sub_plot.set_title(seq_name, x=0.2, y=0.6)  # Show the sequence name within the plot
-        sub_plot.set_xlim(0, total_ref_length + total_ref_gap_length)  # Set the x-axis scale
+        sub_plot.set_title(seq_name, loc='left')  # Show the sequence name on the left of the plot
 
-        # Optionally, draw the sequence ends on the plot (these should be accurate with respect to bins)
-        if args.show_sequence_boundaries:
-            ref_offset = 0
-            for ref_seq_name, start, length in reference_sequence_intervals:
-                if ref_offset != 0:
-                    sub_plot.axvline(x=(ref_offset/total_ref_length) * (total_ref_length + total_ref_gap_length),
-                                     linewidth=0.5, linestyle='dashed', color='grey')
-                ref_offset += length
+        if plot_no == 0:  # If first plot, add a secondary x-axis and label at the top to indicate
+            # the coordinates of the reference
+            secax = sub_plot.secondary_xaxis('top')
+            secax.set_xlabel('Reference Position')
+            secax.set_xlim(0, total_ref_length + total_ref_gap_length)  # Set the x-axis scale for this secondary axis
+
+        sub_plot.set_xlim(0, total_ref_length + total_ref_gap_length)  # Set the x-axis scale
+        sub_plot.xaxis.tick_top()  # Try to put it at the top
+        sub_plot.xaxis.set_ticklabels([])  # Should hide the x-axis tick marks, but doesn't!
 
         # Plot the coverage as a blue points
         if not args.hide_coverage:
@@ -335,7 +339,6 @@ def main():
                                     linestyle="", markersize=1)  # Show the secondary points as triangles
 
             sub_plot_2.set_ylim(-0.05, 1+0.05)
-            sub_plot_2.set_title(seq_name, x=0.2, y=0.6)
             sub_plot_2.set_ylabel('identity', color=color)
             y_axis_offset = 40
 
@@ -350,18 +353,19 @@ def main():
             sub_plot_3.spines['right'].set_position(('outward', y_axis_offset))
             y_axis_offset += 40
 
-        if args.show_dot_plot:
+        if args.show_dot_plot or args.show_synteny_plot:
             # First calculate the sequence offset for each non-reference sequence, laying out the non reference
             # sequences in the order they are first traversed in the alignment
             subsequence_offsets = {}
             non_ref_offset = 0
             for i, runs in enumerate(bins):  # For each bin
                 for j, run in enumerate(runs):  # For each run
-                    first_non_ref_row = run[0][1]   # Get the first row
+                    first_non_ref_row = run[0][1]  # Get the first row
                     if first_non_ref_row.sequence_name() not in subsequence_offsets:
                         subsequence_offsets[first_non_ref_row.sequence_name()] = non_ref_offset
                         non_ref_offset += first_non_ref_row.sequence_length()
 
+        if args.show_dot_plot:
             # Make a squashed dot plot to show the approx coordinate of the bin on the non-ref sequence(s)
             sub_plot_4 = sub_plot.twinx()
             forward_color, reverse_color = 'xkcd:blue green', 'xkcd:periwinkle'
@@ -372,11 +376,12 @@ def main():
                     if j < len(runs):
                         first_non_ref_row = runs[j][0][1]
                         if first_non_ref_row.strand():
-                            dot_plot[i, :] = subsequence_offsets[first_non_ref_row.sequence_name()] + \
-                                             first_non_ref_row.start(), -1
+                            k = subsequence_offsets[first_non_ref_row.sequence_name()] + first_non_ref_row.start()
+                            dot_plot[i, :] = k, -1
                         else:
-                            dot_plot[i, :] = -1, subsequence_offsets[first_non_ref_row.sequence_name()] + \
-                                             first_non_ref_row.sequence_length() - first_non_ref_row.start()
+                            k = subsequence_offsets[first_non_ref_row.sequence_name()] + \
+                                first_non_ref_row.sequence_length() - first_non_ref_row.start()
+                            dot_plot[i, :] = -1, k
                     else:
                         dot_plot[i, :] = -1, -1
                 sub_plot_4.plot(bin_coordinates, dot_plot[:, 0], color=forward_color, marker='o' if j == 0 else 'v',
@@ -392,14 +397,75 @@ def main():
             if args.show_sequence_boundaries:
                 for non_ref_seq_name, non_ref_offset in subsequence_offsets.items():
                     if non_ref_offset != 0:
-                        sub_plot_4.axhline(y=non_ref_offset, linewidth=0.5, linestyle='dashed', color='grey')
+                        sub_plot_4.axhline(y=non_ref_offset, linewidth=0.25, linestyle='dashed', color='red')
 
-    # Turn off the x-axis tick labels for everything except the last plot
-    for sub_plot in sub_plots[:-1]:
-        sub_plot.set_xticklabels([])
+        if args.show_synteny_plot:
+            # Make a squashed dot plot to show the approx coordinate of the bin on the non-ref sequence(s)
+            sub_plot_5 = sub_plot.twiny()
+            max_non_ref_coordinate = 1  # Track the largest non-reference coordinate so that we can lay out the x-axis
+            colors = plt.cm.viridis(np.linspace(0, 1, args.bin_number))  # The color map for the lines
+            # (so they have a gradient)
+            lines = []  # A list of lines to plot
+            for j in range(max_alignments if args.show_secondary_alignments else 1):
+                for i, runs in enumerate(bins):
+                    if j < len(runs):
+                        first_non_ref_row = runs[j][0][1]
+                        if first_non_ref_row.strand():
+                            k = subsequence_offsets[first_non_ref_row.sequence_name()] + first_non_ref_row.start()
+                            assert k >= 0 and bin_coordinates[i] >= 0
+                            lines.append((bin_coordinates[i], k, i))
+                        else:
+                            k = subsequence_offsets[first_non_ref_row.sequence_name()] + \
+                                first_non_ref_row.sequence_length() - first_non_ref_row.start()
+                            assert k >= 0 and bin_coordinates[i] >= 0
+                            lines.append((bin_coordinates[i], k, i))
+                        max_non_ref_coordinate = max_non_ref_coordinate if max_non_ref_coordinate > k else k
 
-    # Label the bottom most axis
-    sub_plots[-1].set_xlabel('Reference Position')
+            # Get the total span needed for the x-axis
+            max_coordinate = total_ref_length + total_ref_gap_length
+            if max_coordinate < max_non_ref_coordinate:
+                max_coordinate = max_non_ref_coordinate
+
+            # Set the axis limits
+            sub_plot_5.set_xlim(-0.01, max_coordinate + 0.01)
+            sub_plot_5.set_ylim(0, 1)
+
+            # Mess with the labels
+            sub_plot_5.xaxis.tick_bottom()  # Make it so the ticks are at the bottom
+            sub_plot.xaxis.tick_top()  # Hide the default x-axis, again, because otherwise the call to twiny() (I think)
+            # makes it reappear
+            sub_plot.xaxis.set_ticklabels([])  # Again, should hide the x-axis tick marks (but doesn't)
+            # If this is the last plot, add the label
+            if plot_no+1 == len(sub_plots):
+                sub_plot_5.set_xlabel('Non Reference Position')
+                sub_plot_5.xaxis.set_label_position('bottom')
+
+            # Now add the lines
+            for (ref_pos, non_ref_pos, i) in lines:
+                sub_plot_5.axline((max_coordinate * ref_pos/(total_ref_length + total_ref_gap_length), 1),
+                                  (max_coordinate * non_ref_pos/max_non_ref_coordinate, 0), color=colors[i], alpha=0.6)
+
+            # Optionally, draw the non-reference sequence ends on the plot, in this case each is a vertical line
+            if args.show_sequence_boundaries:
+                for non_ref_seq_name, non_ref_offset in subsequence_offsets.items():
+                    if non_ref_offset != 0:
+                        sub_plot_5.axvline(x=max_coordinate * non_ref_offset/max_non_ref_coordinate,
+                                           linewidth=0.5, linestyle='dashed', color='red')
+
+        # Optionally, draw the reference sequence ends on the plot (these should be accurate with respect to bins)
+        if args.show_sequence_boundaries:
+            sub_plot_6 = sub_plot.twinx()
+            sub_plot_6.set_xlim(0, total_ref_length + total_ref_gap_length)
+            sub_plot_6.yaxis.set_visible(False)  # Hide the y-axis
+            ref_offset = 0
+            for ref_seq_name, start, length in reference_sequence_intervals:
+                if ref_offset != 0:
+                    sub_plot_6.axvline(x=(ref_offset/total_ref_length) * (total_ref_length + total_ref_gap_length),
+                                       linewidth=0.5, linestyle='dashed', color='orange')
+                ref_offset += length
+
+        if args.hide_coverage:
+            sub_plot.yaxis.set_visible(False)
 
     # If an output filename is given then save it as a PDF in that file
     if args.out_file:
