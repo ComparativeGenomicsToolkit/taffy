@@ -31,7 +31,7 @@ See [taffy utilities](https://github.com/ComparativeGenomicsToolkit/taffy/blob/m
 
 See [taffy scripts](https://github.com/ComparativeGenomicsToolkit/taffy/blob/main/docs/taffy_scripts.md) for a description of useful Python scripts, including:
 
-* [alignment plot](https://github.com/ComparativeGenomicsToolkit/taffy/blob/main/docs/taffy_scripts.md#alignment-plot)     -      A (relatively) fast MSA visualization, with coverage, copy-number, identity, and dotplot options.
+* [taffy alignment plot](https://github.com/ComparativeGenomicsToolkit/taffy/blob/main/docs/taffy_scripts.md#taffy-alignment-plot)     -      A (relatively) fast MSA visualization, with coverage, copy-number, identity, and dotplot options.
 
 ### Using the Python API
 

@@ -2,7 +2,7 @@
 
 All Taffy scripts are in the ./scripts directory.
 
-## Alignment-Plot
+## Taffy-Alignment-Plot
 
 For example, display an alignment:
 
