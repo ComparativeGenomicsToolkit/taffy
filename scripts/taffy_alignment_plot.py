@@ -119,7 +119,8 @@ def main():
         "--show_sequence_boundaries",
         action='store_true',
         default=False,
-        help="Show dotted lines to illustrate the boundaries between contigs"
+        help="Show dotted lines to illustrate the boundaries between contigs. Orange lines are breaks in the reference,"
+             "red lines are breaks in the non-reference sequence"
     )
     parser.add_argument(
         "--output_format",
