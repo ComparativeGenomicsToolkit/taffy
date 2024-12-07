@@ -7,10 +7,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import argparse
 import taffy.lib
+import logging
 
 # Todos:
 # Add support to show alignment annotations
 # Make it easy to integrate into a Jupyter notebook
+# Maf taffy detect missing files
+# Select specific seqs
 
 
 def main():
@@ -110,10 +113,35 @@ def main():
         help="Show a synteny of the alignment"
     )
     parser.add_argument(
+        "--synteny_plot_alpha",
+        type=float,
+        default=0.6,
+        help="The alpha value for drawing the lines on the synteny plot"
+    )
+    parser.add_argument(
+        "--filter_non_ref_long_gaps",
+        type=int,
+        default=100000,
+        help="In dot plot and synteny plot exclude non-reference sequence gaps longer than this threshold"
+    )
+    parser.add_argument(
         "--show_secondary_alignments",
         action='store_true',
         default=False,
         help="Show points for minor alignments per bin (shown as triangles instead of circles)"
+    )
+    parser.add_argument(
+        "--max_run_gap",
+        type=int,
+        default=100000,
+        help="Maximum distance between co-linear alignments to be chained together into a run"
+    )
+    parser.add_argument(
+        "--drop_secondary_run_shorter_than",
+        type=int,
+        default=0,
+        help="Drop any secondary run with fewer than this many aligned bases. Careful, this parameter is affected"
+             "by the choice of the number of bins and the block sampling rate"
     )
     parser.add_argument(
         "--show_sequence_boundaries",
@@ -128,9 +156,23 @@ def main():
         default="pdf",
         help="Output format for plot, works with pdf/png"
     )
+    parser.add_argument(
+        '-d', '--debug',
+        help="Print lots of debugging statements",
+        action="store_const", dest="loglevel", const=logging.DEBUG,
+        default=logging.WARNING,
+    )
+    parser.add_argument(
+        '-v', '--verbose',
+        help="Be verbose",
+        action="store_const", dest="loglevel", const=logging.INFO,
+    )
 
     # Parse arguments
     args = parser.parse_args()
+    logging.basicConfig(format="{asctime} - {levelname} - {message}",
+                        style="{", datefmt="%Y-%m-%d %H:%M:%S", level=args.loglevel)  # Configure logger
+    logging.info("Parsed arguments")
 
     # If we have a specific subregion of the alignment we wish to visualize
     if args.region:
@@ -208,9 +250,9 @@ def main():
             while len(sampled_seq_names) > args.max_sequences:  # If we got too many sequences/species remove
                 # until we have the correct number
                 sampled_seq_names.pop()
-
     # The total length of the sequence intervals
     total_ref_length = sum([length for sequence_name, start, length in reference_sequence_intervals])
+    logging.info(f"Read reference sequence intervals")
 
     # The size of each sequence bin
     bin_size = total_ref_length / args.bin_number
@@ -234,6 +276,7 @@ def main():
                     seq_name_to_bins[seq_name][int(ref_offset / bin_size)].append((ref_row, non_ref_row))
 
             ref_offset += ref_row.length()
+    logging.info(f"Partitioned alignment into bins")
 
     # Partition alignment rows in each bin into colinear intervals, each termed a run, such that two consecutive
     # rows with the same sequence, strand and in order are in the same interval
@@ -248,10 +291,12 @@ def main():
                 p_r = rows[0]  # The very first row
                 run = [p_r]  # Add the first row to the run
                 runs.append(run)  # Add the run to the list of runs
-                for c_r in rows[1:]:  # For the remaining rows, if same sequence, strand and right order
+                for c_r in rows[1:]:  # For the remaining rows, if same sequence, strand and right order and not
+                    # more than max run gap apart
                     if p_r[1].sequence_name() == c_r[1].sequence_name() and \
                             p_r[1].strand() == c_r[1].strand() and \
-                            p_r[1].start() + p_r[1].length() <= c_r[1].start():
+                            p_r[1].start() + p_r[1].length() <= c_r[1].start() <= \
+                            p_r[1].start() + p_r[1].length() + args.max_run_gap:
                         run.append(c_r)  # Append to current run
                     else:  # Otherwise, start a new run
                         run = [c_r]
@@ -259,6 +304,11 @@ def main():
                     p_r = c_r
                 # Sort in place to order runs from largest to smallest
                 runs.sort(key=lambda rs: sum([r[1].length() for r in rs]), reverse=True)
+                # Drop short runs
+                while len(runs) > 1 and sum([r[1].length() for r in runs[-1]]) < args.drop_secondary_run_shorter_than:
+                    # Drop secondary short runs
+                    runs.pop()
+    logging.info(f"Partitioned bins into runs")
 
     seq_name_to_matches = {}  # Map from seq names to array storing aligned bases and matches for each run
 
@@ -280,6 +330,7 @@ def main():
                                 if non_ref_base.upper() == ref_base.upper() or non_ref_base == '*':  # Identity
                                     matched_bases += 1
                 matches[i, j, 0], matches[i, j, 1] = aligned_bases, matched_bases
+    logging.info(f"Calculated alignment stats")
 
     # Now make the matplot lib plot
     fig, sub_plots = plt.subplots(len(sampled_seq_names), 1, layout='constrained', figsize=(12, 8))
@@ -355,16 +406,77 @@ def main():
             y_axis_offset += 40
 
         if args.show_dot_plot or args.show_synteny_plot:
-            # First calculate the sequence offset for each non-reference sequence, laying out the non reference
-            # sequences in the order they are first traversed in the alignment
-            subsequence_offsets = {}
-            non_ref_offset = 0
+            # Calculate the sequence offset for each non-reference sequence, laying out the non-reference
+            # sequences in the order they are first traversed in the alignment and chopping out any
+            # unaligned non-reference interval longer than a threshold number of bases in length
+            # (args.filter_non_ref_long_gaps)
+
+            # Collate the runs for each non-reference sequence
+            non_ref_seq_order = []  # The order of the non-reference sequences
+            non_ref_seqs_to_non_ref_runs = {}  # A map of non-reference sequence names to the alignment runs
+            # that include them
             for i, runs in enumerate(bins):  # For each bin
                 for j, run in enumerate(runs):  # For each run
-                    first_non_ref_row = run[0][1]  # Get the first row
-                    if first_non_ref_row.sequence_name() not in subsequence_offsets:
-                        subsequence_offsets[first_non_ref_row.sequence_name()] = non_ref_offset
-                        non_ref_offset += first_non_ref_row.sequence_length()
+                    first_non_ref_row, last_non_ref_row = run[0][1], run[-1][1]  # Get the first and last rows in run
+                    non_ref_seq_name = first_non_ref_row.sequence_name()  # The non reference sequence name
+
+                    # Sanity checks
+                    assert non_ref_seq_name == last_non_ref_row.sequence_name()  # These should be the same
+                    assert first_non_ref_row.strand() == last_non_ref_row.strand()  # They should be on the same strand
+
+                    # Get first and last base of the run on the forward strand
+                    if first_non_ref_row.strand():  # If on the forward strand
+                        non_ref_start = first_non_ref_row.start()  # Inclusive
+                        non_ref_end = last_non_ref_row.start() + last_non_ref_row.length()  # Exclusive
+                    else:  # On the negative strand, which means coordinates are with respect to the reverse complement
+                        # We want coordinates on the alignment run on the positive strand
+                        non_ref_start = first_non_ref_row.sequence_length() - \
+                                        last_non_ref_row.start() - last_non_ref_row.length()  # Inclusive
+                        non_ref_end = first_non_ref_row.sequence_length() - first_non_ref_row.start()  # Exclusive
+                    assert non_ref_start <= non_ref_end
+
+                    # If we haven't seen this non-reference sequence before
+                    if non_ref_seq_name not in non_ref_seqs_to_non_ref_runs:
+                        non_ref_seq_order.append(non_ref_seq_name)  # Add to order of non-ref sequences
+                        non_ref_seqs_to_non_ref_runs[non_ref_seq_name] = []  # Make a list to contain the runs aligned
+                        # to this non-ref sequence
+
+                    runs_for_seq = non_ref_seqs_to_non_ref_runs[non_ref_seq_name]  # Get the non-ref sequence's runs
+                    runs_for_seq.append((non_ref_start, non_ref_end, first_non_ref_row, last_non_ref_row))  # Add the
+                    # run
+
+            run_offsets = {}  # For each run, its coordinate on the non-reference sequence axis
+            non_ref_offset = 0  # Running coordinate we use for tracking non-reference runs
+            non_ref_sequence_offsets = []  # The start coordinate of each non-reference sequence along the non-ref
+            # axis
+            for non_ref_seq_name in non_ref_seq_order:  # For each non reference sequence in order
+                non_ref_sequence_offsets.append(non_ref_offset)  # Add the start coordinate of the non-reference seq
+                runs_for_seq = non_ref_seqs_to_non_ref_runs[non_ref_seq_name]  # The runs aligned to the non-ref seq
+                runs_for_seq.sort(key=lambda x: x[:2])  # Sort ascending by first two coordinates
+
+                i = 0  # Offset along the non-reference sequence including unaligned gaps
+                for non_ref_start, non_ref_end, first_non_ref_row, last_non_ref_row in runs_for_seq:  # For each run
+                    if non_ref_start < i:  # If the run starts before the current coordinate along the non-ref
+                        # sequence we have a duplication, this duplication must overlap a prior alignment and not
+                        # a gap because the sequences are sorted by non-ref start coordinate
+                        j = non_ref_offset - (i - non_ref_start)  # Coordinate, accounting for overlap
+                        assert j >= 0
+                        run_offsets[first_non_ref_row] = j  # Set the start coordinate of the start of the run
+                    else:  # Otherwise, the run starts after the end of the last run
+                        if non_ref_start - i > args.filter_non_ref_long_gaps:  # If the unaligned gap in non-reference
+                            # sequence is longer than our threshold, we ignore it
+                            logging.debug(f"Skipping {non_ref_start - i} non-reference bases, "
+                                          f"ref is {non_ref_offset} long")
+                            i = non_ref_start
+                        assert i <= non_ref_start
+                        non_ref_offset += non_ref_start - i  # Add in any unaligned gap smaller than our threshold
+                        run_offsets[first_non_ref_row] = non_ref_offset  # Now set the start
+                        # coordinate of the run
+
+                    if non_ref_end > i:  # If the run extends past the end of the current non-ref coordinate
+                        non_ref_offset += non_ref_end - i  # Increase the non ref coordinate to account for length
+                        # of the run
+                        i = non_ref_end
 
         if args.show_dot_plot:
             # Make a squashed dot plot to show the approx coordinate of the bin on the non-ref sequence(s)
@@ -377,11 +489,10 @@ def main():
                     if j < len(runs):
                         first_non_ref_row = runs[j][0][1]
                         if first_non_ref_row.strand():
-                            k = subsequence_offsets[first_non_ref_row.sequence_name()] + first_non_ref_row.start()
+                            k = run_offsets[first_non_ref_row]
                             dot_plot[i, :] = k, -1
                         else:
-                            k = subsequence_offsets[first_non_ref_row.sequence_name()] + \
-                                first_non_ref_row.sequence_length() - first_non_ref_row.start()
+                            k = run_offsets[first_non_ref_row]
                             dot_plot[i, :] = -1, k
                     else:
                         dot_plot[i, :] = -1, -1
@@ -396,7 +507,7 @@ def main():
 
             # Optionally, draw the sequence ends on the plot
             if args.show_sequence_boundaries:
-                for non_ref_seq_name, non_ref_offset in subsequence_offsets.items():
+                for non_ref_seq_name, non_ref_offset in zip(non_ref_seq_order, non_ref_sequence_offsets):
                     if non_ref_offset != 0:
                         sub_plot_4.axhline(y=non_ref_offset, linewidth=0.25, linestyle='dashed', color='red')
 
@@ -412,12 +523,11 @@ def main():
                     if j < len(runs):
                         first_non_ref_row = runs[j][0][1]
                         if first_non_ref_row.strand():
-                            k = subsequence_offsets[first_non_ref_row.sequence_name()] + first_non_ref_row.start()
+                            k = run_offsets[first_non_ref_row]
                             assert k >= 0 and bin_coordinates[i] >= 0
                             lines.append((bin_coordinates[i], k, i))
                         else:
-                            k = subsequence_offsets[first_non_ref_row.sequence_name()] + \
-                                first_non_ref_row.sequence_length() - first_non_ref_row.start()
+                            k = run_offsets[first_non_ref_row]
                             assert k >= 0 and bin_coordinates[i] >= 0
                             lines.append((bin_coordinates[i], k, i))
                         max_non_ref_coordinate = max_non_ref_coordinate if max_non_ref_coordinate > k else k
@@ -444,11 +554,12 @@ def main():
             # Now add the lines
             for (ref_pos, non_ref_pos, i) in lines:
                 sub_plot_5.axline((max_coordinate * ref_pos/(total_ref_length + total_ref_gap_length), 1),
-                                  (max_coordinate * non_ref_pos/max_non_ref_coordinate, 0), color=colors[i], alpha=0.6)
+                                  (max_coordinate * non_ref_pos/max_non_ref_coordinate, 0), color=colors[i],
+                                  alpha=args.synteny_plot_alpha)
 
             # Optionally, draw the non-reference sequence ends on the plot, in this case each is a vertical line
             if args.show_sequence_boundaries:
-                for non_ref_seq_name, non_ref_offset in subsequence_offsets.items():
+                for non_ref_seq_name, non_ref_offset in zip(non_ref_seq_order, non_ref_sequence_offsets):
                     if non_ref_offset != 0:
                         sub_plot_5.axvline(x=max_coordinate * non_ref_offset/max_non_ref_coordinate,
                                            linewidth=0.5, linestyle='dashed', color='red')
@@ -467,6 +578,8 @@ def main():
 
         if args.hide_coverage:
             sub_plot.yaxis.set_visible(False)
+
+        logging.info(f"Made subplot for {seq_name}")
 
     # If an output filename is given then save it as a PDF in that file
     if args.out_file:
