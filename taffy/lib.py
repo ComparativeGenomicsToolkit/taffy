@@ -204,6 +204,7 @@ class TafIndex:
 
     def __init__(self, index_file, is_maf):
         """ Load index from a file (index_file). Can be a file name or a Python file handle."""
+
         c_file_handle = _get_c_file_handle(index_file)
         self._c_taf_index = lib.tai_load(c_file_handle, is_maf)
         if isinstance(index_file, str):  # Close the underlying file handle if opened
