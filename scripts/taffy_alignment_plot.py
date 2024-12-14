@@ -13,7 +13,6 @@ import logging
 # Add support to show alignment annotations
 # Make it easy to integrate into a Jupyter notebook
 # Maf taffy detect missing files
-# Select specific seqs
 
 
 def main():
@@ -151,6 +150,18 @@ def main():
              "red lines are breaks in the non-reference sequence"
     )
     parser.add_argument(
+        "--show_self_alignments",
+        action='store_true',
+        default=False,
+        help="Include as a non-reference sequence the reference, in order to show self alignments"
+    )
+    parser.add_argument(
+        "--show_these_sequences",
+        type=str,
+        default=None,
+        help="Include the list of species as non-reference rows. This overrides the sampling behavior."
+    )
+    parser.add_argument(
         "--output_format",
         type=str,
         default="pdf",
@@ -199,6 +210,11 @@ def main():
     total_ref_gap_length = 0  # Calculate bases in blocks that are skipped by any sampling
     reference_sequence_intervals = []  # List of reference sequence intervals that we'll build
     seq_name_to_coverage = {}  # Map of total aligned bases for each non-ref row, used to choose which rows to display
+    ref_species_name = None  # Variable to store the name of the reference species - used for titling plot and
+    # detecting self alignments
+    if args.show_these_sequences:
+        non_ref_sequences = args.show_these_sequences.split()
+        logging.info(f"Selecting {args.show_these_sequences} as non-reference sequences")
     with taffy.lib.AlignmentReader(args.alignment_file, sequence_intervals=sequence_intervals,
                                    taf_index=taf_index) as ar:
         for i, block in enumerate(ar):  # For each block in alignment
@@ -210,6 +226,9 @@ def main():
             # First (1), get the reference sequence intervals
             ref_row = block.first_row()  # Get reference row
             seq_name = ref_row.sequence_name()  # Get the reference row sequence name
+            if ref_species_name is None:
+                ref_species_name = seq_name.split(args.species_delimiter)[0]
+                logging.info(f"Detected reference species name is: {ref_species_name}")
             if seq_name != p_ref_seq:  # If we have a new reference sequence
                 if p_ref_seq is not None:  # If there is a previous reference sequence, add it to the list
                     reference_sequence_intervals.append((p_ref_seq, p_ref_start, p_ref_length))
@@ -222,20 +241,31 @@ def main():
             # (2) Now build a map of non-reference sequences to alignment coverage
             for non_ref_row in list(block)[1:]:  # For each non-reference row
                 seq_name = get_seq_name_for_row(non_ref_row)
-                if seq_name not in seq_name_to_coverage:
-                    seq_name_to_coverage[seq_name] = 0
-                # Add to coverage map
-                seq_name_to_coverage[seq_name] += non_ref_row.length()
+                if args.show_these_sequences:  # If selecting a specified set of sequences
+                    if seq_name in non_ref_sequences:  # If it is one of the chosen sequences
+                        if seq_name not in seq_name_to_coverage:
+                            seq_name_to_coverage[seq_name] = 0
+                        # Add to coverage map
+                        seq_name_to_coverage[seq_name] += non_ref_row.length()
+                # Otherwise consider all sequences, but..
+                elif seq_name != ref_species_name or args.show_self_alignments:  # Only consider non-self alignments
+                    # unless option is specified
+                    if seq_name not in seq_name_to_coverage:
+                        seq_name_to_coverage[seq_name] = 0
+                    # Add to coverage map
+                    seq_name_to_coverage[seq_name] += non_ref_row.length()
 
         if p_ref_seq is not None:  # Don't forget the last interval
             reference_sequence_intervals.append((p_ref_seq, p_ref_start, p_ref_length))
 
     # Sort the non-ref aligned sequences by coverage (with the highest coverage first, then decreasing)
     ordered_seq_names = sorted([seq_name for seq_name in seq_name_to_coverage],
-                               key=lambda x: -seq_name_to_coverage[seq_name])
+                               key=lambda x: -seq_name_to_coverage[x])
 
     # Subsample which sequences to show if fewer than total number of rows requested
-    if args.sample_highest_coverage:  # Pick the highest coverage args.max_sequences row
+    if args.show_these_sequences:  # Option we have prespecified the sequences
+        sampled_seq_names = ordered_seq_names
+    elif args.sample_highest_coverage:  # Pick the highest coverage args.max_sequences row
         if len(ordered_seq_names) > args.max_sequences:
             sampled_seq_names = ordered_seq_names[:args.max_sequences]
         else:
@@ -311,26 +341,26 @@ def main():
     logging.info(f"Partitioned bins into runs")
 
     seq_name_to_matches = {}  # Map from seq names to array storing aligned bases and matches for each run
-
     # Calculate the number of aligned and matched bases for each run
-    for seq_name, bins in seq_name_to_bins.items():
-        # First get max # of runs
-        max_runs = max(len(runs) for runs in bins)
-        # Now make arrays for matches / mismatches
-        matches = np.zeros((args.bin_number, max_runs, 2))  # Indexed bin #, run #, [aligned bases, matched bases]
-        seq_name_to_matches[seq_name] = matches
-        for i, runs in enumerate(bins):  # For each bin
-            for j, run in enumerate(runs):
-                aligned_bases, matched_bases = 0, 0
-                for ref_row, non_ref_row in run:
-                    for ref_base, non_ref_base in zip(ref_row.bases(), non_ref_row.bases()):
-                        if ref_base != '-':
-                            if non_ref_base != '-':  # Coverage
-                                aligned_bases += 1
-                                if non_ref_base.upper() == ref_base.upper() or non_ref_base == '*':  # Identity
-                                    matched_bases += 1
-                matches[i, j, 0], matches[i, j, 1] = aligned_bases, matched_bases
-    logging.info(f"Calculated alignment stats")
+    if not args.hide_coverage or args.show_identity:  # This is slow, so only complete the map if needed
+        for seq_name, bins in seq_name_to_bins.items():
+            # First get max # of runs
+            max_runs = max(len(runs) for runs in bins)
+            # Now make arrays for matches / mismatches
+            matches = np.zeros((args.bin_number, max_runs, 2))  # Indexed bin #, run #, [aligned bases, matched bases]
+            seq_name_to_matches[seq_name] = matches
+            for i, runs in enumerate(bins):  # For each bin
+                for j, run in enumerate(runs):
+                    aligned_bases, matched_bases = 0, 0
+                    for ref_row, non_ref_row in run:
+                        for ref_base, non_ref_base in zip(ref_row.bases(), non_ref_row.bases()):
+                            if ref_base != '-':
+                                if non_ref_base != '-':  # Coverage
+                                    aligned_bases += 1
+                                    if non_ref_base.upper() == ref_base.upper() or non_ref_base == '*':  # Identity
+                                        matched_bases += 1
+                    matches[i, j, 0], matches[i, j, 1] = aligned_bases, matched_bases
+        logging.info(f"Calculated alignment stats")
 
     # Now make the matplot lib plot
     fig, sub_plots = plt.subplots(len(sampled_seq_names), 1, layout='constrained', figsize=(12, 8))
@@ -342,14 +372,13 @@ def main():
     bin_coordinates = [i*((total_ref_length + total_ref_gap_length) / args.bin_number) for i in range(args.bin_number)]
     for plot_no, (sub_plot, seq_name) in enumerate(zip(sub_plots, sampled_seq_names)):
         bins = seq_name_to_bins[seq_name]
-        matches = seq_name_to_matches[seq_name]
         max_alignments = max(1, max([len(runs) for runs in bins]))  # Maximum number of runs in any bin
         sub_plot.set_title(seq_name, loc='left')  # Show the sequence name on the left of the plot
 
         if plot_no == 0:  # If first plot, add a secondary x-axis and label at the top to indicate
             # the coordinates of the reference
             secax = sub_plot.secondary_xaxis('top')
-            secax.set_xlabel('Reference Position')
+            secax.set_xlabel(f'Reference Position ({ref_species_name})')
             secax.set_xlim(0, total_ref_length + total_ref_gap_length)  # Set the x-axis scale for this secondary axis
 
         sub_plot.set_xlim(0, total_ref_length + total_ref_gap_length)  # Set the x-axis scale
@@ -358,6 +387,7 @@ def main():
 
         # Plot the coverage as a blue points
         if not args.hide_coverage:
+            matches = seq_name_to_matches[seq_name]
             color = '#0C7BDC'
             sub_plot.plot(bin_coordinates, matches[:, 0, 0]/bin_size, color=color, marker='o',
                           linestyle="", markersize=1)
@@ -378,6 +408,7 @@ def main():
         if args.show_identity:
             color = '#FFC20A'
             sub_plot_2 = sub_plot.twinx()
+            matches = seq_name_to_matches[seq_name]
             a = matches[:, 0, 1]/(matches[:, 0, 0] + 0.0001)
             sub_plot_2.plot(bin_coordinates, a, color=color, marker='o', linestyle="",
                             markersize=1)  # Make the identity squiggle slightly opaque
@@ -415,8 +446,13 @@ def main():
             non_ref_seq_order = []  # The order of the non-reference sequences
             non_ref_seqs_to_non_ref_runs = {}  # A map of non-reference sequence names to the alignment runs
             # that include them
-            for i, runs in enumerate(bins):  # For each bin
-                for j, run in enumerate(runs):  # For each run
+            for j in range(max_alignments if args.show_secondary_alignments else 1):  # From largest to smallest
+                # alignments, we iterate this way so we order the non-reference sequences first by the "primary"
+                # alignments and then the smaller alignments
+                for i, runs in enumerate(bins):  # For each bin
+                    if j >= len(runs):  # If no run of this index
+                        continue  # Go to next bin
+                    run = runs[j]  # Get the run
                     first_non_ref_row, last_non_ref_row = run[0][1], run[-1][1]  # Get the first and last rows in run
                     non_ref_seq_name = first_non_ref_row.sequence_name()  # The non reference sequence name
 
@@ -452,7 +488,7 @@ def main():
             for non_ref_seq_name in non_ref_seq_order:  # For each non reference sequence in order
                 non_ref_sequence_offsets.append(non_ref_offset)  # Add the start coordinate of the non-reference seq
                 runs_for_seq = non_ref_seqs_to_non_ref_runs[non_ref_seq_name]  # The runs aligned to the non-ref seq
-                runs_for_seq.sort(key=lambda x: x[:2])  # Sort ascending by first two coordinates
+                runs_for_seq.sort(key=lambda x: x[:2])  # Sort ascending by start/end coordinates on forward strand
 
                 i = 0  # Offset along the non-reference sequence including unaligned gaps
                 for non_ref_start, non_ref_end, first_non_ref_row, last_non_ref_row in runs_for_seq:  # For each run
@@ -505,11 +541,17 @@ def main():
             sub_plot_4.set_ylabel('non-ref position', color=forward_color)
             sub_plot_4.spines['right'].set_position(('outward', y_axis_offset))
 
-            # Optionally, draw the sequence ends on the plot
+            # Optionally, draw the sequence ends on the plot for both reference and non-reference sequences
             if args.show_sequence_boundaries:
                 for non_ref_seq_name, non_ref_offset in zip(non_ref_seq_order, non_ref_sequence_offsets):
                     if non_ref_offset != 0:
                         sub_plot_4.axhline(y=non_ref_offset, linewidth=0.25, linestyle='dashed', color='red')
+                ref_offset = 0
+                for ref_seq_name, start, length in reference_sequence_intervals:
+                    if ref_offset != 0:
+                        sub_plot_4.axvline(x=(ref_offset/total_ref_length) * (total_ref_length + total_ref_gap_length),
+                                           linewidth=0.5, linestyle='dashed', color='orange')
+                    ref_offset += length
 
         if args.show_synteny_plot:
             # Make a squashed dot plot to show the approx coordinate of the bin on the non-ref sequence(s)
@@ -538,43 +580,43 @@ def main():
                 max_coordinate = max_non_ref_coordinate
 
             # Set the axis limits
-            sub_plot_5.set_xlim(-0.01, max_coordinate + 0.01)
+            sub_plot_5.set_xlim(0.0, 1.0)
             sub_plot_5.set_ylim(0, 1)
 
-            # Mess with the labels
-            sub_plot_5.xaxis.tick_bottom()  # Make it so the ticks are at the bottom
-            sub_plot.xaxis.tick_top()  # Hide the default x-axis, again, because otherwise the call to twiny() (I think)
-            # makes it reappear
-            sub_plot.xaxis.set_ticklabels([])  # Again, should hide the x-axis tick marks (but doesn't)
+            sub_plot_6 = sub_plot.twiny()
+            sub_plot_6.set_xlim(0.0, max_coordinate)
+            sub_plot_6.xaxis.tick_bottom()  # Make it so the ticks are at the bottom
             # If this is the last plot, add the label
             if plot_no+1 == len(sub_plots):
-                sub_plot_5.set_xlabel('Non Reference Position')
-                sub_plot_5.xaxis.set_label_position('bottom')
+                sub_plot_6.set_xlabel('Non Reference Position')
+                sub_plot_6.xaxis.set_label_position('bottom')
+
+            # Mess with the labels
+            sub_plot.xaxis.tick_top()  # Hide the default x-axis, again, because otherwise the call to twiny() (I think)
+            # makes it reappear
+            sub_plot_5.xaxis.tick_top()
+            sub_plot.xaxis.set_ticklabels([])  # Again, should hide the x-axis tick marks (but doesn't)
+            sub_plot_5.xaxis.set_ticklabels([])
 
             # Now add the lines
             for (ref_pos, non_ref_pos, i) in lines:
-                sub_plot_5.axline((max_coordinate * ref_pos/(total_ref_length + total_ref_gap_length), 1),
-                                  (max_coordinate * non_ref_pos/max_non_ref_coordinate, 0), color=colors[i],
+                sub_plot_5.axline((ref_pos/(total_ref_length + total_ref_gap_length), 1),
+                                  (non_ref_pos/max_non_ref_coordinate, 0), color=colors[i],
                                   alpha=args.synteny_plot_alpha)
 
-            # Optionally, draw the non-reference sequence ends on the plot, in this case each is a vertical line
+            # Optionally, draw the reference and non-reference sequence ends on the plot,
+            # in this case each is a vertical line
             if args.show_sequence_boundaries:
                 for non_ref_seq_name, non_ref_offset in zip(non_ref_seq_order, non_ref_sequence_offsets):
                     if non_ref_offset != 0:
-                        sub_plot_5.axvline(x=max_coordinate * non_ref_offset/max_non_ref_coordinate,
+                        sub_plot_5.axvline(x=non_ref_offset/max_non_ref_coordinate,
                                            linewidth=0.5, linestyle='dashed', color='red')
-
-        # Optionally, draw the reference sequence ends on the plot (these should be accurate with respect to bins)
-        if args.show_sequence_boundaries:
-            sub_plot_6 = sub_plot.twinx()
-            sub_plot_6.set_xlim(0, total_ref_length + total_ref_gap_length)
-            sub_plot_6.yaxis.set_visible(False)  # Hide the y-axis
-            ref_offset = 0
-            for ref_seq_name, start, length in reference_sequence_intervals:
-                if ref_offset != 0:
-                    sub_plot_6.axvline(x=(ref_offset/total_ref_length) * (total_ref_length + total_ref_gap_length),
-                                       linewidth=0.5, linestyle='dashed', color='orange')
-                ref_offset += length
+                ref_offset = 0
+                for ref_seq_name, start, length in reference_sequence_intervals:
+                    if ref_offset != 0:
+                        sub_plot_5.axvline(x=ref_offset/total_ref_length,
+                                           linewidth=0.5, linestyle='dashed', color='orange')
+                    ref_offset += length
 
         if args.hide_coverage:
             sub_plot.yaxis.set_visible(False)
