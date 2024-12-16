@@ -8,6 +8,7 @@ import numpy as np
 import argparse
 import taffy.lib
 import logging
+import statistics
 
 # Todos:
 # Add support to show alignment annotations
@@ -442,16 +443,36 @@ def main():
             # unaligned non-reference interval longer than a threshold number of bases in length
             # (args.filter_non_ref_long_gaps)
 
+            # First figure out the orientation to plot each non-reference sequence, attempting to minimize unneeded
+            # inversions in the display (i.e. where the whole sequence is inverted)
+            non_ref_seqs_to_orientation = {}  # A map of non-reference sequence names to the number of runs on the
+            # forward strand vs. the negative strand. Each key is a list of the form [ forward, reverse ]
+            for i, runs in enumerate(bins):  # For each bin
+                for j in range(len(runs) if args.show_secondary_alignments or len(runs) == 0 else 1):
+                    run = runs[j]  # Get the run
+                    first_non_ref_row = run[0][1]
+                    non_ref_seq_name = first_non_ref_row.sequence_name()  # The non reference sequence name
+
+                    # If we haven't seen this non-reference sequence before
+                    if non_ref_seq_name not in non_ref_seqs_to_orientation:
+                        non_ref_seqs_to_orientation[non_ref_seq_name] = [0, 0]  # Add an empty entry for the sequence
+                        # to count the forward and reverse alignments
+
+                    if first_non_ref_row.strand():  # If non-ref run is on the forward strand
+                        non_ref_seqs_to_orientation[non_ref_seq_name][0] += 1  # Add to the # of forward runs
+                    else:  # On the negative strand, which means coordinates are with respect to the reverse complement
+                        non_ref_seqs_to_orientation[non_ref_seq_name][1] += 1  # Add to the # of reverse aligned runs
+
+            # Pick the majority orientation for each sequence
+            for non_ref_seq_name in non_ref_seqs_to_orientation:
+                forward_runs, reverse_runs = non_ref_seqs_to_orientation[non_ref_seq_name]
+                non_ref_seqs_to_orientation[non_ref_seq_name] = forward_runs >= reverse_runs
+
             # Collate the runs for each non-reference sequence
-            non_ref_seq_order = []  # The order of the non-reference sequences
-            non_ref_seqs_to_non_ref_runs = {}  # A map of non-reference sequence names to the alignment runs
-            # that include them
-            for j in range(max_alignments if args.show_secondary_alignments else 1):  # From largest to smallest
-                # alignments, we iterate this way so we order the non-reference sequences first by the "primary"
-                # alignments and then the smaller alignments
-                for i, runs in enumerate(bins):  # For each bin
-                    if j >= len(runs):  # If no run of this index
-                        continue  # Go to next bin
+            non_ref_seqs_to_non_ref_runs = {}  # A map of non-reference sequence names to the alignment runs that
+            # include them
+            for i, runs in enumerate(bins):  # For each bin
+                for j in range(len(runs) if args.show_secondary_alignments or len(runs) == 0 else 1):
                     run = runs[j]  # Get the run
                     first_non_ref_row, last_non_ref_row = run[0][1], run[-1][1]  # Get the first and last rows in run
                     non_ref_seq_name = first_non_ref_row.sequence_name()  # The non reference sequence name
@@ -460,26 +481,44 @@ def main():
                     assert non_ref_seq_name == last_non_ref_row.sequence_name()  # These should be the same
                     assert first_non_ref_row.strand() == last_non_ref_row.strand()  # They should be on the same strand
 
-                    # Get first and last base of the run on the forward strand
-                    if first_non_ref_row.strand():  # If on the forward strand
+                    # If we haven't seen this non-reference sequence before
+                    if non_ref_seq_name not in non_ref_seqs_to_non_ref_runs:
+                        non_ref_seqs_to_non_ref_runs[non_ref_seq_name] = []
+
+                    # Get first and last base of the run on the chosen strand
+                    if (non_ref_seqs_to_orientation[non_ref_seq_name] and first_non_ref_row.strand()) or \
+                       (not non_ref_seqs_to_orientation[non_ref_seq_name] and not first_non_ref_row.strand()):
+                        # If chosen orientation is forward and on the forward strand or
+                        # chosen orientation is negative and run coordinates already on the reverse strand
                         non_ref_start = first_non_ref_row.start()  # Inclusive
                         non_ref_end = last_non_ref_row.start() + last_non_ref_row.length()  # Exclusive
-                    else:  # On the negative strand, which means coordinates are with respect to the reverse complement
-                        # We want coordinates on the alignment run on the positive strand
+                    else:  # Chosen orientation is forward but run is on the negative strand,
+                        # which means coordinates are with respect to the reverse complement
+                        # Or chosen orientation is reverse and the coordinates of run are on the forward strand,
+                        # in both cases causing us to flip the coordinates of the strand
                         non_ref_start = first_non_ref_row.sequence_length() - \
                                         last_non_ref_row.start() - last_non_ref_row.length()  # Inclusive
                         non_ref_end = first_non_ref_row.sequence_length() - first_non_ref_row.start()  # Exclusive
                     assert non_ref_start <= non_ref_end
 
-                    # If we haven't seen this non-reference sequence before
-                    if non_ref_seq_name not in non_ref_seqs_to_non_ref_runs:
-                        non_ref_seq_order.append(non_ref_seq_name)  # Add to order of non-ref sequences
-                        non_ref_seqs_to_non_ref_runs[non_ref_seq_name] = []  # Make a list to contain the runs aligned
-                        # to this non-ref sequence
-
                     runs_for_seq = non_ref_seqs_to_non_ref_runs[non_ref_seq_name]  # Get the non-ref sequence's runs
-                    runs_for_seq.append((non_ref_start, non_ref_end, first_non_ref_row, last_non_ref_row))  # Add the
-                    # run
+                    # Add the run to the list of runs for the non-ref sequence
+                    runs_for_seq.append((non_ref_start, non_ref_end, first_non_ref_row, last_non_ref_row, i, j == 0))
+
+            # Now order the non-reference sequences according to their median position in terms of bins
+            # If there are primary runs then only these runs are used to choose the position, otherwise all
+            # runs are used
+            non_ref_seq_order = list(non_ref_seqs_to_non_ref_runs.keys())  # The order of the non-reference sequences
+            ref_positions = {}  # For purposes of sorting, we create a map from the non-ref-seq name to its median
+            # run bin along the reference
+            for non_ref_seq_name in non_ref_seq_order:
+                runs = non_ref_seqs_to_non_ref_runs[non_ref_seq_name]  # The runs for the non-ref seq
+                run_positions = [run[-2] for run in runs if run[-1]]  # Try getting just the primary runs to pick the
+                # position of the sequence
+                if len(run_positions) == 0:  # If no primary runs, then consider all runs
+                    run_positions = [run[-2] for run in runs]
+                ref_positions[non_ref_seq_name] = statistics.median(run_positions)
+            non_ref_seq_order.sort(key=lambda x: ref_positions[x])
 
             run_offsets = {}  # For each run, its coordinate on the non-reference sequence axis
             non_ref_offset = 0  # Running coordinate we use for tracking non-reference runs
@@ -491,7 +530,8 @@ def main():
                 runs_for_seq.sort(key=lambda x: x[:2])  # Sort ascending by start/end coordinates on forward strand
 
                 i = 0  # Offset along the non-reference sequence including unaligned gaps
-                for non_ref_start, non_ref_end, first_non_ref_row, last_non_ref_row in runs_for_seq:  # For each run
+                # For each run
+                for non_ref_start, non_ref_end, first_non_ref_row, last_non_ref_row, bin_no, is_primary in runs_for_seq:
                     if non_ref_start < i:  # If the run starts before the current coordinate along the non-ref
                         # sequence we have a duplication, this duplication must overlap a prior alignment and not
                         # a gap because the sequences are sorted by non-ref start coordinate
@@ -524,7 +564,9 @@ def main():
                 for i, runs in enumerate(bins):
                     if j < len(runs):
                         first_non_ref_row = runs[j][0][1]
-                        if first_non_ref_row.strand():
+                        non_ref_seq_name = first_non_ref_row.sequence_name()
+                        if (first_non_ref_row.strand() and non_ref_seqs_to_orientation[non_ref_seq_name]) or \
+                           (not first_non_ref_row.strand() and not non_ref_seqs_to_orientation[non_ref_seq_name]):
                             k = run_offsets[first_non_ref_row]
                             dot_plot[i, :] = k, -1
                         else:
@@ -564,14 +606,9 @@ def main():
                 for i, runs in enumerate(bins):
                     if j < len(runs):
                         first_non_ref_row = runs[j][0][1]
-                        if first_non_ref_row.strand():
-                            k = run_offsets[first_non_ref_row]
-                            assert k >= 0 and bin_coordinates[i] >= 0
-                            lines.append((bin_coordinates[i], k, i))
-                        else:
-                            k = run_offsets[first_non_ref_row]
-                            assert k >= 0 and bin_coordinates[i] >= 0
-                            lines.append((bin_coordinates[i], k, i))
+                        k = run_offsets[first_non_ref_row]
+                        assert k >= 0 and bin_coordinates[i] >= 0
+                        lines.append((bin_coordinates[i], k, i))
                         max_non_ref_coordinate = max_non_ref_coordinate if max_non_ref_coordinate > k else k
 
             # Get the total span needed for the x-axis
