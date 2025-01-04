@@ -39,6 +39,10 @@ See [using the Python API](https://github.com/ComparativeGenomicsToolkit/taffy/b
 
 See [the example notebook](https://github.com/ComparativeGenomicsToolkit/taffy/blob/main/examples/learning_phlyoP.ipynb) for a quick worked example of using the Python API for machine learning with PyTorch.
 
+### Third-party tools
+
+- JBrowse 2 with mafviewer plugin has TAF support https://github.com/cmdcolin/jbrowse-plugin-mafviewer
+
 ## Using the C Library
 
 There is also a simple C library for working with taf/maf files. See taf.h in the
