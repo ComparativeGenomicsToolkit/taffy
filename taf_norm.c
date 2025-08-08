@@ -317,7 +317,11 @@ int taf_norm_main(int argc, char *argv[]) {
         if(p_alignment != NULL) {
             // First realign the rows in case we in the process of merging prior blocks we have
             // identified rows that can be merged
-            alignment_link_adjacent(p_alignment, alignment, 1);
+
+            // Do not allow row substitutions when linking two blocks to merge, because
+            // substitutions costing half indels can mask true row matches, leading to repeat rows
+            // of the same sequence within a merged block.
+            alignment_link_adjacent(p_alignment, alignment, 0);
 
             bool merged = false;
             int64_t common_rows = alignment_number_of_common_rows(p_alignment, alignment);
@@ -342,6 +346,8 @@ int taf_norm_main(int argc, char *argv[]) {
                 }
             }
             if (!merged) {
+                // If being output as separate blocks, relink allowing row substitutions, as this may produce a smaller file
+                alignment_link_adjacent(p_alignment, alignment, 1);
                 output_maf ? maf_write_block(p_alignment, output) : taf_write_block(p_p_alignment, p_alignment, run_length_encode_bases, repeat_coordinates_every_n_columns, output); // Write the maf block
                 if(p_p_alignment != NULL) {
                     alignment_destruct(p_p_alignment, 1); // Clean up the left-most block
