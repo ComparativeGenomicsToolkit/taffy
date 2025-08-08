@@ -13,7 +13,6 @@ import statistics
 # Todos:
 # Add support to show alignment annotations
 # Make it easy to integrate into a Jupyter notebook
-# Maf taffy detect missing files
 
 
 def main():
@@ -248,7 +247,7 @@ def main():
                             seq_name_to_coverage[seq_name] = 0
                         # Add to coverage map
                         seq_name_to_coverage[seq_name] += non_ref_row.length()
-                # Otherwise consider all sequences, but..
+                # Otherwise, consider all sequences, but..
                 elif seq_name != ref_species_name or args.show_self_alignments:  # Only consider non-self alignments
                     # unless option is specified
                     if seq_name not in seq_name_to_coverage:
@@ -288,6 +287,9 @@ def main():
     # The size of each sequence bin
     bin_size = total_ref_length / args.bin_number
 
+    # Reads the specified alignments (using alignment_file, sequence_intervals, taf_index, seq_names)
+    # into a series of bins, ordered by reference sequence.
+
     # For each species, build a partition of the alignment rows into bins
     seq_name_to_bins = {i: [[] for j in range(args.bin_number)] for i in sampled_seq_names}  # Map from seq
     # names to the bins for a row
@@ -317,7 +319,7 @@ def main():
             runs = []  # The set of runs is a list, representing a partition of the rows
             bins[i] = runs  # Replace the list of rows with list of runs
             if len(rows):  # If there is at least one alignment row
-                # Sort alignment rows in bin so that consecutive rows are adjacent
+                # Sort alignment rows in a bin so that consecutive rows are adjacent
                 rows.sort(key=lambda r: (r[1].sequence_name(), r[1].strand(), r[1].start()))
                 p_r = rows[0]  # The very first row
                 run = [p_r]  # Add the first row to the run
