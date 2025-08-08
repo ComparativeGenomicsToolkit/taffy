@@ -1,6 +1,6 @@
 from taffy._taffy_cffi import ffi, lib
 import numpy as np
-import torch
+from pathlib import Path
 from collections import deque
 
 def _to_py_string(s):
@@ -33,6 +33,14 @@ def _dictionary_to_c_tags(tags):
             p_c_tag.n_tag = c_tag
         p_c_tag = c_tag
     return first_c_tag
+
+
+def _check_file_exists(file_string_or_handle):
+    """ Used to check that expected file strings exist, creates FileNotFoundError if not"""
+    if isinstance(file_string_or_handle, str):  # If is a file string
+        p = Path(file_string_or_handle)
+        if not p.is_file():
+            raise FileNotFoundError(f"The file {file_string_or_handle} doesn't exist")
 
 
 def _get_c_file_handle(file_string_or_handle, modifier_string="r"):
@@ -204,7 +212,7 @@ class TafIndex:
 
     def __init__(self, index_file, is_maf):
         """ Load index from a file (index_file). Can be a file name or a Python file handle."""
-
+        _check_file_exists(index_file)
         c_file_handle = _get_c_file_handle(index_file)
         self._c_taf_index = lib.tai_load(c_file_handle, is_maf)
         if isinstance(index_file, str):  # Close the underlying file handle if opened
@@ -217,6 +225,7 @@ class TafIndex:
     def is_maf(alignment_file):
         """ Returns 0 if taf file or 1 if maf.
         """
+        _check_file_exists(alignment_file)
         c_file_handle = _get_c_file_handle(alignment_file)
         c_li_handle = lib.LI_construct(c_file_handle)
         i = lib.check_input_format(lib.LI_peek_at_next_line(c_li_handle))
@@ -249,6 +258,7 @@ class AlignmentReader:
         self.p_c_rows_to_py_rows = {}  # Hash from C rows to Python rows of the previous
         # alignment block, allowing linking of rows between blocks
         self.make_row_links = make_row_links  # Optionally store links between rows
+        _check_file_exists(file)
         self.file = file
         self.c_file_handle = _get_c_file_handle(file)
         self.file_string_not_handle = isinstance(file, str)  # Will be true if the file is a string, not a file handle
