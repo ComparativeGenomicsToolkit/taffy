@@ -75,7 +75,17 @@ int alignment_sequence_prefix_cmp_fn(Alignment_Row *a1, Alignment_Row *a2,
                                      stList *prefixes_to_sort_by) {
     int i = alignment_row_get_closest_sequence_prefix(a1, prefixes_to_sort_by);
     int j = alignment_row_get_closest_sequence_prefix(a2, prefixes_to_sort_by);
-    return i < j ? -1 : (i > j ? 1 : strcmp(a1->sequence_name, a2->sequence_name));
+    if (i != j) {
+        return i < j ? -1 : 1;
+    }
+    int scomp = strcmp(a1->sequence_name, a2->sequence_name);
+    if (scomp != 0) {
+        return scomp;
+    }
+    if (a1->strand != a2->strand) {
+        return a1->strand != 0 ? -1 : 1;
+    }
+    return a1->start < a2->start ? -1 : (a1->start > a2->start ? 1 : 0);
 }
 
 void alignment_sort_the_rows(Alignment *p_alignment, Alignment *alignment, stList *prefixes_to_sort_by, bool ignore_first_row) {
