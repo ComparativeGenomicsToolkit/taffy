@@ -18,6 +18,9 @@ static int64_t repeat_coordinates_every_n_columns = 10000;
 static void usage(void) {
     fprintf(stderr, "taffy norm [options]\n");
     fprintf(stderr, "Normalize a taf format alignment to remove small blocks using the -m and -n options to determine what to merge \n");
+    fprintf(stderr, "Note, taffy norm will resort the rows alpha-numerically according to sequence name, "
+                    "as is necessary to successfully merge all mergeable rows. Is the resorting is undesired, pipe the"
+                    "result to taffy sort to resort.\n");
     fprintf(stderr, "-i --inputFile : Input taf file to normalize. If not specified reads from stdin\n");
     fprintf(stderr, "-o --outputFile : Output taf file. If not specified outputs to stdout\n");
     fprintf(stderr, "-l --logLevel : Set the log level\n");
@@ -314,15 +317,13 @@ int taf_norm_main(int argc, char *argv[]) {
 
     Alignment *alignment, *p_alignment = NULL, *p_p_alignment = NULL;
     while((alignment = get_next_taf_block(li, run_length_encode_bases)) != NULL) {
+        // First resort the rows to be alphabetical and then realign with any previous block. This ensures
+        // we will not have any mergeable rows unlinked. Note:
+        // We do not allow row substitutions when linking two blocks to merge (see last parameter of function call),
+        // because substitutions costing half indels can mask true row matches, leading to repeat rows
+        // of the same sequence within a merged block.
+        alignment_sort_the_rows(p_alignment, alignment, NULL, 1, 0); // Resort the rows
         if(p_alignment != NULL) {
-            // First realign the rows in case we in the process of merging prior blocks we have
-            // identified rows that can be merged
-
-            // Do not allow row substitutions when linking two blocks to merge, because
-            // substitutions costing half indels can mask true row matches, leading to repeat rows
-            // of the same sequence within a merged block.
-            alignment_link_adjacent(p_alignment, alignment, 0);
-
             bool merged = false;
             int64_t common_rows = alignment_number_of_common_rows(p_alignment, alignment);
             int64_t total_rows = alignment->row_number + p_alignment->row_number - common_rows;
@@ -342,6 +343,8 @@ int taf_norm_main(int argc, char *argv[]) {
                         alignment_add_gap_strings(p_alignment, alignment, fastas_map, hal_handle, hal_species, -1);
                     }
                     p_alignment = alignment_merge_adjacent(p_alignment, alignment);
+                    alignment_sort_the_rows(p_p_alignment, p_alignment, NULL, 1, 1); // Resort the rows, because the
+                    // merge can make them out of order
                     merged = true;
                 }
             }
