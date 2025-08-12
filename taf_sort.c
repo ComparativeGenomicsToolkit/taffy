@@ -60,7 +60,7 @@ void process_alignment_block(Alignment *pp_alignment, Alignment *p_alignment, st
         }
         if(prefixes_to_sort_by) { // Sort the alignment block rows
             alignment_sort_the_rows(pp_alignment, p_alignment,
-                                    prefixes_to_sort_by, ignore_first_row);
+                                    prefixes_to_sort_by, ignore_first_row, 1);
         }
         if(prefixes_to_dup_filter) { // Remove duplicate rows
             alignment_filter_duplicate_rows(p_alignment, prefixes_to_dup_filter, ignore_first_row);
