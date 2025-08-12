@@ -85,7 +85,11 @@ int alignment_sequence_prefix_cmp_fn(Alignment_Row *a1, Alignment_Row *a2,
     if (a1->strand != a2->strand) {
         return a1->strand != 0 ? -1 : 1;
     }
-    return a1->start < a2->start ? -1 : (a1->start > a2->start ? 1 : 0);
+    if (a1->strand != 0) {
+        return a1->start < a2->start ? -1 : (a1->start > a2->start ? 1 : 0);
+    }
+    // coordinates are flipped on negative maf strand
+    return a1->start > a2->start ? -1 : (a1->start < a2->start ? 1 : 0);
 }
 
 void alignment_sort_the_rows(Alignment *p_alignment, Alignment *alignment, stList *prefixes_to_sort_by, bool ignore_first_row) {
