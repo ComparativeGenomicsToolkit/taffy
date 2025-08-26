@@ -102,6 +102,10 @@ For example, to normalize a maf file do the following:
 option reads in underlying sequence files and is used to
 retrieve any sequences that are unaligned between two blocks that is necessary to include in stitching together adjacent blocks. This uses the same method as `taffy add-gap-bases` to add these unaligned sequences.
 
+Note(!), taffy norm will resort the rows alpha-numerically according to sequence name,  as is necessary to successfully merge all mergeable rows. Is the resorting is undesired, pipe the result to taffy sort (see below) to resort, e.g.
+
+    taffy view -i MAF_FILE | taffy norm -b SEQUENCE_FILES | taffy sort -n SORT_FILE | taffy view -m
+
 ## Taffy Sort
 
 It can be useful to sort the rows of an alignment. For this we have `taffy sort`. For example:

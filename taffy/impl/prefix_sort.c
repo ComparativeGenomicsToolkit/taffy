@@ -71,20 +71,38 @@ int64_t alignment_row_get_closest_sequence_prefix(Alignment_Row *row, stList *pr
     return sp != NULL ? sp->index : -1; // Sequences that don't have a match will appear first in the sort
 }
 
+int alignment_sequence_prefix_cmp_fn_2(Alignment_Row *a1, Alignment_Row *a2, void *dummy_arg) {
+    // Compare first by name, then strand, then start coordinate
+    int scomp = strcmp(a1->sequence_name, a2->sequence_name);
+    if (scomp != 0) {
+        return scomp;
+    }
+    if (a1->strand != a2->strand) {
+        return a1->strand != 0 ? -1 : 1;
+    }
+    return a1->start < a2->start ? -1 : (a1->start > a2->start ? 1 : 0);
+}
+
 int alignment_sequence_prefix_cmp_fn(Alignment_Row *a1, Alignment_Row *a2,
                                      stList *prefixes_to_sort_by) {
     int i = alignment_row_get_closest_sequence_prefix(a1, prefixes_to_sort_by);
     int j = alignment_row_get_closest_sequence_prefix(a2, prefixes_to_sort_by);
-    return i < j ? -1 : (i > j ? 1 : strcmp(a1->sequence_name, a2->sequence_name));
+    return i < j ? -1 : (i > j ? 1 : alignment_sequence_prefix_cmp_fn_2(a1, a2, NULL));
 }
 
-void alignment_sort_the_rows(Alignment *p_alignment, Alignment *alignment, stList *prefixes_to_sort_by, bool ignore_first_row) {
+void alignment_sort_the_rows(Alignment *p_alignment, Alignment *alignment, stList *prefixes_to_sort_by,
+    bool ignore_first_row, bool allow_row_substitutions_when_linking) {
     // Get the rows
     stList *rows = alignment_get_rows_in_a_list(ignore_first_row && alignment->row ? alignment->row->n_row : alignment->row);
     assert(stList_length(rows) == (ignore_first_row ? alignment->row_number -1 : alignment->row_number)); // Quick sanity check
 
     // Sort the rows by the prefix ordering
-    stList_sort2(rows, (int (*)(const void *, const void *, void *))alignment_sequence_prefix_cmp_fn, prefixes_to_sort_by);
+    if (prefixes_to_sort_by != NULL) { // Do this sort if we have sequence prefixes
+        stList_sort2(rows, (int (*)(const void *, const void *, void *))alignment_sequence_prefix_cmp_fn, prefixes_to_sort_by);
+    }
+    else { // Otherwise we don't have prefixes, just sort by sequence name, strand, length
+        stList_sort2(rows, (int (*)(const void *, const void *, void *))alignment_sequence_prefix_cmp_fn_2, NULL);
+    }
 
     // Add back the first row if ignored
     if(ignore_first_row && alignment->row) {
@@ -101,7 +119,7 @@ void alignment_sort_the_rows(Alignment *p_alignment, Alignment *alignment, stLis
 
     // Reset the alignment of the rows with the prior row
     if(p_alignment != NULL) {
-        alignment_link_adjacent(p_alignment, alignment, 1);
+        alignment_link_adjacent(p_alignment, alignment, allow_row_substitutions_when_linking);
     }
 }
 

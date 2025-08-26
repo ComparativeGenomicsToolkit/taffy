@@ -18,6 +18,9 @@ static int64_t repeat_coordinates_every_n_columns = 10000;
 static void usage(void) {
     fprintf(stderr, "taffy norm [options]\n");
     fprintf(stderr, "Normalize a taf format alignment to remove small blocks using the -m and -n options to determine what to merge \n");
+    fprintf(stderr, "Note, taffy norm will resort the rows alpha-numerically according to sequence name, "
+                    "as is necessary to successfully merge all mergeable rows. Is the resorting is undesired, pipe the"
+                    "result to taffy sort to resort.\n");
     fprintf(stderr, "-i --inputFile : Input taf file to normalize. If not specified reads from stdin\n");
     fprintf(stderr, "-o --outputFile : Output taf file. If not specified outputs to stdout\n");
     fprintf(stderr, "-l --logLevel : Set the log level\n");
@@ -60,19 +63,36 @@ static Alignment *get_next_taf_block(LI *li, bool run_length_encode_bases) {
     return block;
 }
 
-// prototype logic to try to reduce the gap delta by greedily filtering out
-// dupes with the biggest gaps.  if it doesn't find enough dupes to remove
-// to cover gap_delta, it returns false and does nothing.  otherwise it returns
-// true and removes the rows. 
+/**
+ * @brief Greedily prunes rows from an alignment to reduce large gaps.
+ *
+ * This function attempts to reduce the gap between an alignment and its predecessor
+ * by removing "duplicate" rows that cause gaps larger than `maximum_gap_length`.
+ * A row is considered a duplicate if another row with the same "sample name"
+ * exists in the alignment. The sample name is derived from the sequence name
+ * by taking the substring before the first '.' character.
+ *
+ * The function operates under strict conditions:
+ * 1. It will only attempt to prune if *all* rows causing gaps larger than
+ *    `maximum_gap_length` are prunable duplicates.
+ * 2. It will not remove all rows for a given sample. At least one row for
+ *    each sample must remain (i.e., have an acceptable gap length).
+ * 3. The first row of the alignment is never pruned.
+ *
+ * The alignment is modified in-place if pruning is successful.
+ *
+ * @param alignment The alignment to modify.
+ * @param maximum_gap_length The maximum allowed gap between a row and its predecessor.
+ * @return true if one or more rows were pruned from the alignment, false otherwise.
+ */
 static bool greedy_prune_by_gap(Alignment *alignment, int64_t maximum_gap_length) {
-
     // map row ptr to sample name, using everything up to first "." of sequence name
     // (which is quite hacky but not sure there's a choice)
+    // TODO: We can use the sequence prefix file to determine when two rows are equivalent
     stHash *row_to_sample_name = stHash_construct2(NULL, free);
     // hash sample name to number of rows with the sample
     stHash *sample_to_count = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, NULL, free);
-    int64_t i = 0;
-    for (Alignment_Row *row = alignment->row; row != NULL; row = row->n_row, ++i) {
+    for (Alignment_Row *row = alignment->row; row != NULL; row = row->n_row) {
         char *dot = strchr(row->sequence_name, '.');
         char *sample_name = NULL;
         if (dot != NULL) {
@@ -84,31 +104,31 @@ static bool greedy_prune_by_gap(Alignment *alignment, int64_t maximum_gap_length
         
         int64_t *count = stHash_search(sample_to_count, sample_name);
         if (count == NULL) {
-            count = (int64_t*)malloc(sizeof(int64_t));
-            *count = 1;
+            // Use st_calloc for consistency and to initialize count to 0
+            count = st_calloc(1, sizeof(int64_t));
             stHash_insert(sample_to_count, sample_name, count);
-        } else {
-            ++(*count);
         }
+        (*count)++;
     }
 
     // check that all rows with gaps > max_gap are dupes, ie we can merge a pruned alignment
-    i = 0;
     bool can_prune = true;
     // all rows that are dupes exceeding gap length are stored here
     stList *to_prune = stList_construct();
     // we only filter dupes if there's at least one row that would not get filtered
-    // remember when that happens here
+    // This set tracks samples that have at least one row with an acceptable gap.
     stSet *samples_passing_gap_once = stSet_construct3(stHash_stringKey, stHash_stringEqualKey, NULL);    
-    for (Alignment_Row *row = alignment->row; row != NULL && can_prune; row = row->n_row, ++i) {
+    for (Alignment_Row *row = alignment->row; row != NULL && can_prune; row = row->n_row) {
         int64_t gap = 0;
         if (row->l_row != NULL && alignment_row_is_predecessor(row->l_row, row)) {
             gap = row->start - (row->l_row->start + row->l_row->length);
         }
         char *sample_name = (char*)stHash_search(row_to_sample_name, row); 
         if (gap > maximum_gap_length) {            
-            int64_t *count = stHash_search(sample_to_count, sample_name);            
-            if (*count > 1 && row != alignment->row) {
+            int64_t *count = stHash_search(sample_to_count, sample_name);
+            // A row can be pruned if it's a duplicate and not the first row of the block.
+            // If any row with a large gap doesn't meet these criteria, we can't prune at all.
+            if (count != NULL && *count > 1 && row != alignment->row) {
                 stList_append(to_prune, row);
             } else {
                 can_prune = false;
@@ -118,9 +138,11 @@ static bool greedy_prune_by_gap(Alignment *alignment, int64_t maximum_gap_length
         }
     }
     // if there isn't at least one copy that we can merge without dropping, then we
-    // don't bother as we don't want to drop coverage below 1 for any sample    
+    // don't bother as we don't want to drop coverage below 1 for any sample
+    // Final check: ensure that for every sample we intend to prune a row from,
+    // there is at least one other row for that sample that will *not* be pruned.
     int64_t no_to_prune = stList_length(to_prune);
-    for (i = 0; can_prune && i < no_to_prune; ++i) {
+    for (int64_t i = 0; can_prune && i < no_to_prune; ++i) {
         Alignment_Row *row_to_prune = stList_get(to_prune, i);
         char *sample_name = stHash_search(row_to_sample_name, row_to_prune);
         assert(sample_name);        
@@ -130,32 +152,31 @@ static bool greedy_prune_by_gap(Alignment *alignment, int64_t maximum_gap_length
     }
 
     bool pruned = false;
-    if (can_prune) {
-        // remove the rows
-        assert(stList_length(to_prune) > 0);
-        Alignment_Row *p_row = NULL;
+    // Only proceed with pruning if the conditions are met and there are rows to remove.
+    if (can_prune && stList_length(to_prune) > 0) {
+        // Use a pointer-to-pointer to simplify linked-list deletion.
+        // This correctly handles all cases, including removal of the head (though our logic prevents that).
+        Alignment_Row **p_row_ptr = &alignment->row;
         int64_t to_prune_idx = 0;
-        i = 0;
         Alignment_Row *row_to_prune = stList_get(to_prune, to_prune_idx);
-        Alignment_Row *row = alignment->row;
-        while (row) {
-            Alignment_Row *n_row = row->n_row;
-            if (row == row_to_prune) {
-                assert(p_row != NULL);
-                p_row->n_row = row->n_row;
-                alignment_row_destruct(row);
-                ++to_prune_idx;
-                row_to_prune = to_prune_idx < stList_length(to_prune) ? stList_get(to_prune, to_prune_idx) : NULL;
+
+        while (*p_row_ptr) {
+            if (*p_row_ptr == row_to_prune) {
+                Alignment_Row *to_delete = *p_row_ptr;
+                *p_row_ptr = to_delete->n_row; // Unlink the row
+                alignment_row_destruct(to_delete);
                 --alignment->row_number;
                 pruned = true;
+
+                if (++to_prune_idx >= stList_length(to_prune)) {
+                    break;
+                }
+                row_to_prune = stList_get(to_prune, to_prune_idx);
             } else {
-                p_row = row;
+                p_row_ptr = &((*p_row_ptr)->n_row);
             }
-            row = n_row;
-            ++i;
         }
     }
-
     stHash_destruct(row_to_sample_name);
     stHash_destruct(sample_to_count);
     stList_destruct(to_prune);
@@ -314,15 +335,13 @@ int taf_norm_main(int argc, char *argv[]) {
 
     Alignment *alignment, *p_alignment = NULL, *p_p_alignment = NULL;
     while((alignment = get_next_taf_block(li, run_length_encode_bases)) != NULL) {
+        // First resort the rows to be alphabetical and then realign with any previous block. This ensures
+        // we will not have any mergeable rows unlinked. Note:
+        // We do not allow row substitutions when linking two blocks to merge (see last parameter of function call),
+        // because substitutions costing half indels can mask true row matches, leading to repeat rows
+        // of the same sequence within a merged block.
+        alignment_sort_the_rows(p_alignment, alignment, NULL, 1, 0); // Resort the rows
         if(p_alignment != NULL) {
-            // First realign the rows in case we in the process of merging prior blocks we have
-            // identified rows that can be merged
-
-            // Do not allow row substitutions when linking two blocks to merge, because
-            // substitutions costing half indels can mask true row matches, leading to repeat rows
-            // of the same sequence within a merged block.
-            alignment_link_adjacent(p_alignment, alignment, 0);
-
             bool merged = false;
             int64_t common_rows = alignment_number_of_common_rows(p_alignment, alignment);
             int64_t total_rows = alignment->row_number + p_alignment->row_number - common_rows;
@@ -331,17 +350,22 @@ int taf_norm_main(int argc, char *argv[]) {
                 (alignment_length(p_alignment) <= maximum_block_length_to_merge ||
                  alignment_length(alignment) <= maximum_block_length_to_merge)) {
                 int64_t max_gap = alignment_max_gap_length(p_alignment);
-                if (max_gap > maximum_gap_length && filter_gap_causing_dupes) {
-                    // try to greedily filter dupes in order to get the gap length down
-                    bool was_pruned = greedy_prune_by_gap(alignment, maximum_gap_length);
-                    max_gap = alignment_max_gap_length(p_alignment);
-                    assert(was_pruned == (max_gap <= maximum_gap_length));
+                if (filter_gap_causing_dupes) {
+                    // try to greedily filter dupes in order to get the gap length down - do this iteratively,
+                    // relinking the rows after each step
+                    while (max_gap > maximum_gap_length && greedy_prune_by_gap(alignment, maximum_gap_length)) {
+                        alignment_link_adjacent(p_alignment, alignment, 0); // Now relink, as having removed rows we
+                        // may have different rows that need to be relinked
+                        max_gap = alignment_max_gap_length(p_alignment); // recalculste the max gap
+                    }
                 }
                 if (max_gap <= maximum_gap_length) {
                     if(hal_species || fastas_map) { // Now add in any gap bases if sequences are provided
                         alignment_add_gap_strings(p_alignment, alignment, fastas_map, hal_handle, hal_species, -1);
                     }
                     p_alignment = alignment_merge_adjacent(p_alignment, alignment);
+                    alignment_sort_the_rows(p_p_alignment, p_alignment, NULL, 1, 1); // Resort the rows, because the
+                    // merge can make them out of order
                     merged = true;
                 }
             }
@@ -391,4 +415,3 @@ int taf_norm_main(int argc, char *argv[]) {
 
     return 0;
 }
-
