@@ -143,6 +143,7 @@ int taf_view_main(int argc, char *argv[]) {
             case 'P':
                 paf_output = 1;
                 all_to_all_paf = 1;
+                break;
             case 'C':
                 paf_cs = true;
                 break;
