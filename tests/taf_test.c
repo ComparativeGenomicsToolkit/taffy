@@ -17,7 +17,7 @@ static char *get_random_tags() {
     return tag_string;
 }
 
-Tag *parse_tags(stList *tokens, int64_t starting_token, char *delimiter);
+Tag *parse_tags(char **tokens, int n_tokens, int64_t starting_token, char *delimiter);
 
 void check_tags(CuTest *testCase, Tag *t, Tag *j) {
     while(t != NULL) {
@@ -53,10 +53,11 @@ static void test_taf(CuTest *testCase) {
         alignment->column_tags = st_malloc(sizeof(Tag *) * alignment->column_number);
         for(int64_t i=0; i<alignment->column_number; i++) {
             char *tag_string = get_random_tags();
-            stList *tokens = stString_split(tag_string);
-            alignment->column_tags[i] = parse_tags(tokens, 0, ":");
-            stList_append(column_tags, parse_tags(tokens, 0, ":"));
-            stList_destruct(tokens);
+            char *tokens_buf[MAX_TOKENS];
+            int n_tokens = tokenize_line(tag_string, tokens_buf, MAX_TOKENS);
+            alignment->column_tags[i] = parse_tags(tokens_buf, n_tokens, 0, ":");
+            stList_append(column_tags, parse_tags(tokens_buf, n_tokens, 0, ":"));
+            free(tag_string);
         }
 
         taf_write_block(p_alignment, alignment, run_length_encode_bases, 1000, lw);
