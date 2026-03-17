@@ -82,12 +82,16 @@ void maf_write_block2(Alignment *alignment, LW *lw, bool color_bases) {
     Alignment_Row *row = alignment->row;
     while(row != NULL) {
         char *bases = color_bases ? color_base_string(row->bases, alignment->column_number) : row->bases;
-        LW_write(lw, "s\t%s\t%" PRIi64 "\t%" PRIi64 "\t%s\t%" PRIi64 "\t%s\n", row->sequence_name, row->start, row->length,
-                row->strand ? "+" : "-", row->sequence_length, bases);
-        row = row->n_row;
+        int bases_len = color_bases ? (int)strlen(bases) : (int)alignment->column_number;
+        LW_write(lw, "s\t%s\t%" PRIi64 "\t%" PRIi64 "\t%c\t%" PRIi64 "\t",
+                 row->sequence_name, row->start, row->length,
+                 row->strand ? '+' : '-', row->sequence_length);
+        LW_write_bytes(lw, bases, bases_len);
+        LW_write(lw, "\n");
         if(color_bases) {
             free(bases);
         }
+        row = row->n_row;
     }
     LW_write(lw, "\n"); // Add a blank line at the end of the block
 }
