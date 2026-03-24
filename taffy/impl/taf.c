@@ -125,12 +125,12 @@ static char *get_bases(int64_t column_length, char **tokens, int n_tokens, bool 
         int64_t i=0, j=0;
         while(j < column_length) {
             assert(i < n_tokens);
-            char *base_token = tokens[i++];
-            assert(strlen(base_token) == 1); // The base must be a single character
+            assert(strlen(tokens[i]) == 1); // The base must be a single character
+            char base_token = tokens[i++][0];
             int64_t k = atol(tokens[i++]);
             assert(k > 0); // Each count must be greater than zero
             while(k-- > 0) {
-                column[j++] = base_token[0];
+                column[j++] = base_token;
             }
             assert(j <= column_length);
         }
