@@ -6,6 +6,7 @@
 
 #include "taf.h"
 #include "tai.h"
+#include "block_reader.h"
 #include "sonLib.h"
 #include <getopt.h>
 #include <time.h>
@@ -193,17 +194,21 @@ int taf_sort_main(int argc, char *argv[]) {
     stList *prefixes_to_sort_by = load_sort_file(sort_file);
     stList *prefixes_to_dup_filter = load_sort_file(dup_filter_file);
 
-    // Parse the header
-    bool run_length_encode_bases;
-    Tag *tag = taf_read_header_2(li, &run_length_encode_bases);
+    // Open a format-agnostic reader (TAF or MAF input)
+    BlockReader *reader = block_reader_open(li);
+    if (reader == NULL) {
+        return 1;
+    }
+    bool run_length_encode_bases = block_reader_run_length_encoded(reader);
+    Tag *tag = block_reader_take_header(reader);
 
-    // Write the header
+    // For now, output is always TAF (a MAF output mode could be added later -- see pass-2 plan).
     taf_write_header(tag, output);
     tag_destruct(tag);
 
     // Write the alignment blocks
     Alignment *alignment, *p_alignment = NULL, *pp_alignment = NULL;
-    while((alignment = taf_read_block(p_alignment, run_length_encode_bases, li)) != NULL) {
+    while ((alignment = block_reader_next(reader, p_alignment)) != NULL) {
         process_alignment_block(pp_alignment, p_alignment, prefixes_to_filter_by, prefixes_to_pad,
                                 prefixes_to_sort_by, prefixes_to_dup_filter, run_length_encode_bases, ignore_first_row, output);
         pp_alignment = p_alignment;
@@ -220,6 +225,7 @@ int taf_sort_main(int argc, char *argv[]) {
     //////////////////////////////////////////////
 
 
+    block_reader_destruct(reader);
     LI_destruct(li);
     if(input_file != NULL) {
         fclose(input);

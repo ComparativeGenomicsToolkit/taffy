@@ -6,6 +6,7 @@
 
 #include "taf.h"
 #include "tai.h"
+#include "block_reader.h"
 #include "sonLib.h"
 #include <getopt.h>
 #include <time.h>
@@ -15,7 +16,7 @@ static int64_t repeat_coordinates_every_n_columns = 10000;
 static void usage(void) {
     fprintf(stderr, "taffy annotate [options]\n");
     fprintf(stderr, "Annotate the columns of a taf file using wiggle file\n");
-    fprintf(stderr, "-i --inputFile : Input TAF file. If not specified reads from stdin\n");
+    fprintf(stderr, "-i --inputFile : Input TAF or MAF file. If not specified reads from stdin. Output is always TAF (column tags have no MAF representation)\n");
     fprintf(stderr, "-w --wiggle [FILE_NAME] : REQUIRED The input wiggle file\n");
     fprintf(stderr, "-t --tagName [STRING] : REQUIRED: The name of the tag to annotate for the given wiggle\n");
     fprintf(stderr, "-s --repeatCoordinatesEveryNColumns : Repeat coordinates of each sequence at least every n columns. By default: %" PRIi64 "\n", repeat_coordinates_every_n_columns);
@@ -143,23 +144,21 @@ int taf_annotate_main(int argc, char *argv[]) {
     // Open the inputs and outputs and parse the labels to annotate
     //////////////////////////////////////////////
 
-    // load the input
+    // load the input (TAF or MAF -- BlockReader sniffs and dispatches)
     FILE *taf_fh = taf_file == NULL ? stdin : fopen(taf_file, "r");
     if (taf_fh == NULL) {
-        fprintf(stderr, "Unable to open input TAF file: %s\n", taf_file);
+        fprintf(stderr, "Unable to open input TAF/MAF file: %s\n", taf_file);
         return 1;
     }
     LI *li = LI_construct(taf_fh);
-
-    // Check is a taf file
-    if (check_input_format(LI_peek_at_next_line(li)) != 0) {
-        fprintf(stderr, "Input not supported: requires #taf header\n");
+    BlockReader *reader = block_reader_open(li);
+    if (reader == NULL) {
         return 1;
     }
-
-    // Check if run_length_encode_bases is set and read header
-    bool run_length_encode_bases = 0;
-    Tag *tag = taf_read_header_2(li, &run_length_encode_bases);
+    // Output is TAF regardless of input format. For MAF input we won't run-length encode the
+    // body (annotate has no flag to opt in); for TAF input we preserve the input's RLE setting.
+    bool run_length_encode_bases = block_reader_run_length_encoded(reader);
+    Tag *tag = block_reader_take_header(reader);
 
     // Load the wiggle file, making coordinates 0 based
     stHash *labels = wig_parse(wig_file, ref_prefix, 1);
@@ -183,7 +182,7 @@ int taf_annotate_main(int argc, char *argv[]) {
     Alignment *alignment = NULL;
     Alignment *p_alignment = NULL;
     // Keep reading blocks while available
-    while((alignment = taf_read_block(p_alignment, run_length_encode_bases, li)) != NULL) {
+    while ((alignment = block_reader_next(reader, p_alignment)) != NULL) {
         label_alignment(alignment, labels, tag_name); // Make any changes to the alignment for output
 
         // Write back the labelled taf
@@ -204,6 +203,7 @@ int taf_annotate_main(int argc, char *argv[]) {
     // Cleanup
     //////////////////////////////////////////////
 
+    block_reader_destruct(reader);
     LI_destruct(li);
     if(taf_file != NULL) {
         fclose(taf_fh);

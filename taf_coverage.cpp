@@ -6,6 +6,7 @@
 
 extern "C" {
 #include "taf.h"
+#include "block_reader.h"
 #include "sonLib.h"
 }
 #include <getopt.h>
@@ -57,7 +58,7 @@ static void print_coverage_tsv(const ContigCoverageMap& contig_cov_map, const se
 static void usage() {
     fprintf(stderr, "taffy coverage [options]\n");    
     fprintf(stderr, "Compute very basic pairwise coverage stats as fraction and bp for a TAF file\n");
-    fprintf(stderr, "-i --inputFile : Input taf file to normalize. If not specified reads from stdin\n");
+    fprintf(stderr, "-i --inputFile : Input TAF or MAF file. If not specified reads from stdin\n");
     fprintf(stderr, "-r --reference : Name of reference genome. If note specified used first row in block\n");
     fprintf(stderr, "-g --genomeNames : List of genome names (quoted, space-separated), ex from \"$(halStats --genomes aln.hal)\". This can help contig name parsing which otherwise uses everything up to first . as genome name\n");
     fprintf(stderr, "-a, --gapThreshold : Breakdown rows using given gap threshold, to restrict aligned bp to exclude gaps>threshold. Multiple allowed. \n");
@@ -161,29 +162,30 @@ int taf_coverage_main(int argc, char *argv[]) {
         stList_destruct(tokens);
     }
 
-    // Open TAF    
+    // Open input (MAF or TAF -- BlockReader sniffs and dispatches)
     FILE *input = inputFile == NULL ? stdin : fopen(inputFile, "r");
     LI *li = LI_construct(input);
+    BlockReader *reader = block_reader_open(li);
+    if (reader == NULL) {
+        return 1;
+    }
+    tag_destruct(block_reader_take_header(reader));
 
-    // Parse the header
-    bool run_length_encode_bases;
-    Tag *tag = taf_read_header_2(li, &run_length_encode_bases);
-    tag_destruct(tag);
-    
     Alignment *alignment, *p_alignment = NULL;
-    while((alignment = taf_read_block(p_alignment, run_length_encode_bases, li)) != NULL) {
+    while ((alignment = block_reader_next(reader, p_alignment)) != NULL) {
         // update the coverage
         update_block_coverage(alignment, p_alignment, reference, genome_names_hash, contig_coverage_map);
 
         // Clean up the previous alignment
-        if(p_alignment != NULL) {
+        if (p_alignment != NULL) {
             alignment_destruct(p_alignment, 1);
         }
         p_alignment = alignment; // Update the previous alignment
     }
-    if(p_alignment != NULL) { // Clean up the final alignment
+    if (p_alignment != NULL) { // Clean up the final alignment
         alignment_destruct(p_alignment, 1);
     }
+    block_reader_destruct(reader);
 
     // add gaps from last covered base to ends of contigs
     add_final_gap(contig_coverage_map);
