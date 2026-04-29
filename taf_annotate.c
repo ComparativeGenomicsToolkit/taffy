@@ -153,6 +153,8 @@ int taf_annotate_main(int argc, char *argv[]) {
     LI *li = LI_construct(taf_fh);
     BlockReader *reader = block_reader_open(li);
     if (reader == NULL) {
+        LI_destruct(li);
+        if (taf_file != NULL) fclose(taf_fh);
         return 1;
     }
     // Output is TAF regardless of input format. For MAF input we won't run-length encode the

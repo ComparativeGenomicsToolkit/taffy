@@ -197,6 +197,9 @@ int taf_sort_main(int argc, char *argv[]) {
     // Open a format-agnostic reader (TAF or MAF input)
     BlockReader *reader = block_reader_open(li);
     if (reader == NULL) {
+        LW_destruct(output, output_file != NULL);
+        LI_destruct(li);
+        if (input_file != NULL) fclose(input);
         return 1;
     }
     bool run_length_encode_bases = block_reader_run_length_encoded(reader);

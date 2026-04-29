@@ -55,8 +55,6 @@ Alignment *block_reader_next(BlockReader *r, Alignment *prev_block) {
 
 void block_reader_destruct(BlockReader *r) {
     if (r == NULL) return;
-    if (r->header != NULL) {
-        tag_destruct(r->header);
-    }
+    tag_destruct(r->header);  // tag_destruct accepts NULL
     free(r);
 }

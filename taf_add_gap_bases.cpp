@@ -149,6 +149,9 @@ int taf_add_gap_bases_main(int argc, char *argv[]) {
     // it needs. Output is always TAF (interstitial gap strings are a TAF-only feature).
     BlockReader *reader = block_reader_open(li);
     if (reader == NULL) {
+        LW_destruct(output, outputFile != NULL);
+        LI_destruct(li);
+        if (inputFile != NULL) fclose(input);
         return 1;
     }
     run_length_encode_bases = block_reader_run_length_encoded(reader);

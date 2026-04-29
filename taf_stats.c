@@ -114,6 +114,8 @@ int taf_stats_main(int argc, char *argv[]) {
         // for the other paths we need to consume the header up-front via BlockReader
         reader = block_reader_open(li);
         if (reader == NULL) {
+            LI_destruct(li);
+            if (taf_fn != NULL) fclose(taf_fh);
             return 1;
         }
         input_is_maf = block_reader_is_maf(reader);
@@ -123,6 +125,8 @@ int taf_stats_main(int argc, char *argv[]) {
         int input_format = check_input_format(LI_peek_at_next_line(li));
         if (input_format != 0 && input_format != 1) {
             fprintf(stderr, "Input not supported: unable to detect ##maf or #taf header\n");
+            LI_destruct(li);
+            if (taf_fn != NULL) fclose(taf_fh);
             return 1;
         }
         input_is_maf = (input_format == 1);

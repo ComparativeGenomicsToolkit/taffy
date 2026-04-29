@@ -167,6 +167,8 @@ int taf_coverage_main(int argc, char *argv[]) {
     LI *li = LI_construct(input);
     BlockReader *reader = block_reader_open(li);
     if (reader == NULL) {
+        LI_destruct(li);
+        if (inputFile != NULL) fclose(input);
         return 1;
     }
     tag_destruct(block_reader_take_header(reader));

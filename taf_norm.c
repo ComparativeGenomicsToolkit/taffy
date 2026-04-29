@@ -330,6 +330,9 @@ int taf_norm_main(int argc, char *argv[]) {
     // continuity it gets from a TAF input.
     BlockReader *reader = block_reader_open(li);
     if (reader == NULL) {
+        LW_destruct(output, outputFile != NULL);
+        LI_destruct(li);
+        if (inputFile != NULL) fclose(input);
         return 1;
     }
     run_length_encode_bases = block_reader_run_length_encoded(reader);
