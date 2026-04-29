@@ -165,8 +165,132 @@ def test_tai_taf_1bp_extractions(taf_path, maf_path, step):
         subprocess.check_call(['diff', out_maf_path, out_taf_path])
         subprocess.check_call(['rm', '-f', out_maf_path, out_taf_path])
                      
-    sys.stderr.write("\t\t\tOK\n")                     
-    
+    sys.stderr.write("\t\t\tOK\n")
+
+
+def _count_alignment_blocks(maf_text):
+    return sum(1 for line in maf_text.splitlines() if line.startswith('a'))
+
+
+def test_view_missing_region_does_not_error():
+    """Bug 1: querying a region not present in the index emits a header-only MAF and exits 0.
+
+    Previously taffy view would exit 1 with "Region X not found in taffy index", which forced
+    batch callers (e.g. cactus-phast's chunker) to wrap stderr-pattern matching around every call.
+    """
+    sys.stderr.write(" * Bug 1 regression: missing region returns header-only MAF, exit 0")
+    sys.stderr.flush()
+    maf_path = './tests/tai/test_bug1_missing.maf'
+    with open(maf_path, 'w') as f:
+        f.write('##maf version=1 scoring=N/A\n\n')
+        f.write('a\ns\trefA.chrA\t0\t5\t+\t100\tACGTA\ns\tother.chrZ\t0\t5\t+\t50\tACGTA\n')
+    subprocess.check_call(['./bin/taffy', 'index', '-i', maf_path])
+    out_path = maf_path + '.out'
+    # contig that is not in the index at all
+    rc = subprocess.call('./bin/taffy view -i {} -m -r NoSuchContig:0-10 > {}'.format(maf_path, out_path), shell=True)
+    assert rc == 0, "expected exit 0 for missing contig, got {}".format(rc)
+    with open(out_path) as f:
+        out = f.read()
+    assert _count_alignment_blocks(out) == 0, "expected no alignment blocks, got: {!r}".format(out)
+    assert out.startswith('##maf'), "expected MAF header, got: {!r}".format(out)
+    # contig that IS in the index but the queried sub-range doesn't overlap any block
+    rc = subprocess.call('./bin/taffy view -i {} -m -r refA.chrA:50-60 > {}'.format(maf_path, out_path), shell=True)
+    assert rc == 0, "expected exit 0 for non-overlapping sub-range, got {}".format(rc)
+    with open(out_path) as f:
+        out = f.read()
+    assert _count_alignment_blocks(out) == 0, "expected no alignment blocks, got: {!r}".format(out)
+    # bgzipped empty-region output must be a valid header-only .maf.gz, NOT a 0-byte file.
+    # The early-return path used to skip LW_destruct, leaving the bgzip writer unflushed.
+    gz_out = maf_path + '.out.gz'
+    rc = subprocess.call(['./bin/taffy', 'view', '-i', maf_path, '-m', '-c',
+                          '-r', 'NoSuchContig:0-10', '-o', gz_out])
+    assert rc == 0
+    assert os.path.getsize(gz_out) > 0, "bgzipped empty output should not be 0 bytes"
+    decompressed = subprocess.check_output(['bgzip', '-dc', gz_out]).decode('utf-8')
+    assert decompressed.startswith('##maf'), "bgzipped output should decompress to a MAF header, got: {!r}".format(decompressed)
+    assert _count_alignment_blocks(decompressed) == 0
+    subprocess.check_call(['rm', '-f', maf_path, maf_path + '.tai', out_path, gz_out])
+    sys.stderr.write("\t\t\tOK\n")
+
+
+def test_view_clip_zero_length_row():
+    """Bug 2: clip_alignment must not assert when a block contains a length=0 (all-gap) row.
+
+    Reproduction: a MAF block with an `s` line whose length field is 0 and bases are all dashes.
+    Previously this aborted with `Assertion strlen(row->bases) == 0 failed` whenever the queried
+    range covered the block without trimming (so neither left nor right clip ran).
+    """
+    sys.stderr.write(" * Bug 2 regression: clip_alignment doesn't crash on length=0 rows")
+    sys.stderr.flush()
+    maf_path = './tests/tai/test_bug2_zero_len_row.maf'
+    with open(maf_path, 'w') as f:
+        f.write('##maf version=1 scoring=N/A\n\n')
+        # block 1 contains an all-gap row (length 0); query range fully covers the block so
+        # neither left nor right trim runs in clip_alignment
+        f.write('a\ns\trefA.chrA\t0\t5\t+\t100\tACGTA\ns\tother.chrZ\t0\t0\t+\t50\t-----\n\n')
+        f.write('a\ns\trefA.chrA\t5\t5\t+\t100\tTTTTT\ns\tother.chrZ\t0\t5\t+\t50\tAAAAA\n')
+    subprocess.check_call(['./bin/taffy', 'index', '-i', maf_path])
+    out_path = maf_path + '.out'
+    rc = subprocess.call('./bin/taffy view -i {} -m -r refA.chrA:0-100 > {}'.format(maf_path, out_path), shell=True)
+    assert rc == 0, "expected exit 0 (was SIGABRT), got {}".format(rc)
+    with open(out_path) as f:
+        out = f.read()
+    assert _count_alignment_blocks(out) == 2, "expected 2 alignment blocks, got: {!r}".format(out)
+    # also exercise the partial-clip path on a sub-range to make sure the gap-refill still works
+    rc = subprocess.call('./bin/taffy view -i {} -m -r refA.chrA:2-7 > {}'.format(maf_path, out_path), shell=True)
+    assert rc == 0
+    with open(out_path) as f:
+        out = f.read()
+    assert _count_alignment_blocks(out) == 2, "expected 2 clipped blocks, got: {!r}".format(out)
+    subprocess.check_call(['rm', '-f', maf_path, maf_path + '.tai', out_path])
+    sys.stderr.write("\t\t\tOK\n")
+
+
+def test_view_first_block_past_zero_with_prev_contig():
+    """Smoke test for the Bug 3 code path: contig whose first block starts past 0, with a
+    lexicographically-smaller contig preceding it in the index.
+
+    NOTE: with Bug 1's fix in place this scenario is no longer user-visibly broken in either
+    direction -- the OLD `tair_1 == NULL` lookup happens to scan forward through the prev
+    contig and still finds the target blocks for any query that genuinely overlaps them, and
+    a query that misses everything turns into a clean header-only exit either way. So this
+    test is a *coverage* test for the new fallback-search code path rather than a regression
+    test that fails without the Bug 3 fix specifically. The Bug 3 fix is still worth keeping:
+    it skips wasted scanning of the prev contig and avoids relying on the scan loop to walk
+    past unrelated blocks before reaching the target.
+    """
+    sys.stderr.write(" * Bug 3 coverage: queries on contig with first block past 0 + prev contig")
+    sys.stderr.flush()
+    maf_path = './tests/tai/test_bug3_first_past_zero.maf'
+    with open(maf_path, 'w') as f:
+        f.write('##maf version=1 scoring=N/A\n\n')
+        f.write('a\ns\ta.chrA\t0\t5\t+\t1000\tACGTA\ns\tother.chrZ\t0\t5\t+\t100\tACGTA\n\n')
+        f.write('a\ns\tz.chrZ\t500\t10\t+\t2000\tACGTACGTAC\ns\tother.chrZ\t5\t10\t+\t100\tACGTACGTAC\n\n')
+        f.write('a\ns\tz.chrZ\t1500\t10\t+\t2000\tACGTACGTAC\ns\tother.chrZ\t15\t10\t+\t100\tACGTACGTAC\n')
+    # use a small index block size so each block gets its own .tai entry; this is what makes
+    # the "tair_2 lookup lands on the very block we want" pattern reachable in principle
+    subprocess.check_call(['./bin/taffy', 'index', '-i', maf_path, '-b', '1'])
+    out_path = maf_path + '.out'
+    rc = subprocess.call('./bin/taffy view -i {} -m -r z.chrZ:0-700 > {}'.format(maf_path, out_path), shell=True)
+    assert rc == 0
+    with open(out_path) as f:
+        out = f.read()
+    assert _count_alignment_blocks(out) == 1, "expected 1 alignment block, got: {!r}".format(out)
+    assert 'z.chrZ\t500' in out, "expected first z.chrZ block in output, got: {!r}".format(out)
+    rc = subprocess.call('./bin/taffy view -i {} -m -r z.chrZ:0-2000 > {}'.format(maf_path, out_path), shell=True)
+    assert rc == 0
+    with open(out_path) as f:
+        out = f.read()
+    assert _count_alignment_blocks(out) == 2, "expected 2 alignment blocks, got: {!r}".format(out)
+    rc = subprocess.call('./bin/taffy view -i {} -m -r z.chrZ:0-100 > {}'.format(maf_path, out_path), shell=True)
+    assert rc == 0
+    with open(out_path) as f:
+        out = f.read()
+    assert _count_alignment_blocks(out) == 0, "expected no alignment blocks, got: {!r}".format(out)
+    subprocess.check_call(['rm', '-f', maf_path, maf_path + '.tai', out_path])
+    sys.stderr.write("\tOK\n")
+
+
 sys.stderr.write("Running tai tests...\n")
 maf_path_in = './tests/evolverMammals.maf'
 maf_path = './tests/tai/evolverMammals.maf'
@@ -191,5 +315,10 @@ test_tai(regions_path, maf_path, False, 111)
 test_tai(regions_path, maf_path, True, 200)                         
 test_tai(regions_path, maf_path, True, 200, name_map_path=name_map_path, rev_name_map_path=rev_name_map_path)
 test_tai_taf_1bp_extractions(taf_path, maf_path, 5)
+
+# regression tests for the three taffy view -r bugs documented in cactus-phast/taffy-bug.md
+test_view_missing_region_does_not_error()
+test_view_clip_zero_length_row()
+test_view_first_block_past_zero_with_prev_contig()
 
 subprocess.check_call(['rm', '-f', taf_path, taf_rle_path, maf_path])

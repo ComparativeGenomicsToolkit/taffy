@@ -321,9 +321,15 @@ int taf_view_main(int argc, char *argv[]) {
 
         TaiIt *tai_it = tai_iterator(tai, li, run_length_encode_input_bases, region_seq, region_start, region_length);
         if (!tai_has_next(tai_it)) {
-            fprintf(stderr, "Region %s:%" PRIi64 "-%" PRIi64 " not found in taffy index\n", region_seq, region_start,
-                    region_start + region_length);
-            return 1;
+            // No overlapping blocks were found. This can happen when the contig is missing from the
+            // index, when the index has a stub entry for a contig with no blocks, or when the queried
+            // sub-range simply doesn't intersect any indexed block. In all cases we exit cleanly so
+            // batch callers don't have to special-case empty regions; the header was already written
+            // above and the loop below is a no-op since tai_next returns NULL. We must NOT early-return
+            // here -- the bgzip writer is only flushed/closed by LW_destruct in the cleanup at the end
+            // of the function, so an early return would leave a 0-byte file when -c is set.
+            fprintf(stderr, "Region %s:%" PRIi64 "-%" PRIi64 " not found in taffy index; emitting header-only output\n",
+                    region_seq, region_start, region_start + region_length);
         }
         Alignment *alignment = NULL;
         Alignment *p_alignment = NULL;

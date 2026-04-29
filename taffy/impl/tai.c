@@ -408,20 +408,25 @@ TaiIt *tai_iterator(Tai* tai, LI *li, bool run_length_encode_bases, const char *
     qr.seq_pos = tai_it->start;
 
     TaiRec *tair_1 = stSortedSet_searchLessThanOrEqual(tai->idx, &qr);
-    if (tair_1 == NULL) {
-        // This will be null even if the query overlaps the first record in the index
-        // so we explicitly double check below (ie query 0-10 but index starts at 5)
-        tair_1 = stSortedSet_getFirst(tai->idx);
-        if (strcmp(tair_1->name, tai_it->name) != 0 || tai_it->end < tair_1->seq_pos) {
-            // there's no chance of finding the region as its contig isn't
-            // in the index or its start position is too low
-            // up to caller to spit out an error
+    // When tair_1 doesn't match our contig (either NULL because we sort before any
+    // record, or pointing at a record from a lexicographically-smaller contig) we
+    // need to fall through to the contig's first record instead. Without this fallback,
+    // `searchGreaterThanOrEqual` below can return our contig's very first record
+    // and the scan loop then skips it because `file_pos >= tair_2->file_pos` fires
+    // immediately. (Bug 3 in tests/tai-bug-fix.)
+    if (tair_1 == NULL || strcmp(tair_1->name, tai_it->name) != 0) {
+        TaiRec qr0;
+        qr0.name = tai_it->name;
+        qr0.seq_pos = 0;
+        tair_1 = stSortedSet_searchGreaterThanOrEqual(tai->idx, &qr0);
+        if (tair_1 == NULL || strcmp(tair_1->name, tai_it->name) != 0 || tai_it->end <= tair_1->seq_pos) {
+            // contig isn't in the index, or its first record starts past our query end
             return tai_it;
         }
     }
 
     // sorted set doesn't let us iterate, so we use a second lookup to get
-    // the next record
+    // the next record. By the checks above, tai_it->end > tair_1->seq_pos always.
     TaiRec qr2;
     qr2.name = tai_it->name;
     qr2.seq_pos = tai_it->end;
@@ -586,15 +591,20 @@ static unsigned int clip_alignment(Alignment *aln, Alignment *p_aln, int64_t sta
 
     aln->column_number = aln->row_number > 0 ? strlen(aln->row->bases) : 0;
 
-    // then fill empty rows with gaps
-    for (Alignment_Row *row = aln->row; row != NULL; row = row->n_row) {
-        if (row->length == 0) {
-            assert(strlen(row->bases) == 0);
-            row->bases = (char*)st_calloc(aln->column_number + 1, sizeof(char));
-            for (int64_t i = 0; i < aln->column_number; ++i) {
-                row->bases[i] = '-';
+    // then fill empty rows with gaps -- but only when a clip actually ran. If neither clip
+    // ran the block is unchanged and any pre-existing length==0 rows already carry their
+    // original all-gap bases, which we must leave alone. When ret != 0 the clip code above
+    // has already zeroed bases for every length==0 row, so we can refill unconditionally.
+    if (ret != 0) {
+        for (Alignment_Row *row = aln->row; row != NULL; row = row->n_row) {
+            if (row->length == 0) {
+                free(row->bases);
+                row->bases = (char*)st_calloc(aln->column_number + 1, sizeof(char));
+                for (int64_t i = 0; i < aln->column_number; ++i) {
+                    row->bases[i] = '-';
+                }
+                row->bases[aln->column_number] = '\0';
             }
-            row->bases[aln->column_number] = '\0';
         }
     }
 
