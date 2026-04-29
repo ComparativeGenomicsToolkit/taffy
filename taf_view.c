@@ -6,6 +6,7 @@
 
 #include "taf.h"
 #include "tai.h"
+#include "remote_io.h"
 #include "sonLib.h"
 #include <getopt.h>
 #include <time.h>
@@ -213,9 +214,19 @@ int taf_view_main(int argc, char *argv[]) {
         return 1;
     }
 
-    FILE *input = inputFile == NULL ? stdin : fopen(inputFile, "r");
-    if (input == NULL) {
-        fprintf(stderr, "Unable to open input file: %s\n", inputFile);
+    /* For URL inputs (only meaningful with -r region queries) we'll skip the
+     * local fopen; LI is constructed via bgzf_open which goes through htslib's
+     * URL-aware backend. */
+    bool input_is_url = inputFile != NULL && is_url(inputFile);
+    FILE *input = NULL;
+    if (!input_is_url) {
+        input = inputFile == NULL ? stdin : fopen(inputFile, "r");
+        if (input == NULL) {
+            fprintf(stderr, "Unable to open input file: %s\n", inputFile);
+            return 1;
+        }
+    } else if (region == NULL) {
+        fprintf(stderr, "URL inputs are only supported with -r region queries\n");
         return 1;
     }
 
@@ -241,7 +252,10 @@ int taf_view_main(int argc, char *argv[]) {
     }
     
     LW *output = LW_construct(output_fh, use_compression);
-    LI *li = LI_construct(input);
+    LI *li = input_is_url ? LI_construct_from_path(inputFile) : LI_construct(input);
+    if (li == NULL) {
+        return 1;
+    }
 
     // sniff the format
     int input_format = check_input_format(LI_peek_at_next_line(li));
@@ -309,9 +323,9 @@ int taf_view_main(int argc, char *argv[]) {
         
         st_logInfo("Region: contig=%s start=%" PRIi64 " length=%" PRIi64 "\n", region_seq, region_start, region_length);
 
-        char *tai_fn = tai_path(inputFile);        
-        FILE *tai_fh = fopen(tai_fn, "r");
-        
+        char *tai_fn = input_is_url ? tai_path_for(inputFile) : tai_path(inputFile);
+        FILE *tai_fh = open_tai_for_reading(tai_fn);
+
         if (tai_fh == NULL) {
             fprintf(stderr, "Index %s not found. Please run taffy index first\n", tai_fn);
             return 1;
@@ -429,7 +443,7 @@ int taf_view_main(int argc, char *argv[]) {
     //////////////////////////////////////////////
 
     LI_destruct(li);
-    if(inputFile != NULL) {
+    if (inputFile != NULL && !input_is_url) {
         fclose(input);
     }
     LW_destruct(output, outputFile != NULL);
