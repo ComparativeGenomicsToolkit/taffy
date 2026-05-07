@@ -4,8 +4,24 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdbool.h>
+#include <ctype.h>
 #include "sonLib.h"
 #include "line_iterator.h"
+
+#define MAX_TOKENS 4096
+
+static inline int tokenize_line(char *line, char **out, int max_tokens) {
+    int n = 0;
+    char *p = line;
+    while (*p != '\0' && n < max_tokens) {
+        while (*p != '\0' && isspace((unsigned char)*p)) p++;
+        if (*p == '\0') break;
+        out[n++] = p;
+        while (*p != '\0' && !isspace((unsigned char)*p)) p++;
+        if (*p != '\0') *p++ = '\0';
+    }
+    return n;
+}
 
 /*
  * Structures to represent blocks of an alignment
@@ -244,15 +260,15 @@ void taf_write_block2(Alignment *p_alignment, Alignment *alignment, bool run_len
  * Check if a tokenized TAF line has coordinates (ie search for ;)
  * If coordinates found, the position of the simicolon in the list is set in j
  */
-bool has_coordinates(stList *tokens, int64_t *j);
+bool has_coordinates(char **tokens, int n_tokens, int64_t *j);
 
 /**
  * Parse the coordinates coming after an "i" or "s" field on a TAF line
  * Returns the sequence name (newly allocated) and sets the strand and
- * position and length in the parameters. *j is the position of the "i" 
+ * position and length in the parameters. *j is the position of the "i"
  * or "s" in the tokenized line, and will be incremented for each field read
  */
-char *parse_coordinates(int64_t *j, stList *tokens, int64_t *start, bool *strand,
+char *parse_coordinates(int64_t *j, char **tokens, int n_tokens, int64_t *start, bool *strand,
                         int64_t *sequence_length);
 
 /**

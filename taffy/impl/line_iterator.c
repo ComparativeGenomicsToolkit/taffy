@@ -84,16 +84,18 @@ int64_t LI_tell(LI *li) {
 LW *LW_construct(FILE *fh, bool use_compression) {
     LW *lw = st_calloc(1, sizeof(LW));
     lw->fh = fh;
-    if(use_compression) {
 #ifdef USE_HTSLIB
+    lw->buf_cap = 65536;
+    lw->buf = st_malloc(lw->buf_cap);
+    if(use_compression) {
         lw->bgzf = bgzf_dopen(fileno(fh), "w");
         assert(lw->bgzf);
         assert(bgzf_compression(lw->bgzf) == 2);
         if (bgzf_index_build_init(lw->bgzf) != 0) {
             assert(false);
         }
-#endif
     }
+#endif
     return lw;
 }
 
@@ -107,6 +109,7 @@ void LW_destruct(LW *lw, bool clean_up_file_handle) {
             assert(0); // Close failed
         }
     }
+    free(lw->buf);
 #endif
     if(clean_up_file_handle) {
         fclose(lw->fh);
@@ -119,20 +122,19 @@ int LW_write(LW *lw, const char *string, ...) {
     int i;
     va_list ap;
     if(lw->bgzf) { // Use bgzf compression
-        // Figure out how long the string is to build the buffer
-        va_start(ap, string);
-        int j = vsnprintf(NULL, 0, string, ap)+1;
-        assert(j >= 0);
-        va_end(ap);
-        // Now write the string into the buffer
-        va_start(ap, string);
-        char ret[j];
-        i = vsnprintf(ret, j, string, ap);
-        assert(ret[i] == '\0');
-        // Finally, write the buffer to the bgzf stream
-        i = bgzf_write(lw->bgzf, ret, i);
-        assert(i+1 == j);
-        va_end(ap);
+        int n;
+        while (1) {
+            va_start(ap, string);
+            n = vsnprintf(lw->buf, lw->buf_cap, string, ap);
+            va_end(ap);
+            if (n >= 0 && (size_t)n < lw->buf_cap) break;
+            // Buffer too small; grow and retry
+            lw->buf_cap = (n >= 0) ? (size_t)(n + 1) : lw->buf_cap * 2;
+            lw->buf = st_realloc(lw->buf, lw->buf_cap);
+        }
+        ssize_t written = bgzf_write(lw->bgzf, lw->buf, n);
+        assert(written == (ssize_t)n);
+        i = (int)written;
     }
     else { // No compression, just fprintf to the stream
         va_start(ap, string);
@@ -147,5 +149,18 @@ int LW_write(LW *lw, const char *string, ...) {
     va_end(ap);
     return i;
 #endif
+}
+
+int LW_write_bytes(LW *lw, const char *data, int len) {
+#ifdef USE_HTSLIB
+    if(lw->bgzf) {
+        ssize_t written = bgzf_write(lw->bgzf, data, (size_t)len);
+        assert(written == (ssize_t)len);
+        return (int)written;
+    }
+#endif
+    int written = (int)fwrite(data, 1, (size_t)len, lw->fh);
+    assert(written == len);
+    return written;
 }
 

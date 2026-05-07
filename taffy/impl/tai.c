@@ -2,7 +2,6 @@
 #include "tai.h"
 #include "htslib/bgzf.h"
 #include "htslib/kstring.h"
-#include <ctype.h>
 #include <time.h>
 
 char *tai_path(const char *taf_path) {
@@ -60,10 +59,10 @@ char *tai_parse_region(const char *region, int64_t *start, int64_t *length) {
 // but only returns everything if there's a coordinate for every row in the column
 // this can happen when everything is an "i" like on the first line
 // or when everything is an "s" like on a repeat-coordinates-every-n-columns line
-static char *parse_coordinates_line(stList *tokens, int64_t *start, bool *strand,
+static char *parse_coordinates_line(char **tokens, int n_tokens, int64_t *start, bool *strand,
                                     bool run_length_encode_bases) {
     int64_t j = -1;
-    if (!has_coordinates(tokens, &j)) {
+    if (!has_coordinates(tokens, n_tokens, &j)) {
         return NULL;
     }
 
@@ -72,35 +71,34 @@ static char *parse_coordinates_line(stList *tokens, int64_t *start, bool *strand
     if (run_length_encode_bases) {
         assert(j > 1);
         for (int64_t i = 0; i < j; ++i) {
-            char *token = (char*)stList_get(tokens, i);
+            char *token = tokens[i];
             if (isdigit(token[0])) {
                 num_bases += atol(token);
             }
         }
     } else {
         assert(j == 1);
-        num_bases = strlen(stList_get(tokens, 0));
+        num_bases = strlen(tokens[0]);
     }
     int64_t num_coordinates = 0;
     char *seq = NULL;
     int64_t sequence_length;
     bool dummy;
-    int64_t n = stList_length(tokens);
 
     ++j;
-    while (j < n && strcmp(stList_get(tokens, j), "@") != 0) {
+    while (j < n_tokens && strcmp(tokens[j], "@") != 0) {
         // copied from taf.c
-        char *op_type = stList_get(tokens, j++); // This is the operation
+        char *op_type = tokens[j++]; // This is the operation
         assert(strlen(op_type) == 1); // Must be a single character in length
-        int64_t row_index = atol(stList_get(tokens, j++)); // Get the index of the affected row
+        int64_t row_index = atol(tokens[j++]); // Get the index of the affected row
         if(op_type[0] == 'i' || op_type[0] == 's') { // We have coordinates!
             num_coordinates++;
             if (row_index == 0) {
-                seq = parse_coordinates(&j, tokens, start, strand, &sequence_length);
+                seq = parse_coordinates(&j, tokens, n_tokens, start, strand, &sequence_length);
             } else {
                 // we parse but don't use
                 // todo: smoother api
-                char *s = parse_coordinates(&j, tokens, &sequence_length, &dummy, &sequence_length);
+                char *s = parse_coordinates(&j, tokens, n_tokens, &sequence_length, &dummy, &sequence_length);
                 free(s);
             }
         } else if (op_type[0] == 'd') {
@@ -126,27 +124,32 @@ static char *parse_coordinates_line(stList *tokens, int64_t *start, bool *strand
 // want to start new block parsers on these lines, we have to
 // convert the s's to i's to pretend we're starting new files
 static void change_s_coordinates_to_i(char *line) {
-    stList* tokens = stString_split(line);
+    // Tokenize a copy so that 'line' is only rewritten when found_s is true.
+    // This avoids leaving NUL bytes in 'line' (which is li->line) if no
+    // reconstruction is needed, which would corrupt subsequent tokenization.
+    char *line_copy = stString_copy(line);
+    char *tokens_buf[MAX_TOKENS];
+    int n_tokens = tokenize_line(line_copy, tokens_buf, MAX_TOKENS);
 
     int64_t j = -1;
-    bool hc = has_coordinates(tokens, &j);
+    bool hc = has_coordinates(tokens_buf, n_tokens, &j);
     int64_t dummy_int;
     bool dummy_bool;
     bool found_s = false;
 
     if (hc) {
-        int64_t n = stList_length(tokens);
-        bool *mask = st_calloc(n, sizeof(bool));        
+        bool mask[MAX_TOKENS];
+        memset(mask, 0, n_tokens * sizeof(bool));
         ++j;
-        while (j < n && strcmp(stList_get(tokens, j), "@") != 0) {
-            char *op_type = stList_get(tokens, j++); // This is the operation
-            j++; // the row index;
+        while (j < n_tokens && strcmp(tokens_buf[j], "@") != 0) {
+            char *op_type = tokens_buf[j++]; // This is the operation
+            j++; // the row index
             assert(strlen(op_type) == 1); // Must be a single character in length
             if(op_type[0] == 'i' || op_type[0] == 's') { // We have coordinates!
                 found_s = found_s || op_type[0] == 's';
                 op_type[0] = 'i';
                 // only parse to increment j (would rather use api than just add 4)
-                parse_coordinates(&j, tokens, &dummy_int, &dummy_bool, &dummy_int);
+                parse_coordinates(&j, tokens_buf, n_tokens, &dummy_int, &dummy_bool, &dummy_int);
             } else if (op_type[0] == 'd') {
                 mask[j-2] = true;
                 mask[j-1] = true;
@@ -163,44 +166,42 @@ static void change_s_coordinates_to_i(char *line) {
                 j++;
             }
         }
-        
+
         if (found_s) {
-            // overwrite our line
-            int64_t line_len = strlen(line);
+            // Reconstruct the line in-place from the non-masked tokens.
+            // Uses memmove to handle the overlapping source/destination buffers safely.
             int64_t k = 0;
-            int64_t n = stList_length(tokens);
-            assert(mask[0] == false);
-            for (j = 0; j < n; ++j) {
-                char *token = (char*)stList_get(tokens, j);
-                if (mask[j] == false) {
+            for (j = 0; j < n_tokens; ++j) {
+                if (!mask[j]) {
+                    char *token = tokens_buf[j];
                     int64_t token_len = strlen(token);
-                    char *spacer = j == 0 ? "" : " ";
-                    assert(k + token_len + strlen(spacer) <= line_len);
-                    sprintf(line + k, "%s%s", spacer, token);
-                    k += strlen(token) + strlen(spacer);
+                    if (j > 0) line[k++] = ' ';
+                    memmove(line + k, token, token_len);
+                    k += token_len;
                 }
             }
+            line[k] = '\0';
         }
     } else {
         fprintf(stderr, "Error loading coordinates from indexed taf line: %s\n", line);
         exit(1);
     }
-
-    stList_destruct(tokens);
+    free(line_copy);
 }
 
 static int tai_create_taf(LI *li, FILE *idx_fh, int64_t index_block_size, bool run_length_encode_bases) {
     char *prev_ref = NULL;
     int64_t prev_pos = 0;
     int64_t prev_file_pos = 0;
+    char *tokens_buf[MAX_TOKENS];
 
     // scan the taf line by line
     for (char *line = LI_get_next_line(li); line != NULL; line = LI_get_next_line(li)) {
-        stList* tokens = stString_split(line);
+        int n_tokens = tokenize_line(line, tokens_buf, MAX_TOKENS);
         int64_t pos;
         assert(sizeof(int64_t) == sizeof(off_t));
         bool strand;
-        char *ref = parse_coordinates_line(tokens, &pos, &strand, run_length_encode_bases);
+        char *ref = parse_coordinates_line(tokens_buf, n_tokens, &pos, &strand, run_length_encode_bases);
         if (ref != NULL) {
             // shouldn't need to handle negative strand on reference, right?
             assert(strand == true);
@@ -220,9 +221,10 @@ static int tai_create_taf(LI *li, FILE *idx_fh, int64_t index_block_size, bool r
                 prev_ref = ref;
                 prev_pos = pos;
                 prev_file_pos = file_pos;
+            } else {
+                free(ref);
             }
         }
-        stList_destruct(tokens);
         free(line);
     }
     free(prev_ref);

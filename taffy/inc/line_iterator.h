@@ -67,6 +67,8 @@ typedef struct _LW {
     FILE *fh;
 #ifdef USE_HTSLIB
     BGZF *bgzf;
+    char *buf;
+    size_t buf_cap;
 #endif
 } LW;
 
@@ -78,6 +80,8 @@ LW *LW_construct(FILE *fh, bool use_compression);
 void LW_destruct(LW *lw, bool clean_up_file_handle);
 
 int LW_write(LW *lw, const char *string, ...);
+
+int LW_write_bytes(LW *lw, const char *data, int len);
 
 #endif /* STLINE_ITERATOR_H_ */
 

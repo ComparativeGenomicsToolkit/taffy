@@ -2,11 +2,27 @@
 #include "sonLib.h"
 
 /*
- * Returns non-zero if the tokens list contains the coordinate marker ':'
+ * Non-destructive scan: returns true if the line contains ";" as a
+ * whitespace-delimited token (i.e. this is a coordinate line).
  */
-bool has_coordinates(stList *tokens, int64_t *j) {
-    for(*j=0; *j<stList_length(tokens); (*j)++) {
-        if(strcmp(stList_get(tokens, *j), ";") == 0) {
+static bool line_has_coordinates(const char *line) {
+    const char *p = line;
+    while (*p != '\0') {
+        while (*p != '\0' && isspace((unsigned char)*p)) p++;
+        if (*p == '\0') break;
+        const char *start = p;
+        while (*p != '\0' && !isspace((unsigned char)*p)) p++;
+        if (p - start == 1 && *start == ';') return true;
+    }
+    return false;
+}
+
+/*
+ * Returns non-zero if the tokens array contains the coordinate marker ';'
+ */
+bool has_coordinates(char **tokens, int n_tokens, int64_t *j) {
+    for(*j=0; *j<n_tokens; (*j)++) {
+        if(strcmp(tokens[*j], ";") == 0) {
             return 1;
         }
     }
@@ -16,13 +32,13 @@ bool has_coordinates(stList *tokens, int64_t *j) {
 /*
  * Parse the sequence_name, start, strand and sequence_length fields for a row
  */
-char *parse_coordinates(int64_t *j, stList *tokens, int64_t *start, bool *strand,
-                        int64_t *sequence_length) {  
-    char *sequence_name = stString_copy(stList_get(tokens, (*j)++));
-    *start = atol(stList_get(tokens, (*j)++));
-    assert(strcmp(stList_get(tokens, (*j)), "+") == 0 || strcmp(stList_get(tokens, (*j)), "-") == 0);
-    *strand = strcmp(stList_get(tokens, (*j)++), "+") == 0;
-    *sequence_length = atol(stList_get(tokens, (*j)++));
+char *parse_coordinates(int64_t *j, char **tokens, int n_tokens, int64_t *start, bool *strand,
+                        int64_t *sequence_length) {
+    char *sequence_name = stString_copy(tokens[(*j)++]);
+    *start = atol(tokens[(*j)++]);
+    assert(strcmp(tokens[*j], "+") == 0 || strcmp(tokens[*j], "-") == 0);
+    *strand = strcmp(tokens[(*j)++], "+") == 0;
+    *sequence_length = atol(tokens[(*j)++]);
     return sequence_name;
 }
 
@@ -30,7 +46,7 @@ char *parse_coordinates(int64_t *j, stList *tokens, int64_t *start, bool *strand
  * Make the block being parsed by copying the previous block and then editing it with the
  * list of coordinate changes.
  */
-static Alignment *parse_coordinates_and_establish_block(Alignment *p_block, stList *tokens) {
+static Alignment *parse_coordinates_and_establish_block(Alignment *p_block, char **tokens, int n_tokens) {
     // Make a new block
     Alignment *alignment = st_calloc(1, sizeof(Alignment));
 
@@ -57,11 +73,11 @@ static Alignment *parse_coordinates_and_establish_block(Alignment *p_block, stLi
 
     // Now parse the tokens to edit the rows
     int64_t j;
-    has_coordinates(tokens, &j); j++; // Get 1+ the coordinate of the ';' token
-    while(j < stList_length(tokens) && strcmp(stList_get(tokens, j), "@") != 0) { // Iterate through the tokens
-        char *op_type = stList_get(tokens, j++); // This is the operation
+    has_coordinates(tokens, n_tokens, &j); j++; // Get 1+ the coordinate of the ';' token
+    while(j < n_tokens && strcmp(tokens[j], "@") != 0) { // Iterate through the tokens
+        char *op_type = tokens[j++]; // This is the operation
         assert(strlen(op_type) == 1); // Must be a single character in length
-        int64_t row_index = atol(stList_get(tokens, j++)); // Get the index of the affected row
+        int64_t row_index = atol(tokens[j++]); // Get the index of the affected row
         int64_t i=0;
         Alignment_Row **row = &(alignment->row); // Get the pointer to the pointer to the row being modded
         while(i++ < row_index) {
@@ -75,10 +91,10 @@ static Alignment *parse_coordinates_and_establish_block(Alignment *p_block, stLi
             new_row->n_row = *row;
             *row = new_row;
             // Fill it out
-            new_row->sequence_name = parse_coordinates(&j, tokens, &new_row->start, &new_row->strand, &new_row->sequence_length);
+            new_row->sequence_name = parse_coordinates(&j, tokens, n_tokens, &new_row->start, &new_row->strand, &new_row->sequence_length);
         } else if(op_type[0] == 's') { // Is substituting a row
             free((*row)->sequence_name); // clean up
-            (*row)->sequence_name = parse_coordinates(&j, tokens, &(*row)->start, &(*row)->strand, &(*row)->sequence_length);            
+            (*row)->sequence_name = parse_coordinates(&j, tokens, n_tokens, &(*row)->start, &(*row)->strand, &(*row)->sequence_length);
         } else if(op_type[0] == 'd') { // Is deleting a row
             // Remove the row from the list of rows
             alignment->row_number--;
@@ -87,11 +103,11 @@ static Alignment *parse_coordinates_and_establish_block(Alignment *p_block, stLi
             // Now delete the row
             alignment_row_destruct(r);
         } else if(op_type[0] == 'g') { // Is making a gap without the sequence specified
-            int64_t gap_length = atol(stList_get(tokens, j++)); // Get the index of the affected row
+            int64_t gap_length = atol(tokens[j++]); // Get the index of the affected row
             (*row)->start += gap_length;
         } else { // Is making a gap with the sequence specified
             assert(op_type[0] == 'G');
-            (*row)->left_gap_sequence = stString_copy(stList_get(tokens, j++));
+            (*row)->left_gap_sequence = stString_copy(tokens[j++]);
             (*row)->start += strlen((*row)->left_gap_sequence);
         }
     }
@@ -102,19 +118,19 @@ static Alignment *parse_coordinates_and_establish_block(Alignment *p_block, stLi
 /*
  * Parse the base alignment for the column.
  */
-char *get_bases(int64_t column_length, stList *tokens, bool run_length_encode_bases) {
+static char *get_bases(int64_t column_length, char **tokens, int n_tokens, bool run_length_encode_bases) {
     if(run_length_encode_bases) { // Case the bases are encoded using run length encoding
         char *column = st_calloc(column_length+1, sizeof(char));
         column[column_length] = '\0'; // Make into a properly terminated string
         int64_t i=0, j=0;
         while(j < column_length) {
-            assert(i < stList_length(tokens));
-            char *base_token = stList_get(tokens, i++);
-            assert(strlen(base_token) == 1); // The base must be a single character
-            int64_t k = atol(stList_get(tokens, i++));
+            assert(i < n_tokens);
+            assert(strlen(tokens[i]) == 1); // The base must be a single character
+            char base_token = tokens[i++][0];
+            int64_t k = atol(tokens[i++]);
             assert(k > 0); // Each count must be greater than zero
             while(k-- > 0) {
-                column[j++] = base_token[0];
+                column[j++] = base_token;
             }
             assert(j <= column_length);
         }
@@ -124,107 +140,94 @@ char *get_bases(int64_t column_length, stList *tokens, bool run_length_encode_ba
         return column;
     }
     // Otherwise column is just a string of bases without whitespace
-    char *column = stString_copy(stList_get(tokens, 0));
+    char *column = stString_copy(tokens[0]);
     assert(strlen(column) == column_length); // Must be a contiguous run of bases equal in length to the number of rows
     return column;
 }
 
 /*
- * Gets the first non-empty line, return NULL if reaches end of file
+ * Gets the first non-empty line, return NULL if reaches end of file.
+ * The returned string must be freed by the caller.
  */
-static stList *get_first_line(LI *li) {
-    stList *tokens = NULL;
-    while(1) { // Loop to find the tokens for the first line
-        // Read column with coordinates first, using previous alignment block and the coordinates
-        // to create the set of rows
-        char *line = LI_get_next_line(li);
-
-        if (line == NULL) { // At end of file
-            return NULL;
-        }
-        // Tokenize the line
-        tokens = stString_split(line);
+static char *get_first_line(LI *li) {
+    char *line;
+    while(1) {
+        line = LI_get_next_line(li);
+        if (line == NULL) return NULL;
+        // Check if the line has any non-whitespace content
+        char *p = line;
+        while (*p != '\0' && isspace((unsigned char)*p)) p++;
+        if (*p != '\0') return line;
         free(line);
-
-        if (stList_length(tokens) == 0) { // Is a white space only line, just ignore it
-            stList_destruct(tokens);
-            tokens = NULL;
-            continue;
-        }
-        else { // We have the first line of the block
-            break;
-        }
     }
-    return tokens;
 }
 
-Tag *parse_tags(stList *tokens, int64_t starting_token, char *delimiter);
+Tag *parse_tags(char **tokens, int n_tokens, int64_t starting_token, char *delimiter);
 
-static Tag *parse_tags_for_column(stList *tokens) {
+static Tag *parse_tags_for_column(char **tokens, int n_tokens) {
     int64_t i=0;
-    while(i<stList_length(tokens)) {
-        if(strcmp(stList_get(tokens, i++), "@") == 0) {
+    while(i<n_tokens) {
+        if(strcmp(tokens[i++], "@") == 0) {
             break; // We have found the token representing the start of the tags
         }
     }
-    return parse_tags(tokens, i, ":");
+    return parse_tags(tokens, n_tokens, i, ":");
 }
 
 Alignment *taf_read_block(Alignment *p_block, bool run_length_encode_bases, LI *li) {
-    stList *tokens = get_first_line(li); // Get the first non-empty line
+    char *tokens_buf[MAX_TOKENS];
+    int n_tokens;
+    char *line;
+
+    // Get the first non-empty, non-comment line
     while(1) {
-        if (tokens == NULL) { // If there are no more lines to be had return NULL
-            return NULL;
-        }
-
-        if(((char *) stList_get(tokens, 0))[0] != '#') { // If it is not a comment line
-            break;
-        }
-
-        stList_destruct(tokens); // Clean up the comment line
-        tokens = get_first_line(li); // Get the next line
+        line = get_first_line(li);
+        if(line == NULL) return NULL;
+        n_tokens = tokenize_line(line, tokens_buf, MAX_TOKENS);
+        if(n_tokens == 0) { free(line); continue; } // shouldn't happen, but be safe
+        if(tokens_buf[0][0] != '#') break; // not a comment line
+        free(line); // skip comment line
     }
 
     // Find the coordinates
-    Alignment *block = parse_coordinates_and_establish_block(p_block, tokens);
+    Alignment *block = parse_coordinates_and_establish_block(p_block, tokens_buf, n_tokens);
 
     // Now add in all subsequent columns until we get one with coordinates, which we push back
     stList *alignment_columns = stList_construct3(0, free);
     stList *tag_lists = stList_construct();
-    stList_append(alignment_columns, get_bases(block->row_number, tokens, run_length_encode_bases));
-    stList_append(tag_lists, parse_tags_for_column(tokens)); // Get any tags for the column
-    stList_destruct(tokens); // Clean up the first row
-    while(1) {
-        char *line = LI_peek_at_next_line(li);
+    stList_append(alignment_columns, get_bases(block->row_number, tokens_buf, n_tokens, run_length_encode_bases));
+    stList_append(tag_lists, parse_tags_for_column(tokens_buf, n_tokens)); // Get any tags for the column
+    free(line); // done with first line
 
-        if(line == NULL) { // We have reached the end of the file
+    while(1) {
+        const char *peek = LI_peek_at_next_line(li);
+
+        if(peek == NULL) { // We have reached the end of the file
             break;
         }
 
-        // tokenize the line
-        tokens = stString_split(line);
-
-        if(stList_length(tokens) == 0) { // Is a white space only line, just ignore it
-            free(LI_get_next_line(li)); // pull the line and clean it up
-            stList_destruct(tokens); // clean up
+        // Check for whitespace-only line without consuming it
+        const char *p = peek;
+        while (*p != '\0' && isspace((unsigned char)*p)) p++;
+        if (*p == '\0') {
+            free(LI_get_next_line(li)); // pull and discard the empty line
             continue;
         }
 
-        int64_t i;
-        if(has_coordinates(tokens, &i)) { // If it has coordinates we have reached the end of the block, so break
-            // and don't pull the line
-            stList_destruct(tokens); // clean up
-            break;
-        }
+        // If next line has coordinates we have reached the end of the block; don't consume it
+        if(line_has_coordinates(peek)) break;
+
+        // Consume and process the non-coordinate line
+        line = LI_get_next_line(li);
+        n_tokens = tokenize_line(line, tokens_buf, MAX_TOKENS);
 
         // Add the bases from the line as a column to the alignment
-        stList_append(alignment_columns, get_bases(block->row_number, tokens, run_length_encode_bases));
+        stList_append(alignment_columns, get_bases(block->row_number, tokens_buf, n_tokens, run_length_encode_bases));
 
         // Parse the tags for the column
-        stList_append(tag_lists, parse_tags_for_column(tokens)); // Get any tags for the column
+        stList_append(tag_lists, parse_tags_for_column(tokens_buf, n_tokens)); // Get any tags for the column
 
-        free(LI_get_next_line(li)); // pull the line and clean up the memory for the line
-        stList_destruct(tokens); // clean up the tokens
+        free(line);
     }
 
     // Set the column number
@@ -264,14 +267,15 @@ Alignment *taf_read_block(Alignment *p_block, bool run_length_encode_bases, LI *
     return block;
 }
 
-Tag *parse_header(stList *tokens, char *header_prefix, char *delimiter);
+Tag *parse_header(char **tokens, int n_tokens, char *header_prefix, char *delimiter);
 
 Tag *taf_read_header(LI *li) {
-    stList *tokens = get_first_line(li);
-    assert(tokens != NULL); // There has to be a valid header line
-    Tag *tag = parse_header(tokens, "#taf", ":");
-    stList_destruct(tokens);
-
+    char *line = get_first_line(li);
+    assert(line != NULL); // There has to be a valid header line
+    char *tokens_buf[MAX_TOKENS];
+    int n_tokens = tokenize_line(line, tokens_buf, MAX_TOKENS);
+    Tag *tag = parse_header(tokens_buf, n_tokens, "#taf", ":");
+    free(line);
     return tag;
 }
 
@@ -429,21 +433,20 @@ void taf_write_header(Tag *tag, LW *lw) {
 int check_input_format(const char *header_line) {
     int ret = 2;
     assert(header_line != NULL);
-    stList *tokens = stString_split(header_line);
-    if (stList_length(tokens) > 0) {
-        if (strcmp(stList_get(tokens, 0), "#taf") == 0) {
-            ret = 0;
-        } else if (strcmp(stList_get(tokens, 0), "##maf") == 0) {
-            ret = 1;
-        }
-    }            
-    stList_destruct(tokens);
-#ifndef USE_HTSLIB   
+    // Skip leading whitespace and check the first token without allocating
+    const char *p = header_line;
+    while (isspace((unsigned char)*p)) p++;
+    if (strncmp(p, "#taf", 4) == 0 && (p[4] == '\0' || isspace((unsigned char)p[4]))) {
+        ret = 0;
+    } else if (strncmp(p, "##maf", 5) == 0 && (p[5] == '\0' || isspace((unsigned char)p[5]))) {
+        ret = 1;
+    }
+#ifndef USE_HTSLIB
     if (ret == 2 && strlen(header_line) >= 2 &&
         (unsigned char)header_line[0] == 0x1f && (unsigned char)header_line[1] == 0x8b) {
         fprintf(stderr, "(b)gzipped input support disabled: please build TAFFY with htslib\n");
         exit(1);
-    }     
+    }
 #endif
     return ret;
 }

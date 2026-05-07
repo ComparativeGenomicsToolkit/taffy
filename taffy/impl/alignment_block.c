@@ -280,23 +280,23 @@ void alignment_mask_reference_bases(Alignment *alignment, char mask_char) {
 /*
  * Returns a sequence of tags from the tokens, starting at starting_token
  */
-Tag *parse_tags(stList *tokens, int64_t starting_token, char *delimiter) {
+Tag *parse_tags(char **tokens, int n_tokens, int64_t starting_token, char *delimiter) {
     Tag *first_tag = NULL, *tag = NULL;
-    if(starting_token < stList_length(tokens)) { // parse first tag pair
-        tag = tag_parse(stList_get(tokens, starting_token), delimiter, NULL);
+    if(starting_token < n_tokens) { // parse first tag pair
+        tag = tag_parse(tokens[starting_token], delimiter, NULL);
         first_tag = tag;
     }
-    for(int64_t i=starting_token+1; i<stList_length(tokens); i++) {
-        tag = tag_parse(stList_get(tokens, i), delimiter, tag);
+    for(int64_t i=starting_token+1; i<n_tokens; i++) {
+        tag = tag_parse(tokens[i], delimiter, tag);
     }
     return first_tag;
 }
 
-Tag *parse_header(stList *tokens, char *header_prefix, char *delimiter) {
-    if(stList_length(tokens) == 0 || strcmp((char *)stList_get(tokens, 0), header_prefix) != 0) {
+Tag *parse_header(char **tokens, int n_tokens, char *header_prefix, char *delimiter) {
+    if(n_tokens == 0 || strcmp(tokens[0], header_prefix) != 0) {
         st_errAbort("Header line does not start with %s\n", header_prefix);
     }
-    return parse_tags(tokens, 1, delimiter);
+    return parse_tags(tokens, n_tokens, 1, delimiter);
 }
 
 void write_header(Tag *tag, LW *lw, char *header_prefix, char *delimiter, char *end) {
