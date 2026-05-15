@@ -2,6 +2,7 @@ rootPath = .
 include ${rootPath}/include.mk
 
 srcDir = taffy/impl
+oneCodeDir = taffy/submodules/ONEcode
 libHeaders = taffy/inc/*.h
 libTests = tests/*.c
 
@@ -33,8 +34,11 @@ ${sonLibDir}/cuTest.a : sonLib
 
 stTafDependencies = ${sonLibDir}/sonLib.a ${sonLibDir}/cuTest.a ${LIBDIR}/libabpoa.a
 
-${LIBDIR}/libstTaf.a : ${libTests} ${libHeaders} ${srcDir}/alignment_block.o ${srcDir}/line_iterator.o ${srcDir}/maf.o ${srcDir}/paf.o ${srcDir}/ond.o ${srcDir}/taf.o ${srcDir}/add_gap_bases.o ${srcDir}/merge_adjacent_alignments.o ${srcDir}/prefix_sort.o ${srcDir}/wiggle.o ${srcDir}/tai.o ${libHeaders} ${stTafDependencies}
-	${AR} rc libstTaf.a ${srcDir}/alignment_block.o ${srcDir}/line_iterator.o ${srcDir}/maf.o ${srcDir}/paf.o ${srcDir}/ond.o ${srcDir}/taf.o ${srcDir}/add_gap_bases.o ${srcDir}/merge_adjacent_alignments.o ${srcDir}/prefix_sort.o ${srcDir}/wiggle.o ${srcDir}/tai.o
+${oneCodeDir}/ONElib.o : ${oneCodeDir}/ONElib.c ${oneCodeDir}/ONElib.h
+	${CC} ${CFLAGS} ${LDFLAGS} -fPIC -o ${oneCodeDir}/ONElib.o -c ${oneCodeDir}/ONElib.c
+
+${LIBDIR}/libstTaf.a : ${libTests} ${libHeaders} ${srcDir}/alignment_block.o ${srcDir}/line_iterator.o ${srcDir}/maf.o ${srcDir}/paf.o ${srcDir}/ond.o ${srcDir}/taf.o ${srcDir}/add_gap_bases.o ${srcDir}/merge_adjacent_alignments.o ${srcDir}/prefix_sort.o ${srcDir}/wiggle.o ${srcDir}/tai.o ${srcDir}/tui.o ${oneCodeDir}/ONElib.o ${libHeaders} ${stTafDependencies}
+	${AR} rc libstTaf.a ${srcDir}/alignment_block.o ${srcDir}/line_iterator.o ${srcDir}/maf.o ${srcDir}/paf.o ${srcDir}/ond.o ${srcDir}/taf.o ${srcDir}/add_gap_bases.o ${srcDir}/merge_adjacent_alignments.o ${srcDir}/prefix_sort.o ${srcDir}/wiggle.o ${srcDir}/tai.o ${srcDir}/tui.o ${oneCodeDir}/ONElib.o
 	mv libstTaf.a ${LIBDIR}/
 
 ${srcDir}/alignment_block.o : ${srcDir}/alignment_block.c ${libHeaders}
@@ -63,6 +67,9 @@ ${srcDir}/taf.o : ${srcDir}/taf.c ${libHeaders}
 
 ${srcDir}/tai.o : ${srcDir}/tai.c ${libHeaders}
 	${CC} ${CFLAGS} ${LDFLAGS} -o ${srcDir}/tai.o -c ${srcDir}/tai.c
+
+${srcDir}/tui.o : ${srcDir}/tui.c ${libHeaders} ${oneCodeDir}/ONElib.o
+	${CC} ${CFLAGS} ${LDFLAGS} -o ${srcDir}/tui.o -c ${srcDir}/tui.c
 
 ${srcDir}/prefix_sort.o : ${srcDir}/prefix_sort.c ${libHeaders}
 	${CC} ${CFLAGS} ${LDFLAGS} -o ${srcDir}/prefix_sort.o -c ${srcDir}/prefix_sort.c

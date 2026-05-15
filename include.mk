@@ -78,7 +78,7 @@ endif
 
 dataSetsPath=/Users/benedictpaten/Dropbox/Documents/work/myPapers/genomeCactusPaper/dataSets
 
-inclDirs = taffy/inc taffy/submodules/sonLib/C/inc taffy/submodules/sonLib/externalTools/cutest
+inclDirs = taffy/inc taffy/submodules/sonLib/C/inc taffy/submodules/sonLib/externalTools/cutest taffy/submodules/ONEcode
 
 # client can bypass auto-check by setting their own HTSLIB flags via HTSLIB_CFLAGS and HTSLIB_LIBS
 ifdef HTSLIB_CFLAGS
