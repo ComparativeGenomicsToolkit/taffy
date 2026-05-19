@@ -394,13 +394,42 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
             while (bnd < nr && seqname_cmp(runs[bnd].seq, sk) == 0) bnd++;
             int64_t cnt = bnd - a;
             int64_t *buf = st_malloc((cnt ? 3 * cnt : 1) * sizeof(int64_t));
-            for (int64_t k = 0; k < cnt; k++) {
-                Run *r = &runs[a + k];
-                buf[3*k+0] = r->t;
-                buf[3*k+1] = r->g;
-                buf[3*k+2] = (r->len << 1) | (r->strand == '-' ? 1 : 0);
+            // Colinear merge: runs[a..bnd) are this seq's runs sorted by t
+            // ascending and partition its forward coords disjointly.  Two
+            // consecutive runs describe the same linear p->col map and so fold
+            // into one iff same strand, forward-adjacent (prev.t+prev.len ==
+            // cur.t), AND column-contiguous.  col(p): '+' = g+(p-t) (slope +1,
+            // so cur.g == prev.g+prev.len); '-' = g+(t+len-1-p) (slope -1, so
+            // cur.g == prev.g-cur.len, and the merged run keeps cur.g).  An
+            // in-row alignment gap leaves t adjacent but g discontinuous, so
+            // the column test correctly refuses to merge across it.
+            int64_t m = 0;  // merged-run count (triples written into buf)
+            for (int64_t k = a; k < bnd; k++) {
+                Run *r = &runs[k];
+                int64_t rt = r->t, rg = r->g, rl = r->len;
+                char rs = r->strand;
+                if (m > 0) {
+                    int64_t *pp = &buf[3 * (m - 1)];
+                    int64_t pt = pp[0], pg = pp[1], pl = pp[2] >> 1;
+                    char ps = (pp[2] & 1) ? '-' : '+';
+                    if (ps == rs && rt == pt + pl) {
+                        if (rs == '+' && rg == pg + pl) {
+                            pp[2] = (pl + rl) << 1;            // extend, '+'
+                            continue;
+                        }
+                        if (rs == '-' && rg == pg - rl) {
+                            pp[1] = rg;                        // merged g = cur.g
+                            pp[2] = ((pl + rl) << 1) | 1;      // extend, '-'
+                            continue;
+                        }
+                    }
+                }
+                buf[3*m+0] = rt;
+                buf[3*m+1] = rg;
+                buf[3*m+2] = (rl << 1) | (rs == '-' ? 1 : 0);
+                m++;
             }
-            oneWriteLine(of, 'R', 3 * cnt, buf);
+            oneWriteLine(of, 'R', 3 * m, buf);
             free(buf);
             rc = bnd;   // advance cursor past this seq's runs
             i++;
