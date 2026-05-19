@@ -27,15 +27,16 @@
 // SoA gap|gsk|lenc form is ~5x smaller than absolute end to end.
 //
 // A is the explicit Index-A reference track (the materialized canonical BED):
-// one INT_LIST [colStart, sOrd, row0Start, len]*nSeg, column-ordered, the
-// row-0 (block-reference) segments tiling [0,T) -- this is what step-2 query
-// uses to turn universal columns into row-0 coords for the existing .tai.
-// Written once, right after `t`, before `d`.  Strand is always '+' (asserted
-// at build; tai itself rejects a '-' row-0).
+// the column-ordered row-0 (block-reference) segments tiling [0,T).  Stored
+// like R -- (inflatedLen INT, deflated STRING) -- as a SoA delta+varint blob
+// (see encode_refseg); colStart is dropped (= prefix sum of len, since the
+// segments tile [0,T)).  Step-2 query uses it to turn universal columns into
+// row-0 coords for the existing .tai.  Written once, right after `t`, before
+// `d`.  Strand is always '+' (asserted at build; tai rejects a '-' row-0).
 static const char *TUI_SCHEMA =
     "P 3 tui\n"
     "D t 1 3 INT\n"                          // total columns T (global)
-    "D A 1 8 INT_LIST\n"                     // Index-A: [colStart,sOrd,row0Start,len]*
+    "D A 3 3 INT 3 INT 6 STRING\n"           // Index-A: inflatedLen, nSeg, deflate(SoA blob)
     "D d 4 6 STRING 3 INT 3 INT 3 INT\n"     // dir: seqName, S-ordinal, seqLen, isRef
     "O S 2 6 STRING 3 INT\n"                 // sequence object: seqName, seqLen
     "D R 2 3 INT 6 STRING\n";                // runs: inflatedLen, deflate(blob)
@@ -445,6 +446,79 @@ static int64_t decode_runs(const uint8_t *def, int64_t def_len,
     return m;
 }
 
+// Index-A reference-track codec.  Same shape as encode_runs (SoA delta+varint,
+// one zlib deflate) but tuned for the row-0 segments.  `colStart` is NOT
+// stored: the segments tile [0,T) exactly (builder asserts contiguity), so
+// colStart is the prefix sum of `len` -- reconstructed at decode.  Streams:
+//   O = zigzag(sOrd - prevOrd)     (often 0: same row-0 seq across a jump)
+//   P = zigzag(row0Start - prevRow0)
+//   L = uvarint(len)
+// header = uvarint(nSeg), uvarint(|O|), uvarint(|P|); raw = hdr+O+P+L.
+static uint8_t *encode_refseg(const int64_t *sOrd, const int64_t *row0,
+                              const int64_t *len, int64_t nSeg,
+                              int64_t *raw_len, int64_t *def_len) {
+    uint8_t *O = st_malloc((size_t)(nSeg * 10 + 1));
+    uint8_t *P = st_malloc((size_t)(nSeg * 10 + 1));
+    uint8_t *L = st_malloc((size_t)(nSeg * 10 + 1));
+    size_t on = 0, pn = 0, ln = 0;
+    int64_t po = 0, pr = 0;
+    for (int64_t k = 0; k < nSeg; k++) {
+        on += put_uvarint(O + on, zigzag(sOrd[k] - po));
+        pn += put_uvarint(P + pn, zigzag(row0[k] - pr));
+        ln += put_uvarint(L + ln, (uint64_t)len[k]);
+        po = sOrd[k]; pr = row0[k];
+    }
+    uint8_t hdr[30];
+    size_t hn = 0;
+    hn += put_uvarint(hdr + hn, (uint64_t)nSeg);
+    hn += put_uvarint(hdr + hn, (uint64_t)on);
+    hn += put_uvarint(hdr + hn, (uint64_t)pn);
+    size_t rn = hn + on + pn + ln;
+    uint8_t *raw = st_malloc(rn ? rn : 1);
+    memcpy(raw, hdr, hn);
+    memcpy(raw + hn, O, on);
+    memcpy(raw + hn + on, P, pn);
+    memcpy(raw + hn + on + pn, L, ln);
+    free(O); free(P); free(L);
+    uLongf cap = compressBound((uLong)rn);
+    uint8_t *def = st_malloc(cap ? cap : 1);
+    uLongf dl = cap;
+    if (compress2(def, &dl, raw, (uLong)rn, 9) != Z_OK) {
+        st_errAbort("tui: zlib compress2 failed (A)");
+    }
+    free(raw);
+    *raw_len = (int64_t)rn;
+    *def_len = (int64_t)dl;
+    return def;
+}
+
+// Inverse of encode_refseg.  Fills colStart/sOrd/row0/len[0..nSeg) (colStart
+// reconstructed as the running prefix sum of len, from 0).  Returns nSeg.
+static int64_t decode_refseg(const uint8_t *def, int64_t def_len,
+                             int64_t raw_len, int64_t *colStart,
+                             int64_t *sOrd, int64_t *row0, int64_t *len) {
+    uint8_t *raw = st_malloc((size_t)(raw_len ? raw_len : 1));
+    uLongf rl = (uLongf)raw_len;
+    if (uncompress(raw, &rl, def, (uLong)def_len) != Z_OK || (int64_t)rl != raw_len) {
+        st_errAbort("tui: zlib uncompress failed (A)");
+    }
+    const uint8_t *h = raw;
+    int64_t nSeg = (int64_t)get_uvarint(&h);
+    int64_t on = (int64_t)get_uvarint(&h);
+    int64_t pn = (int64_t)get_uvarint(&h);
+    const uint8_t *op = h, *pp = h + on, *lp = h + on + pn;
+    int64_t po = 0, pr = 0, col = 0;
+    for (int64_t k = 0; k < nSeg; k++) {
+        int64_t o = po + unzigzag(get_uvarint(&op));
+        int64_t r = pr + unzigzag(get_uvarint(&pp));
+        int64_t l = (int64_t)get_uvarint(&lp);
+        colStart[k] = col; sOrd[k] = o; row0[k] = r; len[k] = l;
+        col += l; po = o; pr = r;
+    }
+    free(raw);
+    return nSeg;
+}
+
 // Remove spill files and free phase-1 state.  Shared by the success and the
 // error-return paths so a failed run never leaks spill files on disk.
 // `tree_map` (the # hal-derived genome set, or NULL) is freed here too so its
@@ -559,19 +633,20 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
     oneWriteLine(of, 't', 0, NULL);
 
     // A: Index-A reference track.  Resolve each spilled row-0 segment's
-    // sequence name to its S-ordinal (== position in the sorted global order)
-    // and emit one INT_LIST [colStart, sOrd, row0Start, len]* in column order.
+    // sequence name to its S-ordinal (== position in the sorted global order),
+    // then SoA delta+varint+deflate (colStart dropped = prefix sum of len).
     stHash *name2ord = stHash_construct3(stHash_stringKey, stHash_stringEqualKey,
                                          NULL, NULL);
     for (int64_t i = 0; i < n_seqs; i++) {
         stHash_insert(name2ord, seqks[i].seq, (void *)(intptr_t)(i + 1));
     }
-    int64_t *abuf = NULL, an = 0, acap = 0;
+    int64_t *segOrd = NULL, *segRow0 = NULL, *segLen = NULL, *segCol0 = NULL;
+    int64_t nSeg = 0, segCap = 0;
     if (p1.ref_path != NULL) {
         FILE *rf = fopen(p1.ref_path, "r");
         if (rf == NULL) st_errAbort("tui: cannot reopen ref spill %s", p1.ref_path);
         char line[16384], sbuf[8192];
-        int64_t c0, r0, ln;
+        int64_t c0, r0, ln, runcol = 0;
         while (fgets(line, sizeof(line), rf) != NULL) {
             if (sscanf(line, "%" SCNi64 "\t%8191s\t%" SCNi64 "\t%" SCNi64,
                        &c0, sbuf, &r0, &ln) != 4) {
@@ -579,15 +654,49 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
             }
             void *ov = stHash_search(name2ord, sbuf);
             if (ov == NULL) st_errAbort("tui: ref seq '%s' not in directory", sbuf);
-            int64_t ord = (int64_t)(intptr_t)ov - 1;
-            if (an + 4 > acap) { acap = acap ? acap * 2 : 4096;
-                                 abuf = st_realloc(abuf, acap * sizeof(int64_t)); }
-            abuf[an++] = c0; abuf[an++] = ord; abuf[an++] = r0; abuf[an++] = ln;
+            // segments must tile [0,T): colStart == running prefix sum of len
+            if (c0 != runcol) {
+                st_errAbort("tui: ref track not contiguous (seg colStart %"
+                            PRIi64 " != expected %" PRIi64 ")", c0, runcol);
+            }
+            runcol += ln;
+            if (nSeg == segCap) {
+                segCap = segCap ? segCap * 2 : 4096;
+                segOrd  = st_realloc(segOrd,  segCap * sizeof(int64_t));
+                segRow0 = st_realloc(segRow0, segCap * sizeof(int64_t));
+                segLen  = st_realloc(segLen,  segCap * sizeof(int64_t));
+                segCol0 = st_realloc(segCol0, segCap * sizeof(int64_t));
+            }
+            segCol0[nSeg] = c0;
+            segOrd[nSeg]  = (int64_t)(intptr_t)ov - 1;
+            segRow0[nSeg] = r0;
+            segLen[nSeg]  = ln;
+            nSeg++;
         }
         fclose(rf);
     }
-    oneWriteLine(of, 'A', an, an ? abuf : NULL);
-    free(abuf);
+    {
+        int64_t a_raw = 0, a_def = 0;
+        uint8_t *adef = encode_refseg(segOrd, segRow0, segLen, nSeg,
+                                      &a_raw, &a_def);
+        // self-check: decode must reproduce the segments (asserts on in taffy)
+        int64_t *cC = st_malloc((nSeg ? nSeg : 1) * sizeof(int64_t));
+        int64_t *cO = st_malloc((nSeg ? nSeg : 1) * sizeof(int64_t));
+        int64_t *cR = st_malloc((nSeg ? nSeg : 1) * sizeof(int64_t));
+        int64_t *cL = st_malloc((nSeg ? nSeg : 1) * sizeof(int64_t));
+        int64_t dn = decode_refseg(adef, a_def, a_raw, cC, cO, cR, cL);
+        assert(dn == nSeg);
+        for (int64_t k = 0; k < nSeg; k++) {
+            assert(cC[k] == segCol0[k] && cO[k] == segOrd[k] &&
+                   cR[k] == segRow0[k] && cL[k] == segLen[k]);
+        }
+        free(cC); free(cO); free(cR); free(cL);
+        oneInt(of, 0) = a_raw;
+        oneInt(of, 1) = nSeg;
+        oneWriteLine(of, 'A', a_def, adef);
+        free(adef);
+    }
+    free(segOrd); free(segRow0); free(segLen); free(segCol0);
     stHash_destruct(name2ord);
 
     // d: directory (front of file), S-ordinal == position in global order
@@ -721,20 +830,19 @@ Tui *tui_load(const char *tui_path) {
     while ((c = oneReadLine(of)) != 0) {
         if (c == 't') {
             tui->T = oneInt(of, 0);
-        } else if (c == 'A') {                 // Index-A: [col0,ord,row0,len]*
-            int64_t ln = oneLen(of);
-            tui->nSeg = ln / 4;
-            const int64_t *L = (const int64_t *)oneIntList(of);
-            tui->segCol0 = st_malloc((tui->nSeg ? tui->nSeg : 1) * sizeof(int64_t));
-            tui->segOrd  = st_malloc((tui->nSeg ? tui->nSeg : 1) * sizeof(int64_t));
-            tui->segRow0 = st_malloc((tui->nSeg ? tui->nSeg : 1) * sizeof(int64_t));
-            tui->segLen  = st_malloc((tui->nSeg ? tui->nSeg : 1) * sizeof(int64_t));
-            for (int64_t s = 0; s < tui->nSeg; s++) {
-                tui->segCol0[s] = L[4*s+0];
-                tui->segOrd[s]  = L[4*s+1];
-                tui->segRow0[s] = L[4*s+2];
-                tui->segLen[s]  = L[4*s+3];
-            }
+        } else if (c == 'A') {                 // Index-A: (rawLen, nSeg, deflate blob)
+            int64_t a_raw = oneInt(of, 0);
+            int64_t nSeg  = oneInt(of, 1);
+            int64_t a_def = oneLen(of);
+            const uint8_t *adef = (const uint8_t *)oneString(of);
+            int64_t cap = nSeg ? nSeg : 1;
+            tui->segCol0 = st_malloc(cap * sizeof(int64_t));
+            tui->segOrd  = st_malloc(cap * sizeof(int64_t));
+            tui->segRow0 = st_malloc(cap * sizeof(int64_t));
+            tui->segLen  = st_malloc(cap * sizeof(int64_t));
+            tui->nSeg = decode_refseg(adef, a_def, a_raw, tui->segCol0,
+                                      tui->segOrd, tui->segRow0, tui->segLen);
+            assert(tui->nSeg == nSeg);
         } else if (c == 'd') {                 // dir: name(STRING), ord, seqLen, isRef
             int64_t n = oneLen(of);
             char *nm = st_malloc(n + 1);
