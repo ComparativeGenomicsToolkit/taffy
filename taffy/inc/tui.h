@@ -83,6 +83,9 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
 /* A half-open universal-column interval [start, end). */
 typedef struct { int64_t start; int64_t end; } TuiInterval;
 
+/* A row-0 (ancestor) coordinate piece: [start, start+len) of `seq`. */
+typedef struct { char *seq; int64_t start; int64_t len; } TuiRef;
+
 typedef struct _Tui Tui;
 
 /*
@@ -111,6 +114,17 @@ int tui_has_sequence(const Tui *tui, const char *seq_name);
  */
 TuiInterval *tui_query(Tui *tui, const char *seq_name,
                        int64_t start, int64_t end, int64_t *n_out);
+
+/*
+ * Index A: map universal-column intervals to row-0 (ancestor) coordinate
+ * pieces via the explicit reference track.  `uiv` is the column-ordered,
+ * merged output of tui_query.  Returns a malloc'd array (caller frees the
+ * array; the `.seq` pointers are owned by `tui`, do NOT free them) in column
+ * order; *n_out = count.  One input interval can yield several pieces on
+ * different row-0 sequences/ancestors.  Returns NULL with *n_out==0 if empty.
+ */
+TuiRef *tui_col_range_to_ref(const Tui *tui, const TuiInterval *uiv,
+                             int64_t n_uiv, int64_t *n_out);
 
 #endif /* TAF_TUI_H_ */
 

@@ -25,9 +25,17 @@
 // inflated blob length (sizes the inflate buffer); the STRING list is the
 // deflated bytes.  Absolute (t,g,len) triples defeat ONElib's Huffman; the
 // SoA gap|gsk|lenc form is ~5x smaller than absolute end to end.
+//
+// A is the explicit Index-A reference track (the materialized canonical BED):
+// one INT_LIST [colStart, sOrd, row0Start, len]*nSeg, column-ordered, the
+// row-0 (block-reference) segments tiling [0,T) -- this is what step-2 query
+// uses to turn universal columns into row-0 coords for the existing .tai.
+// Written once, right after `t`, before `d`.  Strand is always '+' (asserted
+// at build; tai itself rejects a '-' row-0).
 static const char *TUI_SCHEMA =
     "P 3 tui\n"
     "D t 1 3 INT\n"                          // total columns T (global)
+    "D A 1 8 INT_LIST\n"                     // Index-A: [colStart,sOrd,row0Start,len]*
     "D d 4 6 STRING 3 INT 3 INT 3 INT\n"     // dir: seqName, S-ordinal, seqLen, isRef
     "O S 2 6 STRING 3 INT\n"                 // sequence object: seqName, seqLen
     "D R 2 3 INT 6 STRING\n";                // runs: inflatedLen, deflate(blob)
@@ -193,7 +201,63 @@ typedef struct {
     const char *out_base; // basename of out path (for unique spill names)
     int next_spill_id;
     stHash *gmap;         // optional name map for >1-dot genome resolution
+    // Index-A reference track: one open row-0 segment, colinear-merged on the
+    // fly, flushed (column-ordered) to a single spill file.
+    FILE   *ref_fh;       // ref-track spill (lazy open); NULL until first flush
+    char   *ref_path;     // we own/free this
+    char   *ro_seq;       // open segment's row-0 sequence name (strdup)
+    int64_t ro_col0, ro_row0, ro_len;
+    int     ro_open;
 } Phase1;
+
+// Flush the open row-0 segment (if any) to the ref-track spill.
+static void ref_flush(Phase1 *p1) {
+    if (!p1->ro_open) return;
+    if (p1->ref_fh == NULL) {
+        p1->ref_path = stString_print("%s/%s.tuiRef.%ld", p1->tmp_dir,
+                                      p1->out_base, (long)getpid());
+        p1->ref_fh = fopen(p1->ref_path, "w");
+        if (p1->ref_fh == NULL) {
+            fprintf(stderr, "tui: cannot open ref spill %s\n", p1->ref_path);
+            exit(1);
+        }
+    }
+    fprintf(p1->ref_fh, "%" PRIi64 "\t%s\t%" PRIi64 "\t%" PRIi64 "\n",
+            p1->ro_col0, p1->ro_seq, p1->ro_row0, p1->ro_len);
+    free(p1->ro_seq);
+    p1->ro_seq = NULL;
+    p1->ro_open = 0;
+}
+
+// Record this block's row-0 segment into the on-the-fly-merged ref track.
+// row0 = aln->row (the block reference), col0 = first universal column of the
+// block, cn = column_number (== row-0 base count, since row-0 is gap-free).
+static void ref_track_block(Phase1 *p1, Alignment_Row *row0,
+                            int64_t col0, int64_t cn) {
+    if (!row0->strand) {
+        st_errAbort("tui: row-0 sequence '%s' is on '-' strand; a universal "
+                    "MAF row-0 must be '+' (the .tai requires it)",
+                    row0->sequence_name);
+    }
+    if (row0->length != cn) {
+        st_errAbort("tui: row-0 '%s' is not gap-free (length %" PRIi64
+                    " != column_number %" PRIi64 "); --universal / "
+                    "maxRefGap==0 expected", row0->sequence_name,
+                    row0->length, cn);
+    }
+    if (p1->ro_open && p1->ro_row0 + p1->ro_len == row0->start &&
+        strcmp(p1->ro_seq, row0->sequence_name) == 0) {
+        assert(p1->ro_col0 + p1->ro_len == col0);  // columns globally sequential
+        p1->ro_len += cn;
+        return;
+    }
+    ref_flush(p1);
+    p1->ro_seq  = stString_copy(row0->sequence_name);
+    p1->ro_col0 = col0;
+    p1->ro_row0 = row0->start;
+    p1->ro_len  = cn;
+    p1->ro_open = 1;
+}
 
 static FILE *spill_for(Phase1 *p1, const char *genome) {
     FILE *fh = stHash_search(p1->spill_fh, (void *)genome);
@@ -225,6 +289,7 @@ static void tui_phase1_block(Phase1 *p1, Alignment *aln) {
     char *ref_g = genome_of(aln->row->sequence_name, p1->gmap);
     if (stSet_search(p1->ref_genomes, ref_g) == NULL) stSet_insert(p1->ref_genomes, ref_g);
     else free(ref_g);
+    ref_track_block(p1, aln->row, p1->T, cn);   // Index A: this block's row-0
     for (Alignment_Row *row = aln->row; row != NULL; row = row->n_row) {
         char *gname = genome_of(row->sequence_name, p1->gmap);
         note_seq(p1, row->sequence_name, row->sequence_length);
@@ -392,6 +457,9 @@ static void tui_cleanup(Phase1 *p1, SeqKey *seqks, int64_t n_seqs,
         remove((char *)stHash_search(p1->spill_path, gk));
     }
     stHash_destructIterator(hit);
+    if (p1->ref_fh != NULL) fclose(p1->ref_fh);          // error-path: still open
+    if (p1->ref_path != NULL) { remove(p1->ref_path); free(p1->ref_path); }
+    if (p1->ro_open) free(p1->ro_seq);                   // error-path: open segment
     for (int64_t i = 0; i < n_seqs; i++) free(seqks[i].genome);  // .seq owned by seq_len
     free(seqks);
     stHash_destruct(p1->spill_fh);
@@ -442,6 +510,7 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
     p1.seq_keys = stList_construct();
     p1.ref_genomes = stSet_construct3(stHash_stringKey, stHash_stringEqualKey, free);
     p1.T = 0;
+    p1.ref_fh = NULL; p1.ref_path = NULL; p1.ro_seq = NULL; p1.ro_open = 0;
 
     Alignment *aln, *p_aln = NULL;
     if (input_format == 1) {
@@ -457,6 +526,8 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
         }
         if (p_aln != NULL) alignment_destruct(p_aln, 1);
     }
+    ref_flush(&p1);                       // flush the last open row-0 segment
+    if (p1.ref_fh != NULL) { fclose(p1.ref_fh); p1.ref_fh = NULL; }
     // close all spill FILE*s (paths kept for phase 2)
     stHashIterator *hit = stHash_getIterator(p1.spill_fh);
     char *gk;
@@ -486,6 +557,38 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
     // t: total columns
     oneInt(of, 0) = p1.T;
     oneWriteLine(of, 't', 0, NULL);
+
+    // A: Index-A reference track.  Resolve each spilled row-0 segment's
+    // sequence name to its S-ordinal (== position in the sorted global order)
+    // and emit one INT_LIST [colStart, sOrd, row0Start, len]* in column order.
+    stHash *name2ord = stHash_construct3(stHash_stringKey, stHash_stringEqualKey,
+                                         NULL, NULL);
+    for (int64_t i = 0; i < n_seqs; i++) {
+        stHash_insert(name2ord, seqks[i].seq, (void *)(intptr_t)(i + 1));
+    }
+    int64_t *abuf = NULL, an = 0, acap = 0;
+    if (p1.ref_path != NULL) {
+        FILE *rf = fopen(p1.ref_path, "r");
+        if (rf == NULL) st_errAbort("tui: cannot reopen ref spill %s", p1.ref_path);
+        char line[16384], sbuf[8192];
+        int64_t c0, r0, ln;
+        while (fgets(line, sizeof(line), rf) != NULL) {
+            if (sscanf(line, "%" SCNi64 "\t%8191s\t%" SCNi64 "\t%" SCNi64,
+                       &c0, sbuf, &r0, &ln) != 4) {
+                st_errAbort("tui: corrupt ref spill line: %s", line);
+            }
+            void *ov = stHash_search(name2ord, sbuf);
+            if (ov == NULL) st_errAbort("tui: ref seq '%s' not in directory", sbuf);
+            int64_t ord = (int64_t)(intptr_t)ov - 1;
+            if (an + 4 > acap) { acap = acap ? acap * 2 : 4096;
+                                 abuf = st_realloc(abuf, acap * sizeof(int64_t)); }
+            abuf[an++] = c0; abuf[an++] = ord; abuf[an++] = r0; abuf[an++] = ln;
+        }
+        fclose(rf);
+    }
+    oneWriteLine(of, 'A', an, an ? abuf : NULL);
+    free(abuf);
+    stHash_destruct(name2ord);
 
     // d: directory (front of file), S-ordinal == position in global order
     for (int64_t i = 0; i < n_seqs; i++) {
@@ -597,9 +700,14 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
 /////////////////////////////////////////////////////////////////////////////
 
 struct _Tui {
-    char   *path;     // .tui path (re-opened per query for now)
-    int64_t T;        // total universal columns
-    stHash *seq_len;  // full "genome.sequence" -> int64_t* sequence length
+    char   *path;       // .tui path (re-opened per query for now)
+    int64_t T;          // total universal columns
+    stHash *seq_len;    // full "genome.sequence" -> int64_t* sequence length
+    // Index-A reference track (column-ordered, tiles [0,T)).
+    int64_t *segCol0, *segOrd, *segRow0, *segLen;
+    int64_t  nSeg;
+    char   **ord2name;  // S-ordinal -> sequence name (we own the strings)
+    int64_t  nOrd;
 };
 
 Tui *tui_load(const char *tui_path) {
@@ -608,15 +716,40 @@ Tui *tui_load(const char *tui_path) {
     Tui *tui = st_calloc(1, sizeof(Tui));
     tui->path = stString_copy(tui_path);
     tui->seq_len = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, free, free);
+    int64_t ord_cap = 0;
     char c;
     while ((c = oneReadLine(of)) != 0) {
         if (c == 't') {
             tui->T = oneInt(of, 0);
+        } else if (c == 'A') {                 // Index-A: [col0,ord,row0,len]*
+            int64_t ln = oneLen(of);
+            tui->nSeg = ln / 4;
+            const int64_t *L = (const int64_t *)oneIntList(of);
+            tui->segCol0 = st_malloc((tui->nSeg ? tui->nSeg : 1) * sizeof(int64_t));
+            tui->segOrd  = st_malloc((tui->nSeg ? tui->nSeg : 1) * sizeof(int64_t));
+            tui->segRow0 = st_malloc((tui->nSeg ? tui->nSeg : 1) * sizeof(int64_t));
+            tui->segLen  = st_malloc((tui->nSeg ? tui->nSeg : 1) * sizeof(int64_t));
+            for (int64_t s = 0; s < tui->nSeg; s++) {
+                tui->segCol0[s] = L[4*s+0];
+                tui->segOrd[s]  = L[4*s+1];
+                tui->segRow0[s] = L[4*s+2];
+                tui->segLen[s]  = L[4*s+3];
+            }
         } else if (c == 'd') {                 // dir: name(STRING), ord, seqLen, isRef
             int64_t n = oneLen(of);
             char *nm = st_malloc(n + 1);
             memcpy(nm, oneString(of), n);
             nm[n] = '\0';
+            int64_t ord = oneInt(of, 1);
+            if (ord >= ord_cap) {
+                int64_t nc = ord_cap ? ord_cap * 2 : 1024;
+                while (nc <= ord) nc *= 2;
+                tui->ord2name = st_realloc(tui->ord2name, nc * sizeof(char *));
+                for (int64_t z = ord_cap; z < nc; z++) tui->ord2name[z] = NULL;
+                ord_cap = nc;
+            }
+            tui->ord2name[ord] = stString_copy(nm);
+            if (ord + 1 > tui->nOrd) tui->nOrd = ord + 1;
             if (stHash_search(tui->seq_len, nm) == NULL) {
                 int64_t *v = st_malloc(sizeof(int64_t));
                 *v = oneInt(of, 2);
@@ -635,6 +768,9 @@ Tui *tui_load(const char *tui_path) {
 void tui_destruct(Tui *tui) {
     if (tui == NULL) return;
     stHash_destruct(tui->seq_len);
+    for (int64_t i = 0; i < tui->nOrd; i++) free(tui->ord2name[i]);
+    free(tui->ord2name);
+    free(tui->segCol0); free(tui->segOrd); free(tui->segRow0); free(tui->segLen);
     free(tui->path);
     free(tui);
 }
@@ -716,4 +852,51 @@ TuiInterval *tui_query(Tui *tui, const char *seq_name,
     }
     *n_out = w + 1;
     return iv;
+}
+
+// Index A: map universal-column intervals -> row-0 (ancestor) coordinate
+// pieces, using the explicit reference track.  segCol0 is sorted ascending
+// and the segments tile [0,T), so a column has exactly one segment (binary
+// search), and an interval spans a contiguous run of segments.  One input
+// interval can yield several pieces on DIFFERENT row-0 sequences/ancestors
+// (e.g. hg38.chr1:1-100 -> AncR..  + AncC..).  Returned array is in column
+// order; .seq points into tui->ord2name (do NOT free per piece -- free the
+// array only).  Strand is always '+' so the map is the affine
+// row0 = segRow0 + (col - segCol0).
+static int64_t tui_seg_find(const Tui *tui, int64_t col) {
+    int64_t lo = 0, hi = tui->nSeg - 1, ans = -1;
+    while (lo <= hi) {
+        int64_t mid = (lo + hi) / 2;
+        if (tui->segCol0[mid] <= col) { ans = mid; lo = mid + 1; }
+        else hi = mid - 1;
+    }
+    return ans;  // greatest seg with segCol0 <= col, or -1
+}
+
+TuiRef *tui_col_range_to_ref(const Tui *tui, const TuiInterval *uiv,
+                             int64_t n_uiv, int64_t *n_out) {
+    *n_out = 0;
+    if (tui->nSeg == 0 || n_uiv == 0) return NULL;
+    int64_t cap = 16, n = 0;
+    TuiRef *out = st_malloc(cap * sizeof(TuiRef));
+    for (int64_t q = 0; q < n_uiv; q++) {
+        int64_t a = uiv[q].start, b = uiv[q].end;     // [a, b) universal columns
+        int64_t s = tui_seg_find(tui, a);
+        if (s < 0) s = 0;                              // before first seg (shouldn't happen)
+        for (; s < tui->nSeg && tui->segCol0[s] < b; s++) {
+            int64_t segA = tui->segCol0[s];
+            int64_t segB = segA + tui->segLen[s];
+            int64_t ca = a > segA ? a : segA;
+            int64_t cb = b < segB ? b : segB;
+            if (ca >= cb) continue;                    // no overlap with this seg
+            if (n == cap) { cap *= 2; out = st_realloc(out, cap * sizeof(TuiRef)); }
+            out[n].seq   = tui->ord2name[tui->segOrd[s]];
+            out[n].start = tui->segRow0[s] + (ca - segA);
+            out[n].len   = cb - ca;
+            n++;
+        }
+    }
+    *n_out = n;
+    if (n == 0) { free(out); return NULL; }
+    return out;
 }

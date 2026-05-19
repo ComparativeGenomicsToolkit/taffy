@@ -28,7 +28,7 @@ static void usage(void) {
     fprintf(stderr, "-P --paf-all : Output in all-to-all PAF format [default=TAF format]\n");
     fprintf(stderr, "-C --cs : Output PAF cigars in cs instead of cg format\n");
     fprintf(stderr, "-r --region  : Print only SEQ:START-END, where SEQ is a row-0 sequence name, and START-END are 0-based open-ended like BED\n");
-    fprintf(stderr, "-U --universalIndex : .tui file. With -r (SEQ on ANY genome), print the universal column intervals it maps to and exit (step-1 test; no extraction yet)\n");
+    fprintf(stderr, "-U --universalIndex : .tui file. With -r SEQ:START-END on ANY genome, map the region to universal columns then to row-0 coords (Index B+A) and extract those blocks via the .tai\n");
     fprintf(stderr, "-s --repeatCoordinatesEveryNColumns : Repeat TAF coordinates of each sequence at least every n columns. By default: %" PRIi64 "\n", repeat_coordinates_every_n_columns);
     fprintf(stderr, "-u --runLengthEncodeBases : Run length encode output bases in TAF\n");
     fprintf(stderr, "-a --showOnlyReferenceDifferences : Replace matches with the reference (first row) with a * character\n");
@@ -288,38 +288,9 @@ int taf_view_main(int argc, char *argv[]) {
         return 1;
     }
 
-    // Step-1 test mode: -U <tui> with -r SEQ:S-E -> just print the universal
-    // column intervals SEQ:[S,E) maps to (Index B), then exit.  No extraction.
-    if (universalIndex != NULL) {
-        if (region == NULL) {
-            fprintf(stderr, "-U/--universalIndex requires -r SEQ:START-END\n");
-            return 1;
-        }
-        int64_t r_start, r_len;
-        char *r_seq = tai_parse_region(region, &r_start, &r_len);
-        if (r_seq == NULL) {
-            fprintf(stderr, "Invalid region: %s\n", region);
-            return 1;
-        }
-        Tui *tui = tui_load(universalIndex);
-        if (tui == NULL) {
-            fprintf(stderr, "Could not open tui index: %s\n", universalIndex);
-            free(r_seq);
-            return 1;
-        }
-        int64_t r_end = r_start + r_len, n_iv = 0;
-        TuiInterval *iv = tui_query(tui, r_seq, r_start, r_end, &n_iv);
-        fprintf(stdout, "# %s:%" PRIi64 "-%" PRIi64 " -> %" PRIi64
-                " universal interval(s); T=%" PRIi64 "%s\n",
-                r_seq, r_start, r_end, n_iv, tui_total_columns(tui),
-                tui_has_sequence(tui, r_seq) ? "" : " [sequence not in index]");
-        for (int64_t i = 0; i < n_iv; i++) {
-            fprintf(stdout, "%" PRIi64 "\t%" PRIi64 "\n", iv[i].start, iv[i].end);
-        }
-        free(iv);
-        tui_destruct(tui);
-        free(r_seq);
-        return 0;
+    if (universalIndex != NULL && region == NULL) {
+        fprintf(stderr, "-U/--universalIndex requires -r SEQ:START-END\n");
+        return 1;
     }
 
     if (maf_output) {
@@ -360,6 +331,67 @@ int taf_view_main(int argc, char *argv[]) {
 
         Tai* tai = tai_load(tai_fh, !taf_input);
 
+      if (universalIndex != NULL) {
+        // Step 2: region is on ANY genome. Index B (tui_query) -> universal
+        // column intervals -> Index A (tui_col_range_to_ref) -> row-0
+        // (ancestor) coordinate pieces -> the existing .tai per piece.
+        Tui *tui = tui_load(universalIndex);
+        if (tui == NULL) {
+            fprintf(stderr, "Could not open tui index: %s\n", universalIndex);
+            return 1;
+        }
+        int64_t n_uiv = 0;
+        TuiInterval *uiv = tui_query(tui, region_seq, region_start,
+                                     region_start + region_length, &n_uiv);
+        int64_t n_ref = 0;
+        TuiRef *refs = tui_col_range_to_ref(tui, uiv, n_uiv, &n_ref);
+        if (n_ref == 0) {
+            fprintf(stderr, "Region %s:%" PRIi64 "-%" PRIi64 " maps to no "
+                    "universal columns; emitting header-only output\n",
+                    region_seq, region_start, region_start + region_length);
+        }
+        Alignment *alignment = NULL, *p_alignment = NULL;
+        char *last_seq = NULL; int64_t last_start = -1;
+        for (int64_t pi = 0; pi < n_ref; pi++) {
+            TaiIt *it = tai_iterator(tai, li, run_length_encode_input_bases,
+                                     refs[pi].seq, refs[pi].start, refs[pi].len);
+            while ((alignment = tai_next(it, li)) != NULL) {
+                // dedup: a block already emitted (overlapping ref pieces /
+                // many tiny universal intervals landing in one block).
+                if (last_seq != NULL &&
+                    strcmp(alignment->row->sequence_name, last_seq) == 0 &&
+                    alignment->row->start <= last_start) {
+                    alignment_destruct(alignment, true);
+                    continue;
+                }
+                char *blk_seq = stString_copy(alignment->row->sequence_name);
+                int64_t blk_start = alignment->row->start;
+                modify_alignment(alignment);
+                if (genome_name_map) {
+                    apply_genome_name_mapping_to_alignment(genome_name_map, alignment);
+                }
+                if (taf_output) {
+                    taf_write_block2(p_alignment, alignment, run_length_encode_output_bases,
+                                     repeat_coordinates_every_n_columns, output, color_bases, omit_coordinates);
+                } else if (maf_output) {
+                    maf_write_block2(alignment, output, color_bases);
+                } else {
+                    assert(paf_output == true);
+                    paf_write_block(alignment, output, all_to_all_paf, paf_cs);
+                }
+                free(last_seq); last_seq = blk_seq; last_start = blk_start;
+                if (p_alignment) alignment_destruct(p_alignment, true);
+                p_alignment = alignment;
+            }
+            tai_iterator_destruct(it);
+        }
+        if (p_alignment) alignment_destruct(p_alignment, true);
+        free(last_seq);
+        free(uiv);
+        free(refs);
+        tui_destruct(tui);
+      } else {
+
         TaiIt *tai_it = tai_iterator(tai, li, run_length_encode_input_bases, region_seq, region_start, region_length);
         if (!tai_has_next(tai_it)) {
             // No overlapping blocks were found. This can happen when the contig is missing from the
@@ -399,13 +431,14 @@ int taf_view_main(int argc, char *argv[]) {
         if (p_alignment) {
             alignment_destruct(p_alignment, true);
         }
+      }  // end !universalIndex single-region path
 
         tai_destruct(tai);
 
         if(tai_fh != NULL) {
             fclose(tai_fh);
         }
-        free(tai_fn);        
+        free(tai_fn);
     } else if (taf_input) {
         Alignment *alignment = NULL;
         Alignment *p_alignment = NULL;        
