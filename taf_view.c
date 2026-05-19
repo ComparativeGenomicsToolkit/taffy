@@ -321,21 +321,12 @@ int taf_view_main(int argc, char *argv[]) {
         
         st_logInfo("Region: contig=%s start=%" PRIi64 " length=%" PRIi64 "\n", region_seq, region_start, region_length);
 
-        char *tai_fn = tai_path(inputFile);        
-        FILE *tai_fh = fopen(tai_fn, "r");
-        
-        if (tai_fh == NULL) {
-            fprintf(stderr, "Index %s not found. Please run taffy index first\n", tai_fn);
-            return 1;
-        }
-
-        Tai* tai = tai_load(tai_fh, !taf_input);
-
       if (universal_index) {
-        // Step 2: region is on ANY genome. Index B (tui_query) -> universal
-        // column intervals -> Index A (tui_col_range_to_ref) -> row-0
-        // (ancestor) coordinate pieces -> the existing .tai per piece.
-        // .tui is auto-located at <inputFile>.tui (like the .tai).
+        // Region on ANY genome. Index B (tui_query) -> universal column
+        // intervals -> the .tui universal-column index drives a single
+        // column-ordered forward scan (no .tai; the monotone universal key
+        // makes the per-contig non-monotonicity that breaks tai_iterator
+        // impossible).  .tui auto-located at <inputFile>.tui.
         char *tui_fn = tui_path(inputFile);
         Tui *tui = tui_load(tui_fn);
         if (tui == NULL) {
@@ -348,54 +339,46 @@ int taf_view_main(int argc, char *argv[]) {
         int64_t n_uiv = 0;
         TuiInterval *uiv = tui_query(tui, region_seq, region_start,
                                      region_start + region_length, &n_uiv);
-        int64_t n_ref = 0;
-        TuiRef *refs = tui_col_range_to_ref(tui, uiv, n_uiv, &n_ref);
-        if (n_ref == 0) {
+        TuiExtractIt *xit = tui_extract_iterator(tui, li, !taf_input,
+                                                 run_length_encode_input_bases,
+                                                 uiv, n_uiv);
+        if (!tui_extract_has_next(xit)) {
             fprintf(stderr, "Region %s:%" PRIi64 "-%" PRIi64 " maps to no "
                     "universal columns; emitting header-only output\n",
                     region_seq, region_start, region_start + region_length);
         }
-        Alignment *alignment = NULL, *p_alignment = NULL;
-        char *last_seq = NULL; int64_t last_start = -1;
-        for (int64_t pi = 0; pi < n_ref; pi++) {
-            TaiIt *it = tai_iterator(tai, li, run_length_encode_input_bases,
-                                     refs[pi].seq, refs[pi].start, refs[pi].len);
-            while ((alignment = tai_next(it, li)) != NULL) {
-                // dedup: a block already emitted (overlapping ref pieces /
-                // many tiny universal intervals landing in one block).
-                if (last_seq != NULL &&
-                    strcmp(alignment->row->sequence_name, last_seq) == 0 &&
-                    alignment->row->start <= last_start) {
-                    alignment_destruct(alignment, true);
-                    continue;
-                }
-                char *blk_seq = stString_copy(alignment->row->sequence_name);
-                int64_t blk_start = alignment->row->start;
-                modify_alignment(alignment);
-                if (genome_name_map) {
-                    apply_genome_name_mapping_to_alignment(genome_name_map, alignment);
-                }
-                if (taf_output) {
-                    taf_write_block2(p_alignment, alignment, run_length_encode_output_bases,
-                                     repeat_coordinates_every_n_columns, output, color_bases, omit_coordinates);
-                } else if (maf_output) {
-                    maf_write_block2(alignment, output, color_bases);
-                } else {
-                    assert(paf_output == true);
-                    paf_write_block(alignment, output, all_to_all_paf, paf_cs);
-                }
-                free(last_seq); last_seq = blk_seq; last_start = blk_start;
-                if (p_alignment) alignment_destruct(p_alignment, true);
-                p_alignment = alignment;
+        Alignment *alignment = NULL;
+        while ((alignment = tui_extract_next(xit, li)) != NULL) {
+            // whole blocks, column order, each once (no dedup needed)
+            modify_alignment(alignment);
+            if (genome_name_map) {
+                apply_genome_name_mapping_to_alignment(genome_name_map, alignment);
             }
-            tai_iterator_destruct(it);
+            if (taf_output) {
+                // emitted blocks are generally NOT file-adjacent (the scan
+                // skips non-overlapping ones) -> never delta vs a prior block
+                taf_write_block2(NULL, alignment, run_length_encode_output_bases,
+                                 repeat_coordinates_every_n_columns, output, color_bases, omit_coordinates);
+            } else if (maf_output) {
+                maf_write_block2(alignment, output, color_bases);
+            } else {
+                assert(paf_output == true);
+                paf_write_block(alignment, output, all_to_all_paf, paf_cs);
+            }
         }
-        if (p_alignment) alignment_destruct(p_alignment, true);
-        free(last_seq);
+        tui_extract_iterator_destruct(xit);   // owns/frees the yielded blocks
         free(uiv);
-        free(refs);
         tui_destruct(tui);
       } else {
+
+        char *tai_fn = tai_path(inputFile);
+        FILE *tai_fh = fopen(tai_fn, "r");
+        if (tai_fh == NULL) {
+            fprintf(stderr, "Index %s not found. Please run taffy index first\n", tai_fn);
+            free(tai_fn);
+            return 1;
+        }
+        Tai* tai = tai_load(tai_fh, !taf_input);
 
         TaiIt *tai_it = tai_iterator(tai, li, run_length_encode_input_bases, region_seq, region_start, region_length);
         if (!tai_has_next(tai_it)) {
@@ -436,14 +419,13 @@ int taf_view_main(int argc, char *argv[]) {
         if (p_alignment) {
             alignment_destruct(p_alignment, true);
         }
-      }  // end non-universal single-region path
 
         tai_destruct(tai);
-
         if(tai_fh != NULL) {
             fclose(tai_fh);
         }
         free(tai_fn);
+      }  // end non-universal single-region path (.tai)
     } else if (taf_input) {
         Alignment *alignment = NULL;
         Alignment *p_alignment = NULL;        

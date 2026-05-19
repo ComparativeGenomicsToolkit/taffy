@@ -116,4 +116,28 @@ void tai_iterator_destruct(TaiIt *tai_it);
  */
 stHash *tai_sequence_lengths(Tai *idx, LI *li);
 
+/*
+ * Shared random-access primitives, reused by the .tui universal-column index
+ * so there is ONE TAF-resync / MAF-read implementation.
+ *
+ * tai_resync_taf_line: after LI_seek to an index anchor, rewrite the next
+ * TAF line in place so its 's' coordinate ops become 'i' -- this makes
+ * taf_read_block(NULL, ...) start a fresh, absolutely-coordinated alignment
+ * at that point.  The anchor line MUST carry coordinates (has_coordinates);
+ * the .tui builder only anchors at such lines (MAF: every block start).
+ */
+void tai_resync_taf_line(char *line);
+
+/* maf_read_block + adjacent-block linking (NULL p_block -> fresh start). */
+Alignment *tai_maf_read_block(Alignment *p_block, bool run_length_encode_bases, LI *li);
+
+/*
+ * 1 iff this split TAF line is a valid random-access anchor: it carries a
+ * coordinate for EVERY row (all-'i' first line, or an all-'s' repeat-
+ * coordinates line), so tai_resync_taf_line + a fresh taf_read_block fully
+ * reconstruct the block there.  The .tui universal-column index must only
+ * anchor at such lines (same rule .tai uses).
+ */
+int tai_taf_line_is_anchor(stList *tokens, bool run_length_encode_bases);
+
 #endif

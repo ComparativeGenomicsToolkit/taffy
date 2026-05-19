@@ -384,6 +384,19 @@ static Alignment *maf_read_block_3(Alignment *p_block, bool run_length_encode_ba
     return alignment;
 }
 
+// Public thin wrappers so the .tui universal-column index reuses the exact
+// same TAF-resync and MAF-read implementation as .tai (one source of truth).
+void tai_resync_taf_line(char *line) { change_s_coordinates_to_i(line); }
+Alignment *tai_maf_read_block(Alignment *p_block, bool run_length_encode_bases, LI *li) {
+    return maf_read_block_3(p_block, run_length_encode_bases, li);
+}
+int tai_taf_line_is_anchor(stList *tokens, bool run_length_encode_bases) {
+    int64_t start; bool strand;
+    char *s = parse_coordinates_line(tokens, &start, &strand, run_length_encode_bases);
+    if (s != NULL) { free(s); return 1; }
+    return 0;
+}
+
 TaiIt *tai_iterator(Tai* tai, LI *li, bool run_length_encode_bases, const char *contig, int64_t start, int64_t length) {
     time_t start_time = time(NULL);
     TaiIt *tai_it = st_calloc(1, sizeof(TaiIt));

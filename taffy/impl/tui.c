@@ -39,7 +39,8 @@ static const char *TUI_SCHEMA =
     "D A 3 3 INT 3 INT 6 STRING\n"           // Index-A: inflatedLen, nSeg, deflate(SoA blob)
     "D d 4 6 STRING 3 INT 3 INT 3 INT\n"     // dir: seqName, S-ordinal, seqLen, isRef
     "O S 2 6 STRING 3 INT\n"                 // sequence object: seqName, seqLen
-    "D R 2 3 INT 6 STRING\n";                // runs: inflatedLen, deflate(blob)
+    "D R 2 3 INT 6 STRING\n"                 // runs: inflatedLen, deflate(blob)
+    "D X 3 3 INT 3 INT 6 STRING\n";          // univ-col index: inflatedLen, nRec, deflate(SoA)
 
 char *tui_path(const char *maf_path) {
     char *p = st_malloc(strlen(maf_path) + 5);
@@ -211,7 +212,52 @@ typedef struct {
     char   *ro_seq;       // open segment's row-0 sequence name (strdup)
     int64_t ro_col0, ro_row0, ro_len;
     int     ro_open;
+    // Universal-column -> file_pos index (the .tai-equivalent, monotone key).
+    // Anchors sampled every TUI_IDX_BLOCK columns at coordinate-bearing block
+    // starts (MAF: every block).  Spilled (col<TAB>file_pos), column-ordered.
+    FILE   *idx_fh;
+    char   *idx_path;
+    int64_t idx_last_col;
+    int64_t idx_n;        // anchors written so far (0 => none yet)
 } Phase1;
+
+#define TUI_IDX_BLOCK 10000   // universal columns between index anchors (== tai default)
+
+// Record a (universal column -> file_pos) anchor for the block that the NEXT
+// maf/taf_read_block will return.  `col` = p1->T at the block start (universal
+// column of its first column); `file_pos` = LI_tell(li) BEFORE the read
+// (exactly the tai_create_maf/taf convention).  TAF: only anchor on a
+// coordinate-bearing line (so tai_resync_taf_line can resync there); MAF:
+// every block start is a valid anchor.  Always anchor the first block.
+static void idx_anchor(Phase1 *p1, LI *li, int is_maf, bool rle) {
+    int64_t col = p1->T;
+    if (p1->idx_n != 0 && col - p1->idx_last_col < TUI_IDX_BLOCK) return;
+    char *peek = LI_peek_at_next_line(li);
+    if (peek == NULL) return;
+    // anchor = start of the block's first line (the peeked line): exactly the
+    // tai_create_taf convention so LI_seek + tai_resync_taf_line work.
+    int64_t file_pos = LI_get_position(li);
+    if (!is_maf) {              // TAF: only a full-coordinate (resync-able) line
+        stList *toks = stString_split(peek);
+        int ok = tai_taf_line_is_anchor(toks, rle);
+        stList_destruct(toks);
+        if (!ok) return;
+    }
+    if (p1->idx_fh == NULL) {
+        p1->idx_path = stString_print("%s/%s.tuiIdx.%ld", p1->tmp_dir,
+                                      p1->out_base, (long)getpid());
+        p1->idx_fh = fopen(p1->idx_path, "w");
+        if (p1->idx_fh == NULL) {
+            fprintf(stderr, "tui: cannot open idx spill %s\n", p1->idx_path);
+            exit(1);
+        }
+    }
+    if (fprintf(p1->idx_fh, "%" PRIi64 "\t%" PRIi64 "\n", col, file_pos) < 0) {
+        st_errAbort("tui: failed writing idx spill (disk full / write error)");
+    }
+    p1->idx_last_col = col;
+    p1->idx_n++;
+}
 
 // Flush the open row-0 segment (if any) to the ref-track spill.
 static void ref_flush(Phase1 *p1) {
@@ -523,6 +569,63 @@ static int64_t decode_refseg(const uint8_t *def, int64_t def_len,
     return nSeg;
 }
 
+// Universal-column index codec.  n anchors (col, file_pos), both STRICTLY
+// increasing in anchor order, so plain non-negative uvarint deltas (no
+// zigzag).  Two SoA streams C|F; header = uvarint(n), uvarint(|C bytes|);
+// one zlib deflate.  Mirrors encode_refseg.
+static uint8_t *encode_idx(const int64_t *col, const int64_t *fpos, int64_t n,
+                           int64_t *raw_len, int64_t *def_len) {
+    uint8_t *C = st_malloc((size_t)(n * 10 + 1));
+    uint8_t *F = st_malloc((size_t)(n * 10 + 1));
+    size_t cn = 0, fn = 0;
+    int64_t pc = 0, pf = 0;
+    for (int64_t k = 0; k < n; k++) {
+        cn += put_uvarint(C + cn, (uint64_t)(col[k]  - pc));   // >= 0 (sorted)
+        fn += put_uvarint(F + fn, (uint64_t)(fpos[k] - pf));
+        pc = col[k]; pf = fpos[k];
+    }
+    uint8_t hdr[20];
+    size_t hn = 0;
+    hn += put_uvarint(hdr + hn, (uint64_t)n);
+    hn += put_uvarint(hdr + hn, (uint64_t)cn);
+    size_t rn = hn + cn + fn;
+    uint8_t *raw = st_malloc(rn ? rn : 1);
+    memcpy(raw, hdr, hn);
+    memcpy(raw + hn, C, cn);
+    memcpy(raw + hn + cn, F, fn);
+    free(C); free(F);
+    uLongf cap = compressBound((uLong)rn);
+    uint8_t *def = st_malloc(cap ? cap : 1);
+    uLongf dl = cap;
+    if (compress2(def, &dl, raw, (uLong)rn, 9) != Z_OK) {
+        st_errAbort("tui: zlib compress2 failed (X)");
+    }
+    free(raw);
+    *raw_len = (int64_t)rn;
+    *def_len = (int64_t)dl;
+    return def;
+}
+
+static int64_t decode_idx(const uint8_t *def, int64_t def_len, int64_t raw_len,
+                          int64_t *col, int64_t *fpos) {
+    uint8_t *raw = st_malloc((size_t)(raw_len ? raw_len : 1));
+    uLongf rl = (uLongf)raw_len;
+    if (uncompress(raw, &rl, def, (uLong)def_len) != Z_OK || (int64_t)rl != raw_len) {
+        st_errAbort("tui: zlib uncompress failed (X)");
+    }
+    const uint8_t *h = raw;
+    int64_t n  = (int64_t)get_uvarint(&h);
+    int64_t cb = (int64_t)get_uvarint(&h);
+    const uint8_t *cp = h, *fp = h + cb;
+    int64_t pc = 0, pf = 0;
+    for (int64_t k = 0; k < n; k++) {
+        pc += (int64_t)get_uvarint(&cp); col[k]  = pc;
+        pf += (int64_t)get_uvarint(&fp); fpos[k] = pf;
+    }
+    free(raw);
+    return n;
+}
+
 // Remove spill files and free phase-1 state.  Shared by the success and the
 // error-return paths so a failed run never leaks spill files on disk.
 // `tree_map` (the # hal-derived genome set, or NULL) is freed here too so its
@@ -537,6 +640,8 @@ static void tui_cleanup(Phase1 *p1, SeqKey *seqks, int64_t n_seqs,
     stHash_destructIterator(hit);
     if (p1->ref_fh != NULL) fclose(p1->ref_fh);          // error-path: still open
     if (p1->ref_path != NULL) { remove(p1->ref_path); free(p1->ref_path); }
+    if (p1->idx_fh != NULL) fclose(p1->idx_fh);
+    if (p1->idx_path != NULL) { remove(p1->idx_path); free(p1->idx_path); }
     if (p1->ro_open) free(p1->ro_seq);                   // error-path: open segment
     for (int64_t i = 0; i < n_seqs; i++) free(seqks[i].genome);  // .seq owned by seq_len
     free(seqks);
@@ -589,15 +694,25 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
     p1.ref_genomes = stSet_construct3(stHash_stringKey, stHash_stringEqualKey, free);
     p1.T = 0;
     p1.ref_fh = NULL; p1.ref_path = NULL; p1.ro_seq = NULL; p1.ro_open = 0;
+    p1.idx_fh = NULL; p1.idx_path = NULL; p1.idx_last_col = 0; p1.idx_n = 0;
 
+    // idx_anchor captures the block's anchor offset itself (LI_get_position =
+    // start of the peeked block-first line; the exact tai_create_taf
+    // convention so LI_seek + the shared readers behave identically at query).
     Alignment *aln, *p_aln = NULL;
     if (input_format == 1) {
-        while ((aln = maf_read_block(li)) != NULL) {
+        while (1) {
+            idx_anchor(&p1, li, 1, false);
+            aln = maf_read_block(li);
+            if (aln == NULL) break;
             tui_phase1_block(&p1, aln);
             alignment_destruct(aln, 1);
         }
     } else {
-        while ((aln = taf_read_block(p_aln, rle, li)) != NULL) {
+        while (1) {
+            idx_anchor(&p1, li, 0, rle);
+            aln = taf_read_block(p_aln, rle, li);
+            if (aln == NULL) break;
             tui_phase1_block(&p1, aln);
             if (p_aln != NULL) alignment_destruct(p_aln, 1);
             p_aln = aln;
@@ -612,6 +727,11 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
         if (fclose(p1.ref_fh) != 0) st_errAbort("tui: ref spill close failed "
             "(disk full / write error) -- %s", p1.ref_path);
         p1.ref_fh = NULL;
+    }
+    if (p1.idx_fh != NULL) {
+        if (fclose(p1.idx_fh) != 0) st_errAbort("tui: idx spill close failed "
+            "(disk full / write error) -- %s", p1.idx_path);
+        p1.idx_fh = NULL;
     }
     // close all spill FILE*s (paths kept for phase 2)
     stHashIterator *hit = stHash_getIterator(p1.spill_fh);
@@ -714,6 +834,42 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
     }
     free(segOrd); free(segRow0); free(segLen); free(segCol0);
     stHash_destruct(name2ord);
+
+    // X: universal-column -> file_pos index (the .tai-equivalent).  Read the
+    // column-ordered anchor spill, encode (deflated SoA), write one X line.
+    {
+        int64_t *ic = NULL, *iff = NULL, in = 0, icap = 0;
+        if (p1.idx_path != NULL) {
+            FILE *xf = fopen(p1.idx_path, "r");
+            if (xf == NULL) st_errAbort("tui: cannot reopen idx spill %s", p1.idx_path);
+            char line[4096]; int64_t c, f, prevc = -1;
+            while (fgets(line, sizeof(line), xf) != NULL) {
+                if (sscanf(line, "%" SCNi64 "\t%" SCNi64, &c, &f) != 2) {
+                    st_errAbort("tui: corrupt idx spill line: %s", line);
+                }
+                if (c <= prevc) st_errAbort("tui: idx anchors not strictly "
+                    "increasing (%" PRIi64 " after %" PRIi64 ")", c, prevc);
+                prevc = c;
+                if (in == icap) { icap = icap ? icap*2 : 4096;
+                    ic = st_realloc(ic, icap*sizeof(int64_t));
+                    iff = st_realloc(iff, icap*sizeof(int64_t)); }
+                ic[in] = c; iff[in] = f; in++;
+            }
+            fclose(xf);
+        }
+        int64_t x_raw = 0, x_def = 0;
+        uint8_t *xdef = encode_idx(ic, iff, in, &x_raw, &x_def);
+        int64_t *cc = st_malloc((in?in:1)*sizeof(int64_t));
+        int64_t *cf = st_malloc((in?in:1)*sizeof(int64_t));
+        int64_t dn = decode_idx(xdef, x_def, x_raw, cc, cf);
+        assert(dn == in);
+        for (int64_t k = 0; k < in; k++) assert(cc[k]==ic[k] && cf[k]==iff[k]);
+        free(cc); free(cf);
+        oneInt(of, 0) = x_raw;
+        oneInt(of, 1) = in;
+        oneWriteLine(of, 'X', x_def, xdef);
+        free(xdef); free(ic); free(iff);
+    }
 
     // d: directory (front of file), S-ordinal == position in global order
     for (int64_t i = 0; i < n_seqs; i++) {
@@ -833,6 +989,9 @@ struct _Tui {
     int64_t  nSeg;
     char   **ord2name;  // S-ordinal -> sequence name (we own the strings)
     int64_t  nOrd;
+    // Universal-column -> file_pos index (X track); both strictly increasing.
+    int64_t *idxCol, *idxFpos;
+    int64_t  idxN;
 };
 
 Tui *tui_load(const char *tui_path) {
@@ -859,6 +1018,16 @@ Tui *tui_load(const char *tui_path) {
             tui->nSeg = decode_refseg(adef, a_def, a_raw, tui->segCol0,
                                       tui->segOrd, tui->segRow0, tui->segLen);
             assert(tui->nSeg == nSeg);
+        } else if (c == 'X') {                 // univ-col index: (rawLen,n,blob)
+            int64_t x_raw = oneInt(of, 0);
+            int64_t xn    = oneInt(of, 1);
+            int64_t x_def = oneLen(of);
+            const uint8_t *xdef = (const uint8_t *)oneString(of);
+            int64_t cap = xn ? xn : 1;
+            tui->idxCol  = st_malloc(cap * sizeof(int64_t));
+            tui->idxFpos = st_malloc(cap * sizeof(int64_t));
+            tui->idxN = decode_idx(xdef, x_def, x_raw, tui->idxCol, tui->idxFpos);
+            assert(tui->idxN == xn);
         } else if (c == 'd') {                 // dir: name(STRING), ord, seqLen, isRef
             int64_t n = oneLen(of);
             char *nm = st_malloc(n + 1);
@@ -895,6 +1064,7 @@ void tui_destruct(Tui *tui) {
     for (int64_t i = 0; i < tui->nOrd; i++) free(tui->ord2name[i]);
     free(tui->ord2name);
     free(tui->segCol0); free(tui->segOrd); free(tui->segRow0); free(tui->segLen);
+    free(tui->idxCol); free(tui->idxFpos);
     free(tui->path);
     free(tui);
 }
@@ -1023,4 +1193,159 @@ TuiRef *tui_col_range_to_ref(const Tui *tui, const TuiInterval *uiv,
     *n_out = n;
     if (n == 0) { free(out); return NULL; }
     return out;
+}
+
+/////////////////////////////////////////////////////////////////////////////
+// Universal-column block extractor.  Single forward scan in column order from
+// the X-index anchor; reuses tai's seek/resync/read primitives.  No per-
+// contig key => the C1 (non-monotone row-0 ancestor) failure is impossible.
+/////////////////////////////////////////////////////////////////////////////
+
+struct _TuiExtractIt {
+    int is_maf;
+    bool rle;
+    Alignment *(*readblk)(Alignment *, bool, LI *);
+    TuiInterval *iv;        // owned copy, sorted+merged universal-col intervals
+    int64_t n_iv, iv_cur;
+    int64_t c_hi;           // last interval end (stop bound)
+    int64_t scan_col;       // universal column of the next block to read
+    Alignment *phys;        // current physical block overlapping iv (owned)
+    int64_t phys_col;       // universal column of phys's first column
+    int64_t *runs;          // covered local-column runs of phys: [j0,j1) pairs
+    int64_t runs_cap, n_runs, run_i;
+    Alignment *to_free;     // sub-block returned last call (freed next/destruct)
+};
+
+// Build a standalone Alignment = columns [j0,j1) of `src`, every row clipped.
+// Reuses .tai clip_alignment's convention: a row's start advances by the
+// non-gap bases removed on the left, length = the non-gap bases kept (works
+// for '+' and '-' identically, as clip_alignment does).  src is unchanged so
+// multiple runs of one physical block stay independent.
+static Alignment *tui_subblock(const Alignment *src, int64_t j0, int64_t j1) {
+    int64_t newcol = j1 - j0;
+    Alignment *aln = st_calloc(1, sizeof(Alignment));
+    aln->column_number = newcol;
+    aln->column_tags = st_calloc(newcol ? newcol : 1, sizeof(Tag *));
+    aln->row_number = src->row_number;
+    Alignment_Row **pp = &aln->row;
+    for (Alignment_Row *r = src->row; r != NULL; r = r->n_row) {
+        int64_t pre = 0, mid = 0;
+        for (int64_t c = 0; c < j0; c++) if (r->bases[c] != '-') pre++;
+        for (int64_t c = j0; c < j1; c++) if (r->bases[c] != '-') mid++;
+        Alignment_Row *nr = st_calloc(1, sizeof(Alignment_Row));
+        nr->sequence_name = stString_copy(r->sequence_name);
+        nr->start = r->start + pre;
+        nr->length = mid;
+        nr->strand = r->strand;
+        nr->sequence_length = r->sequence_length;
+        nr->bases = stString_getSubString(r->bases, j0, newcol);
+        *pp = nr;
+        pp = &nr->n_row;
+    }
+    return aln;
+}
+
+// Covered local-column runs of the physical block at universal [pc, pc+cn).
+// Fills it->runs; advances it->iv_cur only past intervals fully consumed by
+// this block (an interval extending beyond pc+cn stays for the next block).
+static void tui_compute_runs(TuiExtractIt *it, int64_t pc, int64_t cn) {
+    it->n_runs = 0;
+    int64_t pend = pc + cn;
+    while (it->iv_cur < it->n_iv && it->iv[it->iv_cur].end <= pc) it->iv_cur++;
+    int64_t k = it->iv_cur;
+    while (k < it->n_iv && it->iv[k].start < pend) {
+        int64_t s = it->iv[k].start > pc ? it->iv[k].start : pc;
+        int64_t e = it->iv[k].end < pend ? it->iv[k].end : pend;
+        if (s < e) {
+            if (2 * (it->n_runs + 1) > it->runs_cap) {
+                it->runs_cap = it->runs_cap ? it->runs_cap * 2 : 16;
+                it->runs = st_realloc(it->runs, it->runs_cap * sizeof(int64_t));
+            }
+            it->runs[2*it->n_runs]   = s - pc;
+            it->runs[2*it->n_runs+1] = e - pc;
+            it->n_runs++;
+        }
+        if (it->iv[k].end <= pend) { k++; it->iv_cur = k; }   // fully consumed
+        else break;                                           // continues next block
+    }
+}
+
+// Forward-scan (ctx = taf context, not freed here) skipping non-overlapping
+// physical blocks, until one overlaps iv -> it->phys/phys_col/runs(run_i=0),
+// or past the last interval / EOF -> it->phys = NULL.
+static void tui_extract_advance(TuiExtractIt *it, LI *li, Alignment *ctx) {
+    Alignment *prev = ctx;
+    it->phys = NULL;
+    while (1) {
+        Alignment *b = it->readblk(prev, it->rle, li);
+        if (b == NULL) break;
+        int64_t cn = b->column_number;
+        int64_t bstart = it->scan_col, bend = bstart + cn;
+        while (it->iv_cur < it->n_iv && it->iv[it->iv_cur].end <= bstart) it->iv_cur++;
+        if (it->iv_cur < it->n_iv && it->iv[it->iv_cur].start < bend) {
+            it->phys = b; it->phys_col = bstart; it->run_i = 0;
+            tui_compute_runs(it, bstart, cn);
+            break;
+        }
+        it->scan_col = bend;
+        if (it->iv_cur >= it->n_iv || it->scan_col >= it->c_hi) {
+            alignment_destruct(b, 1); break;            // past the last interval
+        }
+        if (prev != ctx) alignment_destruct(prev, 1);   // intermediate skipped
+        prev = b;
+    }
+    if (prev != ctx && prev != it->phys) alignment_destruct(prev, 1);
+}
+
+TuiExtractIt *tui_extract_iterator(Tui *tui, LI *li, int is_maf, bool rle,
+                                   const TuiInterval *iv, int64_t n_iv) {
+    TuiExtractIt *it = st_calloc(1, sizeof(TuiExtractIt));
+    it->is_maf = is_maf;
+    it->rle = rle;
+    it->readblk = is_maf ? tai_maf_read_block : taf_read_block;
+    if (n_iv <= 0 || tui->idxN == 0) return it;        // empty iterator
+    it->iv = st_malloc((size_t)n_iv * sizeof(TuiInterval));
+    memcpy(it->iv, iv, (size_t)n_iv * sizeof(TuiInterval));
+    it->n_iv = n_iv;
+    it->c_hi = iv[n_iv - 1].end;
+    int64_t c_lo = iv[0].start;
+    // anchor = greatest idxCol <= c_lo (idxCol strictly increasing, [0]=0)
+    int64_t lo = 0, hi = tui->idxN - 1, a = 0;
+    while (lo <= hi) {
+        int64_t mid = (lo + hi) / 2;
+        if (tui->idxCol[mid] <= c_lo) { a = mid; lo = mid + 1; } else hi = mid - 1;
+    }
+    LI_seek(li, tui->idxFpos[a]);
+    LI_get_next_line(li);                              // mirror tai_iterator
+    if (!is_maf) tai_resync_taf_line(LI_peek_at_next_line(li));
+    it->scan_col = tui->idxCol[a];
+    it->iv_cur = 0;
+    tui_extract_advance(it, li, NULL);
+    return it;
+}
+
+Alignment *tui_extract_next(TuiExtractIt *it, LI *li) {
+    if (it->to_free != NULL) { alignment_destruct(it->to_free, 1); it->to_free = NULL; }
+    if (it->phys == NULL) return NULL;
+    int64_t j0 = it->runs[2*it->run_i], j1 = it->runs[2*it->run_i + 1];
+    Alignment *sub = tui_subblock(it->phys, j0, j1);
+    it->run_i++;
+    if (it->run_i >= it->n_runs) {                      // this physical block done
+        Alignment *old = it->phys;
+        it->scan_col = it->phys_col + old->column_number;
+        tui_extract_advance(it, li, old);               // old = taf context
+        alignment_destruct(old, 1);                     // context consumed; subs copied
+    }
+    it->to_free = sub;                                  // caller uses before next call
+    return sub;
+}
+
+bool tui_extract_has_next(TuiExtractIt *it) { return it->phys != NULL; }
+
+void tui_extract_iterator_destruct(TuiExtractIt *it) {
+    if (it->to_free != NULL) alignment_destruct(it->to_free, 1);
+    if (it->phys != NULL) alignment_destruct(it->phys, 1);
+    free(it->runs);
+    free(it->iv);
+    free(it);
 }

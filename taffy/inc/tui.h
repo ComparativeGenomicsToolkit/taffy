@@ -126,6 +126,26 @@ TuiInterval *tui_query(Tui *tui, const char *seq_name,
 TuiRef *tui_col_range_to_ref(const Tui *tui, const TuiInterval *uiv,
                              int64_t n_uiv, int64_t *n_out);
 
+/////////////////////////////////////////////////////////////////////////////
+// Universal-column block extractor (replaces the .tai for the -U path).
+//
+// Drives the SHARED random-access primitives (LI_seek + tai_resync_taf_line +
+// the maf/taf block readers, from tai.h) off the .tui's universal-column
+// index.  The universal column is a single globally-monotone key (file order
+// == column order), so the per-contig non-monotonicity that breaks
+// tai_iterator on a universal MAF cannot occur here.  Emits WHOLE blocks (all
+// rows) whose universal-column span overlaps any of `iv`, in column order,
+// each exactly once.  `iv` must be sorted+merged (tui_query output).
+/////////////////////////////////////////////////////////////////////////////
+
+typedef struct _TuiExtractIt TuiExtractIt;
+
+TuiExtractIt *tui_extract_iterator(Tui *tui, LI *li, int is_maf, bool rle,
+                                   const TuiInterval *iv, int64_t n_iv);
+Alignment *tui_extract_next(TuiExtractIt *it, LI *li);
+bool tui_extract_has_next(TuiExtractIt *it);
+void tui_extract_iterator_destruct(TuiExtractIt *it);
+
 #endif /* TAF_TUI_H_ */
 
 // Local Variables:

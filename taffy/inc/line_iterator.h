@@ -58,6 +58,15 @@ void LI_seek(LI *li, int64_t position);
  */
 int64_t LI_tell(LI *li);
 
+/*
+ * Position the NEXT line (the one LI_peek_at_next_line returns) was read
+ * from -- i.e. the file offset to LI_seek() to so that a following
+ * LI_get_next_line() yields that peeked line.  This is the anchor offset for
+ * the block about to be read (equals the value LI_tell() would return right
+ * AFTER consuming that line; see tai_create_taf).
+ */
+int64_t LI_get_position(LI *li);
+
 
 /*
  * Writer for maf and taf block and header writing

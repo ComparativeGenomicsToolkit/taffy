@@ -81,6 +81,10 @@ int64_t LI_tell(LI *li) {
     return li->prev_pos;
 }
 
+int64_t LI_get_position(LI *li) {
+    return li->pos;
+}
+
 LW *LW_construct(FILE *fh, bool use_compression) {
     LW *lw = st_calloc(1, sizeof(LW));
     lw->fh = fh;
