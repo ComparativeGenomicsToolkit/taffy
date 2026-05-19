@@ -159,8 +159,10 @@ static int seqkey_cmp(const void *a, const void *b) {
 // One spilled run, text line: "seqName\tt_start\tg_start\tlength\tstrand\n"
 static void spill_run(FILE *fh, const char *seq_name, int64_t t_start,
                       int64_t g_start, int64_t length, bool strand) {
-    fprintf(fh, "%s\t%" PRIi64 "\t%" PRIi64 "\t%" PRIi64 "\t%c\n",
-            seq_name, t_start, g_start, length, strand ? '+' : '-');
+    if (fprintf(fh, "%s\t%" PRIi64 "\t%" PRIi64 "\t%" PRIi64 "\t%c\n",
+                seq_name, t_start, g_start, length, strand ? '+' : '-') < 0) {
+        st_errAbort("tui: failed writing run spill (disk full / write error)");
+    }
 }
 
 // Emit the maximal gap-free stretches of one row of one block.  `g` is the
@@ -223,8 +225,10 @@ static void ref_flush(Phase1 *p1) {
             exit(1);
         }
     }
-    fprintf(p1->ref_fh, "%" PRIi64 "\t%s\t%" PRIi64 "\t%" PRIi64 "\n",
-            p1->ro_col0, p1->ro_seq, p1->ro_row0, p1->ro_len);
+    if (fprintf(p1->ref_fh, "%" PRIi64 "\t%s\t%" PRIi64 "\t%" PRIi64 "\n",
+                p1->ro_col0, p1->ro_seq, p1->ro_row0, p1->ro_len) < 0) {
+        st_errAbort("tui: failed writing ref spill (disk full / write error)");
+    }
     free(p1->ro_seq);
     p1->ro_seq = NULL;
     p1->ro_open = 0;
@@ -601,11 +605,23 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
         if (p_aln != NULL) alignment_destruct(p_aln, 1);
     }
     ref_flush(&p1);                       // flush the last open row-0 segment
-    if (p1.ref_fh != NULL) { fclose(p1.ref_fh); p1.ref_fh = NULL; }
+    // fclose surfaces buffered short writes (e.g. disk full) -> fail loudly
+    // here rather than emit a silently-truncated spill that Phase 2 would
+    // later misread as "not contiguous" / "corrupt spill line".
+    if (p1.ref_fh != NULL) {
+        if (fclose(p1.ref_fh) != 0) st_errAbort("tui: ref spill close failed "
+            "(disk full / write error) -- %s", p1.ref_path);
+        p1.ref_fh = NULL;
+    }
     // close all spill FILE*s (paths kept for phase 2)
     stHashIterator *hit = stHash_getIterator(p1.spill_fh);
     char *gk;
-    while ((gk = stHash_getNext(hit)) != NULL) fclose(stHash_search(p1.spill_fh, gk));
+    while ((gk = stHash_getNext(hit)) != NULL) {
+        if (fclose(stHash_search(p1.spill_fh, gk)) != 0) {
+            st_errAbort("tui: spill close failed for genome '%s' "
+                        "(disk full / write error)", gk);
+        }
+    }
     stHash_destructIterator(hit);
 
     // deterministic global order: genome-major (true resolved genome), then
