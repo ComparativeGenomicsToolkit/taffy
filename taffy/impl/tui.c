@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <assert.h>
+#include <unistd.h>
 #include <zlib.h>
 
 // ONEcode schema. Exactly one list field per line (STRING / INT_LIST); other
@@ -94,6 +95,9 @@ static char *genome_of(const char *seq_name, stHash *gmap) {
 // full genome set including ancestors).  A label is a maximal run of non-
 // "(),:;"/non-space chars that is NOT a branch length (i.e. not the run right
 // after a ':').  Same stHash shape extract_genome_name / genome_of expect.
+// Grammar is the plain hal2maf form: NO quoted labels and NO NHX comments
+// ([&&NHX...] / '...' would be mis-tokenized); labels must be < sizeof(tok)
+// (over-long is a hard error, not a silent truncate).
 static stHash *genome_set_from_newick(const char *nwk) {
     stHash *s = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, free, NULL);
     char tok[8192];
@@ -104,7 +108,11 @@ static stHash *genome_set_from_newick(const char *nwk) {
                      c == ':' || c == ';' || c == ' ' || c == '\t' ||
                      c == '\n' || c == '\r');
         if (!delim) {
-            if (n < (int)sizeof(tok) - 1) tok[n++] = c;
+            if (n >= (int)sizeof(tok) - 1) {
+                st_errAbort("tui: # hal tree label exceeds %d chars; cannot "
+                            "resolve genome names from it", (int)sizeof(tok) - 1);
+            }
+            tok[n++] = c;
         } else {
             if (n > 0) {
                 tok[n] = '\0';
@@ -190,8 +198,9 @@ typedef struct {
 static FILE *spill_for(Phase1 *p1, const char *genome) {
     FILE *fh = stHash_search(p1->spill_fh, (void *)genome);
     if (fh == NULL) {
-        char *path = stString_print("%s/%s.tuiSpill.%d", p1->tmp_dir,
-                                    p1->out_base, p1->next_spill_id++);
+        char *path = stString_print("%s/%s.tuiSpill.%ld.%d", p1->tmp_dir,
+                                    p1->out_base, (long)getpid(),
+                                    p1->next_spill_id++);
         fh = fopen(path, "w");
         if (fh == NULL) { fprintf(stderr, "tui: cannot open spill %s\n", path); exit(1); }
         stHash_insert(p1->spill_fh, stString_copy(genome), fh);
@@ -212,6 +221,7 @@ static void note_seq(Phase1 *p1, const char *seq_name, int64_t seq_len) {
 
 static void tui_phase1_block(Phase1 *p1, Alignment *aln) {
     int64_t cn = aln->column_number;
+    if (aln->row == NULL) { p1->T += cn; return; }  // degenerate a-line, no rows
     char *ref_g = genome_of(aln->row->sequence_name, p1->gmap);
     if (stSet_search(p1->ref_genomes, ref_g) == NULL) stSet_insert(p1->ref_genomes, ref_g);
     else free(ref_g);
@@ -253,6 +263,8 @@ static Run *load_genome_runs(const char *path, int64_t *n_out) {
             r->seq = stString_copy(sbuf);
             r->strand = st;
             n++;
+        } else {
+            st_errAbort("tui: corrupt spill line in %s: %s", path, line);
         }
     }
     fclose(fh);
@@ -368,7 +380,10 @@ static int64_t decode_runs(const uint8_t *def, int64_t def_len,
 
 // Remove spill files and free phase-1 state.  Shared by the success and the
 // error-return paths so a failed run never leaks spill files on disk.
-static void tui_cleanup(Phase1 *p1, char **seqs, char *eff_tmp) {
+// `tree_map` (the # hal-derived genome set, or NULL) is freed here too so its
+// lifetime is tied to one place regardless of which exit path is taken.
+static void tui_cleanup(Phase1 *p1, char **seqs, char *eff_tmp,
+                        stHash *tree_map) {
     stHashIterator *hit = stHash_getIterator(p1->spill_path);
     char *gk;
     while ((gk = stHash_getNext(hit)) != NULL) {
@@ -381,6 +396,7 @@ static void tui_cleanup(Phase1 *p1, char **seqs, char *eff_tmp) {
     stHash_destruct(p1->seq_len);
     stList_destruct(p1->seq_keys);
     stSet_destruct(p1->ref_genomes);
+    if (tree_map != NULL) stHash_destruct(tree_map);
     free(eff_tmp);
 }
 
@@ -455,8 +471,7 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
     if (of == NULL) {
         fprintf(stderr, "tui: cannot write %s\n", out_path);
         oneSchemaDestroy(schema);
-        tui_cleanup(&p1, seqs, eff_tmp);
-        if (tree_map != NULL) stHash_destruct(tree_map);
+        tui_cleanup(&p1, seqs, eff_tmp, tree_map);
         return 1;
     }
     oneAddProvenance(of, "taffy", "tui", "universal column index", 0);
@@ -478,10 +493,24 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
         oneWriteLine(of, 'd', strlen(sk), (void *)sk);
     }
 
-    // per genome (contiguous in seqs[] thanks to seqkey_cmp): g + S/R objects
+    // per genome (contiguous in seqs[] thanks to seqkey_cmp): g + S/R objects.
+    // Phase 2 assumes one genome's sequences form ONE contiguous block in
+    // seqs[].  That holds because seqkey_cmp's first-dot split is a prefix of
+    // the gmap-resolved genome -- EXCEPT if two distinct genomes share a
+    // first-dot token (e.g. GCF_X.1 vs GCF_X.2 with >1-dot names), which would
+    // interleave them.  This set makes that violation a loud abort instead of
+    // a silent re-scan / mis-grouping.
+    stSet *seen_g = stSet_construct3(stHash_stringKey, stHash_stringEqualKey, free);
     int64_t i = 0;
     while (i < n_seqs) {
         char *gname = genome_of(seqs[i], eff_map);  // groups spill files; not emitted
+        if (stSet_search(seen_g, gname) != NULL) {
+            st_errAbort("tui: genome '%s' is not contiguous in the sorted "
+                        "sequence order (first-dot token collision between "
+                        "distinct genomes); index ordering invariant broken",
+                        gname);
+        }
+        stSet_insert(seen_g, stString_copy(gname));
 
         int64_t nr = 0;
         Run *runs = NULL;
@@ -566,10 +595,10 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
         free(runs);
         free(gname);
     }
+    stSet_destruct(seen_g);
 
-    if (tree_map != NULL) stHash_destruct(tree_map);
     oneFileClose(of);
     oneSchemaDestroy(schema);
-    tui_cleanup(&p1, seqs, eff_tmp);
+    tui_cleanup(&p1, seqs, eff_tmp, tree_map);
     return 0;
 }
