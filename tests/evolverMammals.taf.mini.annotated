@@ -1,4 +1,5 @@
 #taf version:1 scoring:N/A
+# hal ((simHuman_chr6:0.144018,(simMouse_chr6:0.084509,simRat_chr6:0.091589)mr:0.271974)Anc1:0.020593,(simCow_chr6:0.18908,simDog_chr6:0.16303)Anc2:0.032898)Anc0;
 GGGGGGGGG ; i 0 Anc0.Anc0refChr0 0 + 4151 i 1 Anc1.Anc1refChr1 292714 + 296994 i 2 Anc2.Anc2refChr1 5 + 4655 i 3 mr.mrrefChr1 178277 + 182340 i 4 simCow_chr6.simCow.chr6 5045 - 602619 i 5 simDog_chr6.simDog.chr6 589129 + 593897 i 6 simHuman_chr6.simHuman.chr6 597375 + 601863 i 7 simMouse_chr6.simMouse.chr6 630640 + 636262 i 8 simRat_chr6.simRat.chr6 642153 + 647215 @ test_label:5.100000
 TTTTTTTTT @ test_label:10.000000
 CCCCGCCCC @ test_label:67.000000

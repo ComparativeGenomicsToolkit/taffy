@@ -13,7 +13,7 @@
 
 // ONEcode schema. Exactly one list field per line (STRING / INT_LIST); other
 // fields are scalar INT.  The directory keys on the full genome.sequence name
-// (genome = prefix before the first '.', derived identically at build/load).
+// (genome derived identically at build/load via genome_of()).
 static const char *TUI_SCHEMA =
     "P 3 tui\n"
     "D t 1 3 INT\n"                          // total columns T (global)
@@ -44,14 +44,71 @@ static const char *base_of(const char *path) {
     return slash ? slash + 1 : path;
 }
 
-// genome = prefix of seq name before the first '.'  (dots-in-names deferred)
-static char *genome_of(const char *seq_name) {
-    const char *dot = strchr(seq_name, '.');
-    int64_t n = dot ? (dot - seq_name) : (int64_t)strlen(seq_name);
-    char *g = st_malloc(n + 1);
-    memcpy(g, seq_name, n);
-    g[n] = '\0';
+// Resolve the genome name of a full "genome.sequence" name (caller frees).
+//
+// <=1 '.'  : unambiguous -> split at the (only) '.', or the whole name if none.
+//            (covers ancestors like `MuridaeAnc3.MuridaeAnc3refChr0` and any
+//            plain `genome.chr`); no name map needed even if one is supplied.
+// >1  '.'  : ambiguous (e.g. accessions `GCF_947179515.1.NC_067472.1`).  A
+//            genome_name_map is REQUIRED; resolution reuses taf.c's
+//            extract_genome_name (walks each '.' offset, returns the first
+//            prefix that is a key of the map).  Missing map or no match is a
+//            fatal error -- silently mis-splitting a coordinate index is worse.
+static char *genome_of(const char *seq_name, stHash *gmap) {
+    int ndots = 0;
+    for (const char *s = seq_name; (s = strchr(s, '.')) != NULL; s++) ndots++;
+    if (ndots <= 1) {
+        const char *dot = strchr(seq_name, '.');
+        int64_t n = dot ? (dot - seq_name) : (int64_t)strlen(seq_name);
+        char *g = st_malloc(n + 1);
+        memcpy(g, seq_name, n);
+        g[n] = '\0';
+        return g;
+    }
+    if (gmap == NULL) {
+        st_errAbort("tui: sequence name '%s' has more than one '.' so its "
+                    "genome/sequence split is ambiguous; supply a genome name "
+                    "list with `taffy index -n <file>`", seq_name);
+    }
+    char *g = extract_genome_name(seq_name, NULL, gmap);  // reuse taf.c parser
+    if (g == NULL) {
+        st_errAbort("tui: could not resolve a genome for '%s' using the "
+                    "provided name map (no listed genome is a prefix of it)",
+                    seq_name);
+    }
     return g;
+}
+
+// Build a genome-name membership set (keys, dummy values) from a Newick string
+// -- every node label, leaf and internal (e.g. hal2maf's "# hal" tree gives the
+// full genome set including ancestors).  A label is a maximal run of non-
+// "(),:;"/non-space chars that is NOT a branch length (i.e. not the run right
+// after a ':').  Same stHash shape extract_genome_name / genome_of expect.
+static stHash *genome_set_from_newick(const char *nwk) {
+    stHash *s = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, free, NULL);
+    char tok[8192];
+    int n = 0, after_colon = 0;
+    for (const char *p = nwk; ; p++) {
+        char c = *p;
+        int delim = (c == '\0' || c == '(' || c == ')' || c == ',' ||
+                     c == ':' || c == ';' || c == ' ' || c == '\t' ||
+                     c == '\n' || c == '\r');
+        if (!delim) {
+            if (n < (int)sizeof(tok) - 1) tok[n++] = c;
+        } else {
+            if (n > 0) {
+                tok[n] = '\0';
+                if (!after_colon && stHash_search(s, tok) == NULL) {
+                    stHash_insert(s, stString_copy(tok), (void *)1);
+                }
+                n = 0;
+            }
+            if (c == ':') after_colon = 1;          // next run is a branch length
+            else if (c != '\0') after_colon = 0;    // '(' ',' ')' ';' end it
+            if (c == '\0') break;
+        }
+    }
+    return s;
 }
 
 // Order full "genome.sequence" names genome-major (split at first '.') so each
@@ -117,6 +174,7 @@ typedef struct {
     const char *tmp_dir;  // where spill files go
     const char *out_base; // basename of out path (for unique spill names)
     int next_spill_id;
+    stHash *gmap;         // optional name map for >1-dot genome resolution
 } Phase1;
 
 static FILE *spill_for(Phase1 *p1, const char *genome) {
@@ -144,11 +202,11 @@ static void note_seq(Phase1 *p1, const char *seq_name, int64_t seq_len) {
 
 static void tui_phase1_block(Phase1 *p1, Alignment *aln) {
     int64_t cn = aln->column_number;
-    char *ref_g = genome_of(aln->row->sequence_name);
+    char *ref_g = genome_of(aln->row->sequence_name, p1->gmap);
     if (stSet_search(p1->ref_genomes, ref_g) == NULL) stSet_insert(p1->ref_genomes, ref_g);
     else free(ref_g);
     for (Alignment_Row *row = aln->row; row != NULL; row = row->n_row) {
-        char *gname = genome_of(row->sequence_name);
+        char *gname = genome_of(row->sequence_name, p1->gmap);
         note_seq(p1, row->sequence_name, row->sequence_length);
         emit_row_runs(spill_for(p1, gname), row, p1->T, cn);
         free(gname);
@@ -210,7 +268,8 @@ static void tui_cleanup(Phase1 *p1, char **seqs, char *eff_tmp) {
     free(eff_tmp);
 }
 
-int tui_create(LI *li, const char *out_path, const char *tmp_dir) {
+int tui_create(LI *li, const char *out_path, const char *tmp_dir,
+                stHash *genome_name_map) {
     int input_format = check_input_format(LI_peek_at_next_line(li));  // 0=TAF 1=MAF
     if (input_format != 0 && input_format != 1) {
         fprintf(stderr, "tui: input must be MAF or TAF\n");
@@ -218,6 +277,18 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir) {
     }
     bool rle = 0;
     Tag *tag = (input_format == 0) ? taf_read_header_2(li, &rle) : maf_read_header(li);
+    // Genome resolution map precedence: an explicit -n list overrides; else
+    // fall back to the genome set in the "# hal" tree comment if present.
+    stHash *eff_map = genome_name_map, *tree_map = NULL;
+    if (eff_map == NULL) {
+        Tag *h = tag_find(tag, (char *) TAF_HAL_TREE_KEY);
+        if (h != NULL) {
+            tree_map = genome_set_from_newick(h->value);
+            eff_map = tree_map;
+            st_logInfo("tui: using genome set from the # hal tree (%" PRIi64
+                       " genomes)\n", (int64_t) stHash_size(tree_map));
+        }
+    }
     tag_destruct(tag);
 
     // spill dir: explicit --tmpDir, else the output file's own directory
@@ -228,6 +299,7 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir) {
     p1.tmp_dir = eff_tmp;
     p1.out_base = base_of(out_path);
     p1.next_spill_id = 0;
+    p1.gmap = eff_map;
     p1.spill_fh = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, free, NULL);
     // we own the spill paths -> free them via the hash on destruct
     p1.spill_path = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, free, free);
@@ -268,6 +340,7 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir) {
         fprintf(stderr, "tui: cannot write %s\n", out_path);
         oneSchemaDestroy(schema);
         tui_cleanup(&p1, seqs, eff_tmp);
+        if (tree_map != NULL) stHash_destruct(tree_map);
         return 1;
     }
     oneAddProvenance(of, "taffy", "tui", "universal column index", 0);
@@ -280,7 +353,7 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir) {
     for (int64_t i = 0; i < n_seqs; i++) {
         char *sk = seqs[i];
         int64_t slen = *(int64_t *)stHash_search(p1.seq_len, sk);
-        char *gg = genome_of(sk);
+        char *gg = genome_of(sk, eff_map);
         int is_ref = stSet_search(p1.ref_genomes, gg) != NULL ? 1 : 0;
         free(gg);
         oneInt(of, 1) = i;
@@ -292,7 +365,7 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir) {
     // per genome (contiguous in seqs[] thanks to seqkey_cmp): g + S/R objects
     int64_t i = 0;
     while (i < n_seqs) {
-        char *gname = genome_of(seqs[i]);   // groups spill files; not emitted
+        char *gname = genome_of(seqs[i], eff_map);  // groups spill files; not emitted
 
         int64_t nr = 0;
         Run *runs = NULL;
@@ -305,7 +378,7 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir) {
         // seq-sorted consistently, so advance a single forward cursor.
         int64_t rc = 0;
         while (i < n_seqs) {
-            char *gg = genome_of(seqs[i]);
+            char *gg = genome_of(seqs[i], eff_map);
             int same = strcmp(gg, gname) == 0;
             free(gg);
             if (!same) break;
@@ -337,6 +410,7 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir) {
         free(gname);
     }
 
+    if (tree_map != NULL) stHash_destruct(tree_map);
     oneFileClose(of);
     oneSchemaDestroy(schema);
     tui_cleanup(&p1, seqs, eff_tmp);

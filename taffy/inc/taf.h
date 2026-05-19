@@ -53,6 +53,22 @@ char *color_base_char(char base);
 char *color_base_string(char *bases, int64_t length);
 
 /*
+ * Sentinel tag key used to carry a MAF/TAF "# hal <newick>" comment line
+ * (the hal2maf tree) verbatim through the header.  It is NOT a normal
+ * key:value tag: the value is the raw newick and it is written back out as
+ * its own "# hal ..." comment line, not in the #taf/##maf tag list.  The
+ * space in the key can never collide with a parsed (whitespace-split) tag.
+ */
+#define TAF_HAL_TREE_KEY "# hal"
+
+/*
+ * If the next line behind `li` is a "# hal <newick>" comment, consume it and
+ * prepend it to `tag` as a TAF_HAL_TREE_KEY tag (value = the newick).  Else
+ * returns `tag` unchanged.  Shared by maf_read_header and taf_read_header.
+ */
+Tag *header_capture_hal_comment(LI *li, Tag *tag);
+
+/*
  * Make a tag
  */
 Tag *tag_construct(char *key, char *value, Tag *n_tag);

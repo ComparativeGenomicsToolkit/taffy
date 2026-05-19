@@ -302,10 +302,27 @@ Tag *parse_header(stList *tokens, char *header_prefix, char *delimiter) {
 void write_header(Tag *tag, LW *lw, char *header_prefix, char *delimiter, char *end) {
     LW_write(lw, "%s", header_prefix);
     while(tag != NULL) {
-        LW_write(lw, " %s%s%s", tag->key, delimiter, tag->value);
+        // the hal tree rides as its own "# hal ..." comment line, emitted by
+        // the format-specific wrapper -- never in the key:value tag list
+        if(strcmp(tag->key, TAF_HAL_TREE_KEY) != 0) {
+            LW_write(lw, " %s%s%s", tag->key, delimiter, tag->value);
+        }
         tag = tag->n_tag;
     }
     LW_write(lw, "%s", end);
+}
+
+Tag *header_capture_hal_comment(LI *li, Tag *tag) {
+    char *peek = LI_peek_at_next_line(li);
+    if(peek == NULL || strncmp(peek, TAF_HAL_TREE_KEY, strlen(TAF_HAL_TREE_KEY)) != 0) {
+        return tag; // no "# hal" line here
+    }
+    char *line = LI_get_next_line(li);          // consume it
+    char *p = line + strlen(TAF_HAL_TREE_KEY);  // skip "# hal"
+    while(*p == ' ' || *p == '\t') { p++; }     // and any spaces
+    tag = tag_construct(TAF_HAL_TREE_KEY, p, tag); // copies the newick
+    free(line);
+    return tag;
 }
 
 int64_t alignment_number_of_common_rows(Alignment *left_alignment, Alignment *right_alignment) {

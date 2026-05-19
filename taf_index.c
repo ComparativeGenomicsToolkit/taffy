@@ -7,8 +7,40 @@
 #include "taf.h"
 #include "tai.h"
 #include "tui.h"
+#include "sonLib.h"
 #include <getopt.h>
 #include <time.h>
+
+// Load a whitespace-separated (space/tab/newline) list of genome names into an
+// stHash (keys = names, dummy non-NULL values) -- the shape extract_genome_name
+// wants for its prefix-walk.  This is a plain membership list: no renaming.
+static stHash *load_genome_name_list(const char *path) {
+    FILE *fh = fopen(path, "r");
+    if (fh == NULL) {
+        fprintf(stderr, "Unable to open genome name list: %s\n", path);
+        exit(1);
+    }
+    stHash *names = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, free, NULL);
+    char tok[8192];
+    int c, n = 0;
+    do {
+        c = fgetc(fh);
+        if (c == EOF || c == ' ' || c == '\t' || c == '\n' ||
+            c == '\r' || c == '\f' || c == '\v') {
+            if (n > 0) {
+                tok[n] = '\0';
+                if (stHash_search(names, tok) == NULL) {
+                    stHash_insert(names, stString_copy(tok), (void *)1);
+                }
+                n = 0;
+            }
+        } else if (n < (int)sizeof(tok) - 1) {
+            tok[n++] = (char)c;
+        }
+    } while (c != EOF);
+    fclose(fh);
+    return names;
+}
 
 static void usage(void) {
     fprintf(stderr, "taffy index [options]\n");
@@ -19,6 +51,12 @@ static void usage(void) {
                      "instead of the .tai. For a `cactus-hal2maf --universal` MAF/TAF.\n");
     fprintf(stderr, "-T --tmpDir : Directory for --universal spill files "
                      "[default: directory of the output .tui]\n");
+    fprintf(stderr, "-n --genomeNames : File listing genome names "
+                     "(whitespace-separated), ex from `halStats --genomes`.  "
+                     "Used only to split genome.sequence names; no renaming.  "
+                     "For --universal when a name has >1 '.': if omitted, the "
+                     "genome set is taken from the `# hal` tree in the header "
+                     "(hal2maf writes one); this option overrides it.\n");
     fprintf(stderr, "-l --logLevel : Set the log level\n");
     fprintf(stderr, "-h --help : Print this help message\n");
 }
@@ -34,6 +72,7 @@ int taf_index_main(int argc, char *argv[]) {
     int64_t block_size = 10000;
     bool universal = false;
     char *tmp_dir = NULL;
+    char *genome_names_file = NULL;
 
     ///////////////////////////////////////////////////////////////////////////
     // Parse the inputs
@@ -45,11 +84,12 @@ int taf_index_main(int argc, char *argv[]) {
                                                 { "blockSize", required_argument, 0, 'b' },
                                                 { "universal", no_argument, 0, 'u' },
                                                 { "tmpDir", required_argument, 0, 'T' },
+                                                { "genomeNames", required_argument, 0, 'n' },
                                                 { "help", no_argument, 0, 'h' },
                                                 { 0, 0, 0, 0 } };
 
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:b:uT:h", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:b:uT:n:h", long_options, &option_index);
         if (key == -1) {
             break;
         }
@@ -69,6 +109,9 @@ int taf_index_main(int argc, char *argv[]) {
                 break;
             case 'T':
                 tmp_dir = optarg;
+                break;
+            case 'n':
+                genome_names_file = optarg;
                 break;
             case 'h':
                 usage();
@@ -110,10 +153,18 @@ int taf_index_main(int argc, char *argv[]) {
     FILE *tai_fh = NULL;
     int rv = 0;
     if (universal) {
+        stHash *genome_name_map = NULL;
+        if (genome_names_file != NULL) {
+            st_logInfo("Genome names file string : %s\n", genome_names_file);
+            genome_name_map = load_genome_name_list(genome_names_file);
+        }
         char *tui_fn = tui_path(taf_fn);
         st_logInfo("Output index file : %s\n", tui_fn);
-        rv = tui_create(li, tui_fn, tmp_dir);
+        rv = tui_create(li, tui_fn, tmp_dir, genome_name_map);
         free(tui_fn);
+        if (genome_name_map != NULL) {
+            stHash_destruct(genome_name_map);
+        }
     } else {
         tai_fn = tai_path(taf_fn);
         st_logInfo("Output index file : %s\n", tai_fn);

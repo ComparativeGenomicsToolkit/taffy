@@ -271,6 +271,7 @@ Tag *taf_read_header(LI *li) {
     assert(tokens != NULL); // There has to be a valid header line
     Tag *tag = parse_header(tokens, "#taf", ":");
     stList_destruct(tokens);
+    tag = header_capture_hal_comment(li, tag); // preserve the hal2maf tree
 
     return tag;
 }
@@ -423,7 +424,11 @@ void taf_write_block(Alignment *p_alignment, Alignment *alignment, bool run_leng
 }
 
 void taf_write_header(Tag *tag, LW *lw) {
-    write_header(tag, lw, "#taf", ":", "\n");
+    write_header(tag, lw, "#taf", ":", "\n"); // tag list (hal tag skipped within)
+    Tag *hal = tag_find(tag, (char *) TAF_HAL_TREE_KEY);
+    if(hal != NULL) {
+        LW_write(lw, "%s %s\n", TAF_HAL_TREE_KEY, hal->value);
+    }
 }
 
 int check_input_format(const char *header_line) {

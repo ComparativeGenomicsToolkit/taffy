@@ -35,6 +35,7 @@
  */
 
 #include "line_iterator.h"
+#include "sonLib.h"
 
 /* Return maf_path + ".tui" (caller frees). */
 char *tui_path(const char *maf_path);
@@ -50,8 +51,20 @@ char *tui_path(const char *maf_path);
  * Per-genome spill files are written under `tmp_dir`.  If `tmp_dir` is NULL or
  * empty, the directory of `out_path` is used (roomy, same filesystem as the
  * output, and avoids a possibly tmpfs/small /tmp at vertebrate scale).
+ *
+ * Genome name resolution: a name with <=1 '.' is split at the (only) '.' (or
+ * is itself the genome if no '.').  A name with MORE than one '.' is ambiguous
+ * (e.g. assembly accessions `GCF_947179515.1.NC_067472.1`) and needs the set
+ * of known genome names.  Precedence: an explicit `genome_name_map` (stHash,
+ * keys = names, dummy values; a membership set, NOT a renaming map) wins; else
+ * the genome set is derived from the `# hal` Newick tree comment in the header
+ * if present (hal2maf emits one, preserved through maf<->taf).  Resolution
+ * reuses taf.c's extract_genome_name(); an unresolvable >1-dot name with no
+ * source for the genome set is a fatal error.  Pass NULL for genome_name_map
+ * to use the header tree (or when the input has no >1-dot names).
  */
-int tui_create(LI *li, const char *out_path, const char *tmp_dir);
+int tui_create(LI *li, const char *out_path, const char *tmp_dir,
+                stHash *genome_name_map);
 
 #endif /* TAF_TUI_H_ */
 

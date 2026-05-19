@@ -75,6 +75,7 @@ Tag *maf_read_header(LI *li) {
     free(line);
     Tag *tag = parse_header(tokens, "##maf", "=");
     stList_destruct(tokens);
+    tag = header_capture_hal_comment(li, tag); // preserve the hal2maf tree
 
     return tag;
 }
@@ -101,7 +102,12 @@ void maf_write_block(Alignment *alignment, LW *lw) {
 void write_header(Tag *tag, LW *lw, char *header_prefix, char *delimiter, char *end);
 
 void maf_write_header(Tag *tag, LW *lw) {
-    write_header(tag, lw, "##maf", "=", "\n\n");
+    write_header(tag, lw, "##maf", "=", "\n"); // tag list (hal tag skipped within)
+    Tag *hal = tag_find(tag, (char *) TAF_HAL_TREE_KEY);
+    if(hal != NULL) {
+        LW_write(lw, "%s %s\n", TAF_HAL_TREE_KEY, hal->value);
+    }
+    LW_write(lw, "\n"); // blank line separating the header from the blocks
 }
 
 
