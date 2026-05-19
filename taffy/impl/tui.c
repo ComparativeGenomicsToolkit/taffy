@@ -129,22 +129,22 @@ static stHash *genome_set_from_newick(const char *nwk) {
     return s;
 }
 
-// Order full "genome.sequence" names genome-major (split at first '.') so each
-// genome's sequences form one contiguous block.  THE single source of truth for
-// sequence ordering: both seqs[] (qsort) and runs[] (run_cmp) must use this, or
-// the Phase-2 forward cursor over runs[] can skip/misattribute a seq's runs.
-static int seqname_cmp(const char *x, const char *y) {
-    const char *xd = strchr(x, '.'), *yd = strchr(y, '.');
-    size_t xg = xd ? (size_t)(xd - x) : strlen(x);
-    size_t yg = yd ? (size_t)(yd - y) : strlen(y);
-    int c = strncmp(x, y, xg < yg ? xg : yg);
-    if (c != 0) return c;
-    if (xg != yg) return xg < yg ? -1 : 1;   // shorter genome prefix first
-    return strcmp(x, y);                      // same genome -> by full seq name
-}
+// One distinct "genome.sequence" name plus its gmap-resolved genome.  The
+// genome is computed once (genome_of) and cached here so Phase 2 never
+// re-resolves per sequence, and -- crucially -- so the sort key is the TRUE
+// genome, not a first-dot guess.  That makes "each genome's sequences form one
+// contiguous block in seqs[]" true BY CONSTRUCTION (was only an assumption
+// when ordering split at the first '.').
+typedef struct { char *seq; char *genome; } SeqKey;
 
+// THE global order: genome-major (true resolved genome), then full sequence
+// name.  seqs[] uses this; runs[] (run_cmp) and the Phase-2 forward cursor use
+// strcmp on the full name, which within one genome's spill is exactly this
+// order's within-genome part -- so the cursor can't skip/misattribute.
 static int seqkey_cmp(const void *a, const void *b) {
-    return seqname_cmp(*(const char **)a, *(const char **)b);
+    const SeqKey *x = a, *y = b;
+    int c = strcmp(x->genome, y->genome);
+    return c ? c : strcmp(x->seq, y->seq);
 }
 
 // One spilled run, text line: "seqName\tt_start\tg_start\tlength\tstrand\n"
@@ -240,9 +240,11 @@ static void tui_phase1_block(Phase1 *p1, Alignment *aln) {
 
 typedef struct { char *seq; int64_t t, g, len; char strand; } Run;
 
+// runs[] hold one genome's runs (one spill), so full-name strcmp is exactly
+// the within-genome order seqs[] uses (genome prefix is constant here).
 static int run_cmp(const void *a, const void *b) {
     const Run *x = a, *y = b;
-    int s = seqname_cmp(x->seq, y->seq);   // same ordering as seqs[] (seqkey_cmp)
+    int s = strcmp(x->seq, y->seq);
     if (s != 0) return s;
     return (x->t < y->t) ? -1 : (x->t > y->t) ? 1 : 0;
 }
@@ -382,15 +384,16 @@ static int64_t decode_runs(const uint8_t *def, int64_t def_len,
 // error-return paths so a failed run never leaks spill files on disk.
 // `tree_map` (the # hal-derived genome set, or NULL) is freed here too so its
 // lifetime is tied to one place regardless of which exit path is taken.
-static void tui_cleanup(Phase1 *p1, char **seqs, char *eff_tmp,
-                        stHash *tree_map) {
+static void tui_cleanup(Phase1 *p1, SeqKey *seqks, int64_t n_seqs,
+                        char *eff_tmp, stHash *tree_map) {
     stHashIterator *hit = stHash_getIterator(p1->spill_path);
     char *gk;
     while ((gk = stHash_getNext(hit)) != NULL) {
         remove((char *)stHash_search(p1->spill_path, gk));
     }
     stHash_destructIterator(hit);
-    free(seqs);
+    for (int64_t i = 0; i < n_seqs; i++) free(seqks[i].genome);  // .seq owned by seq_len
+    free(seqks);
     stHash_destruct(p1->spill_fh);
     stHash_destruct(p1->spill_path);
     stHash_destruct(p1->seq_len);
@@ -460,18 +463,22 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
     while ((gk = stHash_getNext(hit)) != NULL) fclose(stHash_search(p1.spill_fh, gk));
     stHash_destructIterator(hit);
 
-    // deterministic global order: genome-major, then sequence
+    // deterministic global order: genome-major (true resolved genome), then
+    // sequence.  Resolve each genome once here (memoized in SeqKey.genome).
     int64_t n_seqs = stList_length(p1.seq_keys);
-    char **seqs = st_malloc((n_seqs ? n_seqs : 1) * sizeof(char *));
-    for (int64_t i = 0; i < n_seqs; i++) seqs[i] = stList_get(p1.seq_keys, i);
-    qsort(seqs, n_seqs, sizeof(char *), seqkey_cmp);
+    SeqKey *seqks = st_malloc((n_seqs ? n_seqs : 1) * sizeof(SeqKey));
+    for (int64_t i = 0; i < n_seqs; i++) {
+        seqks[i].seq = stList_get(p1.seq_keys, i);          // owned by seq_len
+        seqks[i].genome = genome_of(seqks[i].seq, eff_map); // we own this
+    }
+    qsort(seqks, n_seqs, sizeof(SeqKey), seqkey_cmp);
 
     OneSchema *schema = oneSchemaCreateFromText(TUI_SCHEMA);
     OneFile *of = oneFileOpenWriteNew(out_path, schema, "tui", true, 1);
     if (of == NULL) {
         fprintf(stderr, "tui: cannot write %s\n", out_path);
         oneSchemaDestroy(schema);
-        tui_cleanup(&p1, seqs, eff_tmp, tree_map);
+        tui_cleanup(&p1, seqks, n_seqs, eff_tmp, tree_map);
         return 1;
     }
     oneAddProvenance(of, "taffy", "tui", "universal column index", 0);
@@ -482,35 +489,21 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
 
     // d: directory (front of file), S-ordinal == position in global order
     for (int64_t i = 0; i < n_seqs; i++) {
-        char *sk = seqs[i];
+        char *sk = seqks[i].seq;
         int64_t slen = *(int64_t *)stHash_search(p1.seq_len, sk);
-        char *gg = genome_of(sk, eff_map);
-        int is_ref = stSet_search(p1.ref_genomes, gg) != NULL ? 1 : 0;
-        free(gg);
+        int is_ref = stSet_search(p1.ref_genomes, seqks[i].genome) != NULL ? 1 : 0;
         oneInt(of, 1) = i;
         oneInt(of, 2) = slen;
         oneInt(of, 3) = is_ref;
         oneWriteLine(of, 'd', strlen(sk), (void *)sk);
     }
 
-    // per genome (contiguous in seqs[] thanks to seqkey_cmp): g + S/R objects.
-    // Phase 2 assumes one genome's sequences form ONE contiguous block in
-    // seqs[].  That holds because seqkey_cmp's first-dot split is a prefix of
-    // the gmap-resolved genome -- EXCEPT if two distinct genomes share a
-    // first-dot token (e.g. GCF_X.1 vs GCF_X.2 with >1-dot names), which would
-    // interleave them.  This set makes that violation a loud abort instead of
-    // a silent re-scan / mis-grouping.
-    stSet *seen_g = stSet_construct3(stHash_stringKey, stHash_stringEqualKey, free);
+    // per genome: g + S/R objects.  seqks is sorted by the TRUE resolved
+    // genome, so one genome's sequences are ONE contiguous block by
+    // construction (no first-dot-collision hazard, no re-resolve).
     int64_t i = 0;
     while (i < n_seqs) {
-        char *gname = genome_of(seqs[i], eff_map);  // groups spill files; not emitted
-        if (stSet_search(seen_g, gname) != NULL) {
-            st_errAbort("tui: genome '%s' is not contiguous in the sorted "
-                        "sequence order (first-dot token collision between "
-                        "distinct genomes); index ordering invariant broken",
-                        gname);
-        }
-        stSet_insert(seen_g, stString_copy(gname));
+        char *gname = seqks[i].genome;  // groups spill files; not emitted
 
         int64_t nr = 0;
         Run *runs = NULL;
@@ -519,24 +512,20 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
             runs = load_genome_runs(path, &nr);
             if (runs != NULL) qsort(runs, nr, sizeof(Run), run_cmp);
         }
-        // walk this genome's seqs (contiguous block in seqs[]); runs[] are
-        // seq-sorted consistently, so advance a single forward cursor.
+        // walk this genome's seqs (contiguous block in seqks[]); runs[] are
+        // seq-sorted consistently (strcmp), so advance a single forward cursor.
         int64_t rc = 0;
-        while (i < n_seqs) {
-            char *gg = genome_of(seqs[i], eff_map);
-            int same = strcmp(gg, gname) == 0;
-            free(gg);
-            if (!same) break;
-            char *sk = seqs[i];
+        while (i < n_seqs && strcmp(seqks[i].genome, gname) == 0) {
+            char *sk = seqks[i].seq;
             int64_t slen = *(int64_t *)stHash_search(p1.seq_len, sk);
             oneInt(of, 1) = slen;
             oneWriteLine(of, 'S', strlen(sk), (void *)sk);
-            // R: runs of this seq (contiguous in sorted runs[]); same ordering
-            // (seqname_cmp) as seqs[] so the forward cursor can't skip/misattribute
-            while (rc < nr && seqname_cmp(runs[rc].seq, sk) < 0) rc++;  // forward only
+            // R: runs of this seq (contiguous in sorted runs[]); same strcmp
+            // order as seqks[] so the forward cursor can't skip/misattribute
+            while (rc < nr && strcmp(runs[rc].seq, sk) < 0) rc++;  // forward only
             int64_t a = rc;
             int64_t bnd = a;
-            while (bnd < nr && seqname_cmp(runs[bnd].seq, sk) == 0) bnd++;
+            while (bnd < nr && strcmp(runs[bnd].seq, sk) == 0) bnd++;
             int64_t cnt = bnd - a;
             int64_t *buf = st_malloc((cnt ? 3 * cnt : 1) * sizeof(int64_t));
             // Colinear merge: runs[a..bnd) are this seq's runs sorted by t
@@ -593,12 +582,11 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
         }
         for (int64_t k = 0; k < nr; k++) free(runs[k].seq);
         free(runs);
-        free(gname);
+        // gname is seqks[i].genome -- owned by seqks, freed in tui_cleanup
     }
-    stSet_destruct(seen_g);
 
     oneFileClose(of);
     oneSchemaDestroy(schema);
-    tui_cleanup(&p1, seqs, eff_tmp, tree_map);
+    tui_cleanup(&p1, seqks, n_seqs, eff_tmp, tree_map);
     return 0;
 }
