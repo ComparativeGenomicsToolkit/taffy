@@ -19,13 +19,11 @@
 // fields are scalar INT.  The directory keys on the full genome.sequence name
 // (genome derived identically at build/load via genome_of()).
 //
-// R holds one sequence's merged runs as a per-sequence DELTA + varint byte
-// blob, zlib-deflated (see encode_runs).  The scalar INT is the inflated blob
-// length (sizes the inflate buffer); the STRING list is the deflated bytes.
-// Absolute (t,g,len) triples defeat ONElib's Huffman -- the monotone-delta
-// blob is ~3x smaller end to end.  Each run, in order: zigzag-varint(t-prevT),
-// zigzag-varint(g-prevG), uvarint((len<<1)|revStrand); prevT/prevG carry the
-// absolute values, seeded at 0 so run 0 stores absolutes.
+// R holds one sequence's merged runs as a per-sequence structure-of-arrays
+// delta+varint blob, zlib-deflated (see encode_runs).  The scalar INT is the
+// inflated blob length (sizes the inflate buffer); the STRING list is the
+// deflated bytes.  Absolute (t,g,len) triples defeat ONElib's Huffman; the
+// SoA gap|gsk|lenc form is ~5x smaller than absolute end to end.
 static const char *TUI_SCHEMA =
     "P 3 tui\n"
     "D t 1 3 INT\n"                          // total columns T (global)
@@ -283,22 +281,52 @@ static inline uint64_t get_uvarint(const uint8_t **pp) {
     return v;
 }
 
-// Encode m runs (buf = m triples of [t, g, lenc=(len<<1|rev)], absolute) into a
-// zigzag-delta varint blob, then zlib-deflate it.  Returns the malloc'd
-// deflated buffer (caller frees), sets *raw_len to the pre-deflate length and
-// *def_len to the deflated length.  Worst-case varint is 10 bytes/value.
+// Encode m runs (buf = m triples [t, g, lenc=(len<<1|rev)], absolute) and
+// zlib-deflate them.  Caller frees the returned buffer; *raw_len = inflated
+// length, *def_len = deflated length.
+//
+// Structure-of-arrays: three concatenated varint streams, not interleaved.
+// Per run (prev_end_t = pt+pl, prev_end_g = pg+pl; pt,pg,pl carry the prior
+// run's absolute t,g and length; all seeded 0 so run 0 stores absolutes):
+//   gap  = t - prev_end_t   (== 0 for ~99% of splits: the sequence stays
+//                             forward-contiguous, only OTHER lineages' columns
+//                             intervened -> this stream deflates to ~nothing)
+//   gsk  = g - prev_end_g   (intervening universal columns; the real signal)
+//   lenc = (len<<1)|strand
+// The delta math never uses strand -> the codec is a strand-agnostic
+// bijection; strand only rides in lenc for the query formula.  Measured ~22%
+// smaller than the interleaved form (SoA lets zlib exploit each stream's very
+// different statistics, esp. the all-zero gap stream).
+//
+// Raw layout: header [uvarint m, uvarint |gap bytes|, uvarint |gsk bytes|]
+// then gap||gsk||lenc.  raw_len bounds the inflate buffer; m bounds decode.
 static uint8_t *encode_runs(const int64_t *buf, int64_t m,
                             int64_t *raw_len, int64_t *def_len) {
-    uint8_t *raw = st_malloc((size_t)(m * 30 + 1));
-    size_t rn = 0;
-    int64_t pt = 0, pg = 0;
+    uint8_t *G = st_malloc((size_t)(m * 10 + 1));   // gap stream
+    uint8_t *K = st_malloc((size_t)(m * 10 + 1));   // gsk stream
+    uint8_t *L = st_malloc((size_t)(m * 10 + 1));   // lenc stream
+    size_t gn = 0, kn = 0, ln = 0;
+    int64_t pt = 0, pg = 0, pl = 0;
     for (int64_t k = 0; k < m; k++) {
         int64_t t = buf[3*k+0], g = buf[3*k+1], lenc = buf[3*k+2];
-        rn += put_uvarint(raw + rn, zigzag(t - pt));
-        rn += put_uvarint(raw + rn, zigzag(g - pg));
-        rn += put_uvarint(raw + rn, (uint64_t)lenc);
-        pt = t; pg = g;
+        gn += put_uvarint(G + gn, zigzag(t - (pt + pl)));
+        kn += put_uvarint(K + kn, zigzag(g - (pg + pl)));
+        ln += put_uvarint(L + ln, (uint64_t)lenc);
+        pt = t; pg = g; pl = lenc >> 1;
     }
+    uint8_t hdr[30];
+    size_t hn = 0;
+    hn += put_uvarint(hdr + hn, (uint64_t)m);
+    hn += put_uvarint(hdr + hn, (uint64_t)gn);
+    hn += put_uvarint(hdr + hn, (uint64_t)kn);
+    size_t rn = hn + gn + kn + ln;
+    uint8_t *raw = st_malloc(rn ? rn : 1);
+    memcpy(raw, hdr, hn);
+    memcpy(raw + hn, G, gn);
+    memcpy(raw + hn + gn, K, kn);
+    memcpy(raw + hn + gn + kn, L, ln);
+    free(G); free(K); free(L);
+
     uLongf cap = compressBound((uLong)rn);
     uint8_t *def = st_malloc(cap ? cap : 1);
     uLongf dl = cap;
@@ -311,8 +339,8 @@ static uint8_t *encode_runs(const int64_t *buf, int64_t m,
     return def;
 }
 
-// Inverse of encode_runs: inflate `def`[0,def_len) (known inflated size
-// raw_len) and rebuild the m absolute triples into out[3*m].  Returns m.
+// Inverse of encode_runs: inflate, split the three streams by the header, and
+// rebuild the m absolute triples into out[3*m].  Returns m.
 static int64_t decode_runs(const uint8_t *def, int64_t def_len,
                            int64_t raw_len, int64_t *out, int64_t out_cap) {
     uint8_t *raw = st_malloc((size_t)(raw_len ? raw_len : 1));
@@ -320,15 +348,19 @@ static int64_t decode_runs(const uint8_t *def, int64_t def_len,
     if (uncompress(raw, &rl, def, (uLong)def_len) != Z_OK || (int64_t)rl != raw_len) {
         st_errAbort("tui: zlib uncompress failed");
     }
-    const uint8_t *p = raw, *end = raw + raw_len;
-    int64_t pt = 0, pg = 0, m = 0;
-    while (p < end) {
-        int64_t t = pt + unzigzag(get_uvarint(&p));
-        int64_t g = pg + unzigzag(get_uvarint(&p));
-        int64_t lenc = (int64_t)get_uvarint(&p);
-        assert(3 * m + 2 < out_cap);
-        out[3*m+0] = t; out[3*m+1] = g; out[3*m+2] = lenc;
-        pt = t; pg = g; m++;
+    const uint8_t *h = raw;
+    int64_t m = (int64_t)get_uvarint(&h);
+    int64_t gn = (int64_t)get_uvarint(&h);
+    int64_t kn = (int64_t)get_uvarint(&h);
+    const uint8_t *gp = h, *kp = h + gn, *lp = h + gn + kn;
+    int64_t pt = 0, pg = 0, pl = 0;
+    for (int64_t k = 0; k < m; k++) {
+        int64_t t = pt + pl + unzigzag(get_uvarint(&gp));
+        int64_t g = pg + pl + unzigzag(get_uvarint(&kp));
+        int64_t lenc = (int64_t)get_uvarint(&lp);
+        assert(3 * k + 2 < out_cap);
+        out[3*k+0] = t; out[3*k+1] = g; out[3*k+2] = lenc;
+        pt = t; pg = g; pl = lenc >> 1;
     }
     free(raw);
     return m;

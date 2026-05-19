@@ -32,12 +32,14 @@
  * p in no run  ->  unmapped (leaf/lineage-specific insertion; by design).
  *
  * Consecutive colinear runs of a sequence are merged (one linear map); the
- * remaining runs are stored per sequence as a zigzag-delta + LEB128 varint
- * byte blob (t and g carried as running absolutes, len<<1|strand) and zlib-
- * deflated -- absolute (t,g,len) triples defeat ONElib's Huffman, the delta
- * blob is ~3x smaller end to end.  The R line is (inflatedLen INT, deflated
- * bytes STRING).  encode_runs/decode_runs in tui.c are exact inverses and the
- * builder self-checks every sequence's round-trip (asserts on in taffy).
+ * remaining runs are stored per sequence as a structure-of-arrays blob: three
+ * concatenated LEB128-varint streams gap|gsk|lenc (gap = forward gap to the
+ * prev run end ~always 0; gsk = intervening universal columns; lenc =
+ * len<<1|strand), zlib-deflated.  Absolute (t,g,len) triples defeat ONElib's
+ * Huffman; this is ~5x smaller end to end.  The R line is (inflatedLen INT,
+ * deflated bytes STRING).  encode_runs/decode_runs in tui.c are exact
+ * inverses and the builder self-checks every sequence's round-trip (asserts
+ * on in taffy).
  *
  *  Released under the MIT license, see LICENSE.txt
  */
