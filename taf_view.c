@@ -6,6 +6,7 @@
 
 #include "taf.h"
 #include "tai.h"
+#include "tui.h"
 #include "sonLib.h"
 #include <getopt.h>
 #include <time.h>
@@ -27,6 +28,7 @@ static void usage(void) {
     fprintf(stderr, "-P --paf-all : Output in all-to-all PAF format [default=TAF format]\n");
     fprintf(stderr, "-C --cs : Output PAF cigars in cs instead of cg format\n");
     fprintf(stderr, "-r --region  : Print only SEQ:START-END, where SEQ is a row-0 sequence name, and START-END are 0-based open-ended like BED\n");
+    fprintf(stderr, "-U --universalIndex : .tui file. With -r (SEQ on ANY genome), print the universal column intervals it maps to and exit (step-1 test; no extraction yet)\n");
     fprintf(stderr, "-s --repeatCoordinatesEveryNColumns : Repeat TAF coordinates of each sequence at least every n columns. By default: %" PRIi64 "\n", repeat_coordinates_every_n_columns);
     fprintf(stderr, "-u --runLengthEncodeBases : Run length encode output bases in TAF\n");
     fprintf(stderr, "-a --showOnlyReferenceDifferences : Replace matches with the reference (first row) with a * character\n");
@@ -87,6 +89,7 @@ int taf_view_main(int argc, char *argv[]) {
     bool all_to_all_paf = false;
     bool paf_cs = false;
     char *region = NULL;
+    char *universalIndex = NULL;   // step-1 test: print universal columns for -r
     bool use_compression = false;
     char *nameMapFile = NULL;
     char *phylogeny_file = NULL;
@@ -113,13 +116,14 @@ int taf_view_main(int argc, char *argv[]) {
                                                 { "omitCoordinates", required_argument, 0, 'd' },
                                                 { "repeatCoordinatesEveryNColumns", required_argument, 0, 's' },
                                                 { "region", required_argument, 0, 'r' },
+                                                { "universalIndex", required_argument, 0, 'U' },
                                                 { "useCompression", no_argument, 0, 'c' },
                                                 { "nameMapFile", required_argument, 0, 'n' },
                                                 { "help", no_argument, 0, 'h' },
                                                 { 0, 0, 0, 0 } };
 
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:o:mPpCaucs:r:n:habxt:d", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:o:mPpCaucs:r:n:habxt:dU:", long_options, &option_index);
         if (key == -1) {
             break;
         }
@@ -167,6 +171,9 @@ int taf_view_main(int argc, char *argv[]) {
                 break;
             case 's':
                 repeat_coordinates_every_n_columns = atol(optarg);
+                break;
+            case 'U':
+                universalIndex = optarg;
                 break;
             case 'r':
                 region = optarg;
@@ -280,7 +287,41 @@ int taf_view_main(int argc, char *argv[]) {
         fprintf(stderr, "An input file must be specified with -i in order to perform region queries.\n");
         return 1;
     }
-    
+
+    // Step-1 test mode: -U <tui> with -r SEQ:S-E -> just print the universal
+    // column intervals SEQ:[S,E) maps to (Index B), then exit.  No extraction.
+    if (universalIndex != NULL) {
+        if (region == NULL) {
+            fprintf(stderr, "-U/--universalIndex requires -r SEQ:START-END\n");
+            return 1;
+        }
+        int64_t r_start, r_len;
+        char *r_seq = tai_parse_region(region, &r_start, &r_len);
+        if (r_seq == NULL) {
+            fprintf(stderr, "Invalid region: %s\n", region);
+            return 1;
+        }
+        Tui *tui = tui_load(universalIndex);
+        if (tui == NULL) {
+            fprintf(stderr, "Could not open tui index: %s\n", universalIndex);
+            free(r_seq);
+            return 1;
+        }
+        int64_t r_end = r_start + r_len, n_iv = 0;
+        TuiInterval *iv = tui_query(tui, r_seq, r_start, r_end, &n_iv);
+        fprintf(stdout, "# %s:%" PRIi64 "-%" PRIi64 " -> %" PRIi64
+                " universal interval(s); T=%" PRIi64 "%s\n",
+                r_seq, r_start, r_end, n_iv, tui_total_columns(tui),
+                tui_has_sequence(tui, r_seq) ? "" : " [sequence not in index]");
+        for (int64_t i = 0; i < n_iv; i++) {
+            fprintf(stdout, "%" PRIi64 "\t%" PRIi64 "\n", iv[i].start, iv[i].end);
+        }
+        free(iv);
+        tui_destruct(tui);
+        free(r_seq);
+        return 0;
+    }
+
     if (maf_output) {
         maf_write_header(tag, output);
     } else if (taf_output) {

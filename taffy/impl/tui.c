@@ -590,3 +590,130 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
     tui_cleanup(&p1, seqks, n_seqs, eff_tmp, tree_map);
     return 0;
 }
+
+/////////////////////////////////////////////////////////////////////////////
+// Reader / query side (Index B).  Baseline: re-scan to find a sequence's R
+// blob, inflate+decode it, clip to the query interval.  Correctness first.
+/////////////////////////////////////////////////////////////////////////////
+
+struct _Tui {
+    char   *path;     // .tui path (re-opened per query for now)
+    int64_t T;        // total universal columns
+    stHash *seq_len;  // full "genome.sequence" -> int64_t* sequence length
+};
+
+Tui *tui_load(const char *tui_path) {
+    OneFile *of = oneFileOpenRead(tui_path, NULL, "tui", 1);
+    if (of == NULL) return NULL;
+    Tui *tui = st_calloc(1, sizeof(Tui));
+    tui->path = stString_copy(tui_path);
+    tui->seq_len = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, free, free);
+    char c;
+    while ((c = oneReadLine(of)) != 0) {
+        if (c == 't') {
+            tui->T = oneInt(of, 0);
+        } else if (c == 'd') {                 // dir: name(STRING), ord, seqLen, isRef
+            int64_t n = oneLen(of);
+            char *nm = st_malloc(n + 1);
+            memcpy(nm, oneString(of), n);
+            nm[n] = '\0';
+            if (stHash_search(tui->seq_len, nm) == NULL) {
+                int64_t *v = st_malloc(sizeof(int64_t));
+                *v = oneInt(of, 2);
+                stHash_insert(tui->seq_len, nm, v);
+            } else {
+                free(nm);
+            }
+        } else if (c == 'S') {
+            break;                              // directory precedes the objects
+        }
+    }
+    oneFileClose(of);
+    return tui;
+}
+
+void tui_destruct(Tui *tui) {
+    if (tui == NULL) return;
+    stHash_destruct(tui->seq_len);
+    free(tui->path);
+    free(tui);
+}
+
+int64_t tui_total_columns(const Tui *tui) { return tui->T; }
+
+int tui_has_sequence(const Tui *tui, const char *seq_name) {
+    return stHash_search(tui->seq_len, (void *)seq_name) != NULL;
+}
+
+static int tui_iv_cmp(const void *a, const void *b) {
+    const TuiInterval *x = a, *y = b;
+    return (x->start < y->start) ? -1 : (x->start > y->start) ? 1 : 0;
+}
+
+TuiInterval *tui_query(Tui *tui, const char *seq_name,
+                       int64_t start, int64_t end, int64_t *n_out) {
+    *n_out = 0;
+    int64_t *expect = stHash_search(tui->seq_len, (void *)seq_name);
+    if (expect == NULL || start >= end) return NULL;
+
+    OneFile *of = oneFileOpenRead(tui->path, NULL, "tui", 1);
+    if (of == NULL) return NULL;
+
+    int64_t *runs = NULL, m = 0;
+    char *cur = NULL;
+    int found = 0;
+    char c;
+    while (!found && (c = oneReadLine(of)) != 0) {
+        if (c == 'S') {
+            int64_t n = oneLen(of);
+            free(cur);
+            cur = st_malloc(n + 1);
+            memcpy(cur, oneString(of), n);
+            cur[n] = '\0';
+        } else if (c == 'R' && cur != NULL && strcmp(cur, seq_name) == 0) {
+            int64_t raw_len = oneInt(of, 0);
+            int64_t def_len = oneLen(of);
+            const uint8_t *def = (const uint8_t *)oneString(of);
+            int64_t cap = raw_len + 3;          // m <= raw_len/3 -> 3*m <= raw_len
+            runs = st_malloc((cap ? cap : 1) * sizeof(int64_t));
+            m = decode_runs(def, def_len, raw_len, runs, cap);
+            found = 1;
+        }
+    }
+    free(cur);
+    oneFileClose(of);
+    if (!found || m == 0) { free(runs); return NULL; }
+
+    // Clip each overlapping run to [start,end), map to a column interval.
+    TuiInterval *iv = st_malloc((size_t)m * sizeof(TuiInterval));
+    int64_t k = 0;
+    for (int64_t r = 0; r < m; r++) {
+        int64_t t = runs[3*r+0], g = runs[3*r+1], lenc = runs[3*r+2];
+        int64_t len = lenc >> 1, rev = lenc & 1, te = t + len;
+        int64_t a = start > t ? start : t;
+        int64_t b = end < te ? end : te;
+        if (a >= b) continue;
+        if (!rev) {                             // col = g + (p - t), increasing
+            iv[k].start = g + (a - t);
+            iv[k].end   = g + (b - t);
+        } else {                                // col = g + (t+len-1 - p), decreasing
+            iv[k].start = g + (t + len - b);
+            iv[k].end   = g + (t + len - a);
+        }
+        k++;
+    }
+    free(runs);
+    if (k == 0) { free(iv); return NULL; }
+
+    qsort(iv, k, sizeof(TuiInterval), tui_iv_cmp);
+    int64_t w = 0;                              // merge adjacent / overlapping
+    for (int64_t i = 1; i < k; i++) {
+        if (iv[i].start <= iv[w].end) {
+            if (iv[i].end > iv[w].end) iv[w].end = iv[i].end;
+        } else {
+            iv[++w] = iv[i];
+        }
+    }
+    *n_out = w + 1;
+    return iv;
+}

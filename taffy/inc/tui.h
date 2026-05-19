@@ -76,6 +76,42 @@ char *tui_path(const char *maf_path);
 int tui_create(LI *li, const char *out_path, const char *tmp_dir,
                 stHash *genome_name_map);
 
+/////////////////////////////////////////////////////////////////////////////
+// Reader / query side (Index B: genome.seq:pos -> universal columns).
+/////////////////////////////////////////////////////////////////////////////
+
+/* A half-open universal-column interval [start, end). */
+typedef struct { int64_t start; int64_t end; } TuiInterval;
+
+typedef struct _Tui Tui;
+
+/*
+ * Open a .tui and read its directory (sequence names, lengths, T) into RAM.
+ * Returns NULL if the file can't be opened / isn't a tui container.
+ */
+Tui *tui_load(const char *tui_path);
+
+void tui_destruct(Tui *tui);
+
+/* Total number of universal columns T (the global column count). */
+int64_t tui_total_columns(const Tui *tui);
+
+/* 1 if the full "genome.sequence" name is present in the index, else 0. */
+int tui_has_sequence(const Tui *tui, const char *seq_name);
+
+/*
+ * Map the forward-coordinate interval [start, end) of sequence `seq_name` to
+ * universal columns.  Loads that one sequence's runs, clips, and returns a
+ * malloc'd array (caller frees) of sorted, merged half-open column intervals;
+ * sets *n_out to the count.  Returns NULL with *n_out==0 if the sequence is
+ * absent or nothing overlaps (e.g. a lineage-specific insertion, by design).
+ *
+ * Baseline implementation: re-scans the container to find the sequence's R
+ * blob (no oneGoto yet) -- correctness first; expected to be slow.
+ */
+TuiInterval *tui_query(Tui *tui, const char *seq_name,
+                       int64_t start, int64_t end, int64_t *n_out);
+
 #endif /* TAF_TUI_H_ */
 
 // Local Variables:
