@@ -10,16 +10,28 @@
 #include "tui.h"
 #include "sonLib.h"
 #include "ONElib.h"
+#include <stdint.h>
+#include <string.h>
+#include <assert.h>
+#include <zlib.h>
 
 // ONEcode schema. Exactly one list field per line (STRING / INT_LIST); other
 // fields are scalar INT.  The directory keys on the full genome.sequence name
 // (genome derived identically at build/load via genome_of()).
+//
+// R holds one sequence's merged runs as a per-sequence DELTA + varint byte
+// blob, zlib-deflated (see encode_runs).  The scalar INT is the inflated blob
+// length (sizes the inflate buffer); the STRING list is the deflated bytes.
+// Absolute (t,g,len) triples defeat ONElib's Huffman -- the monotone-delta
+// blob is ~3x smaller end to end.  Each run, in order: zigzag-varint(t-prevT),
+// zigzag-varint(g-prevG), uvarint((len<<1)|revStrand); prevT/prevG carry the
+// absolute values, seeded at 0 so run 0 stores absolutes.
 static const char *TUI_SCHEMA =
     "P 3 tui\n"
     "D t 1 3 INT\n"                          // total columns T (global)
     "D d 4 6 STRING 3 INT 3 INT 3 INT\n"     // dir: seqName, S-ordinal, seqLen, isRef
     "O S 2 6 STRING 3 INT\n"                 // sequence object: seqName, seqLen
-    "D R 1 8 INT_LIST\n";                    // runs: [t, g, (len<<1|revStrand)]*
+    "D R 2 3 INT 6 STRING\n";                // runs: inflatedLen, deflate(blob)
 
 char *tui_path(const char *maf_path) {
     char *p = st_malloc(strlen(maf_path) + 5);
@@ -250,6 +262,78 @@ static Run *load_genome_runs(const char *path, int64_t *n_out) {
     return runs;
 }
 
+/////////////////////////////////////////////////////////////////////////////
+// Per-sequence run codec: zigzag-delta + LEB128 varint, then zlib deflate.
+/////////////////////////////////////////////////////////////////////////////
+
+static inline uint64_t zigzag(int64_t v) { return ((uint64_t)v << 1) ^ (uint64_t)(v >> 63); }
+static inline int64_t unzigzag(uint64_t z) { return (int64_t)(z >> 1) ^ -(int64_t)(z & 1); }
+
+static inline size_t put_uvarint(uint8_t *p, uint64_t v) {
+    size_t n = 0;
+    while (v >= 0x80) { p[n++] = (uint8_t)(v | 0x80); v >>= 7; }
+    p[n++] = (uint8_t)v;
+    return n;
+}
+static inline uint64_t get_uvarint(const uint8_t **pp) {
+    const uint8_t *p = *pp;
+    uint64_t v = 0; int s = 0; uint8_t b;
+    do { b = *p++; v |= (uint64_t)(b & 0x7f) << s; s += 7; } while (b & 0x80);
+    *pp = p;
+    return v;
+}
+
+// Encode m runs (buf = m triples of [t, g, lenc=(len<<1|rev)], absolute) into a
+// zigzag-delta varint blob, then zlib-deflate it.  Returns the malloc'd
+// deflated buffer (caller frees), sets *raw_len to the pre-deflate length and
+// *def_len to the deflated length.  Worst-case varint is 10 bytes/value.
+static uint8_t *encode_runs(const int64_t *buf, int64_t m,
+                            int64_t *raw_len, int64_t *def_len) {
+    uint8_t *raw = st_malloc((size_t)(m * 30 + 1));
+    size_t rn = 0;
+    int64_t pt = 0, pg = 0;
+    for (int64_t k = 0; k < m; k++) {
+        int64_t t = buf[3*k+0], g = buf[3*k+1], lenc = buf[3*k+2];
+        rn += put_uvarint(raw + rn, zigzag(t - pt));
+        rn += put_uvarint(raw + rn, zigzag(g - pg));
+        rn += put_uvarint(raw + rn, (uint64_t)lenc);
+        pt = t; pg = g;
+    }
+    uLongf cap = compressBound((uLong)rn);
+    uint8_t *def = st_malloc(cap ? cap : 1);
+    uLongf dl = cap;
+    if (compress2(def, &dl, raw, (uLong)rn, 9) != Z_OK) {
+        st_errAbort("tui: zlib compress2 failed");
+    }
+    free(raw);
+    *raw_len = (int64_t)rn;
+    *def_len = (int64_t)dl;
+    return def;
+}
+
+// Inverse of encode_runs: inflate `def`[0,def_len) (known inflated size
+// raw_len) and rebuild the m absolute triples into out[3*m].  Returns m.
+static int64_t decode_runs(const uint8_t *def, int64_t def_len,
+                           int64_t raw_len, int64_t *out, int64_t out_cap) {
+    uint8_t *raw = st_malloc((size_t)(raw_len ? raw_len : 1));
+    uLongf rl = (uLongf)raw_len;
+    if (uncompress(raw, &rl, def, (uLong)def_len) != Z_OK || (int64_t)rl != raw_len) {
+        st_errAbort("tui: zlib uncompress failed");
+    }
+    const uint8_t *p = raw, *end = raw + raw_len;
+    int64_t pt = 0, pg = 0, m = 0;
+    while (p < end) {
+        int64_t t = pt + unzigzag(get_uvarint(&p));
+        int64_t g = pg + unzigzag(get_uvarint(&p));
+        int64_t lenc = (int64_t)get_uvarint(&p);
+        assert(3 * m + 2 < out_cap);
+        out[3*m+0] = t; out[3*m+1] = g; out[3*m+2] = lenc;
+        pt = t; pg = g; m++;
+    }
+    free(raw);
+    return m;
+}
+
 // Remove spill files and free phase-1 state.  Shared by the success and the
 // error-return paths so a failed run never leaks spill files on disk.
 static void tui_cleanup(Phase1 *p1, char **seqs, char *eff_tmp) {
@@ -429,7 +513,19 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
                 buf[3*m+2] = (rl << 1) | (rs == '-' ? 1 : 0);
                 m++;
             }
-            oneWriteLine(of, 'R', 3 * m, buf);
+            // Encode merged triples -> zigzag-delta varint -> deflate.
+            int64_t raw_len = 0, def_len = 0;
+            uint8_t *def = encode_runs(buf, m, &raw_len, &def_len);
+            // Self-check: decode must reproduce the triples exactly.  taffy
+            // builds with asserts on, so this validates the codec on every
+            // file (incl. the real vertebrate-scale ones), losslessly.
+            int64_t *chk = st_malloc((m ? 3 * m : 1) * sizeof(int64_t));
+            int64_t dm = decode_runs(def, def_len, raw_len, chk, 3 * m);
+            assert(dm == m && memcmp(chk, buf, (size_t)(3 * m) * sizeof(int64_t)) == 0);
+            free(chk);
+            oneInt(of, 0) = raw_len;
+            oneWriteLine(of, 'R', def_len, def);
+            free(def);
             free(buf);
             rc = bnd;   // advance cursor past this seq's runs
             i++;
