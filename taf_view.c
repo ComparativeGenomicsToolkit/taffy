@@ -28,7 +28,7 @@ static void usage(void) {
     fprintf(stderr, "-P --paf-all : Output in all-to-all PAF format [default=TAF format]\n");
     fprintf(stderr, "-C --cs : Output PAF cigars in cs instead of cg format\n");
     fprintf(stderr, "-r --region  : Print only SEQ:START-END, where SEQ is a row-0 sequence name, and START-END are 0-based open-ended like BED\n");
-    fprintf(stderr, "-U --universalIndex : .tui file. With -r SEQ:START-END on ANY genome, map the region to universal columns then to row-0 coords (Index B+A) and extract those blocks via the .tai\n");
+    fprintf(stderr, "-U --universal : Use the universal column index (<inputFile>.tui, auto-located like the .tai). With -r SEQ:START-END on ANY genome, map the region via Index B+A and extract those blocks through the .tai\n");
     fprintf(stderr, "-s --repeatCoordinatesEveryNColumns : Repeat TAF coordinates of each sequence at least every n columns. By default: %" PRIi64 "\n", repeat_coordinates_every_n_columns);
     fprintf(stderr, "-u --runLengthEncodeBases : Run length encode output bases in TAF\n");
     fprintf(stderr, "-a --showOnlyReferenceDifferences : Replace matches with the reference (first row) with a * character\n");
@@ -89,7 +89,7 @@ int taf_view_main(int argc, char *argv[]) {
     bool all_to_all_paf = false;
     bool paf_cs = false;
     char *region = NULL;
-    char *universalIndex = NULL;   // step-1 test: print universal columns for -r
+    bool universal_index = false;  // -U: lift -r via <inputFile>.tui (Index B+A)
     bool use_compression = false;
     char *nameMapFile = NULL;
     char *phylogeny_file = NULL;
@@ -116,14 +116,14 @@ int taf_view_main(int argc, char *argv[]) {
                                                 { "omitCoordinates", required_argument, 0, 'd' },
                                                 { "repeatCoordinatesEveryNColumns", required_argument, 0, 's' },
                                                 { "region", required_argument, 0, 'r' },
-                                                { "universalIndex", required_argument, 0, 'U' },
+                                                { "universal", no_argument, 0, 'U' },
                                                 { "useCompression", no_argument, 0, 'c' },
                                                 { "nameMapFile", required_argument, 0, 'n' },
                                                 { "help", no_argument, 0, 'h' },
                                                 { 0, 0, 0, 0 } };
 
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:o:mPpCaucs:r:n:habxt:dU:", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:o:mPpCaucs:r:n:habxt:dU", long_options, &option_index);
         if (key == -1) {
             break;
         }
@@ -173,7 +173,7 @@ int taf_view_main(int argc, char *argv[]) {
                 repeat_coordinates_every_n_columns = atol(optarg);
                 break;
             case 'U':
-                universalIndex = optarg;
+                universal_index = true;
                 break;
             case 'r':
                 region = optarg;
@@ -288,8 +288,8 @@ int taf_view_main(int argc, char *argv[]) {
         return 1;
     }
 
-    if (universalIndex != NULL && region == NULL) {
-        fprintf(stderr, "-U/--universalIndex requires -r SEQ:START-END\n");
+    if (universal_index && region == NULL) {
+        fprintf(stderr, "-U/--universal requires -r SEQ:START-END\n");
         return 1;
     }
 
@@ -331,15 +331,20 @@ int taf_view_main(int argc, char *argv[]) {
 
         Tai* tai = tai_load(tai_fh, !taf_input);
 
-      if (universalIndex != NULL) {
+      if (universal_index) {
         // Step 2: region is on ANY genome. Index B (tui_query) -> universal
         // column intervals -> Index A (tui_col_range_to_ref) -> row-0
         // (ancestor) coordinate pieces -> the existing .tai per piece.
-        Tui *tui = tui_load(universalIndex);
+        // .tui is auto-located at <inputFile>.tui (like the .tai).
+        char *tui_fn = tui_path(inputFile);
+        Tui *tui = tui_load(tui_fn);
         if (tui == NULL) {
-            fprintf(stderr, "Could not open tui index: %s\n", universalIndex);
+            fprintf(stderr, "Could not open universal index %s. "
+                    "Run `taffy index -u` first.\n", tui_fn);
+            free(tui_fn);
             return 1;
         }
+        free(tui_fn);
         int64_t n_uiv = 0;
         TuiInterval *uiv = tui_query(tui, region_seq, region_start,
                                      region_start + region_length, &n_uiv);
@@ -431,7 +436,7 @@ int taf_view_main(int argc, char *argv[]) {
         if (p_alignment) {
             alignment_destruct(p_alignment, true);
         }
-      }  // end !universalIndex single-region path
+      }  // end non-universal single-region path
 
         tai_destruct(tai);
 
