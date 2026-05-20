@@ -1114,6 +1114,11 @@ struct _Tui {
     char   *path;       // .tui path (re-opened per query for now)
     int64_t T;          // total universal columns
     stHash *seq_len;    // full "genome.sequence" -> int64_t* sequence length
+    stHash *name2ord;   // full "genome.sequence" -> (int64_t*)(intptr_t)(ord+1)
+                        // (NULL means absent; we store ord+1 so 0 maps to a
+                        // non-NULL pointer).  Lets tui_query jump directly to
+                        // the queried sequence's S/R pair via oneGoto, instead
+                        // of linearly scanning the entire container.
     // Index-A reference track (column-ordered, tiles [0,T)).
     int64_t *segCol0, *segOrd, *segRow0, *segLen;
     int64_t  nSeg;
@@ -1130,6 +1135,9 @@ Tui *tui_load(const char *tui_path) {
     Tui *tui = st_calloc(1, sizeof(Tui));
     tui->path = stString_copy(tui_path);
     tui->seq_len = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, free, free);
+    // name2ord shares keys with seq_len's hash (so we pass NULL destructors;
+    // seq_len already owns the strings).  Values are (int64_t)(intptr_t)(ord+1).
+    tui->name2ord = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, NULL, NULL);
     int64_t ord_cap = 0;
     char c;
     while ((c = oneReadLine(of)) != 0) {
@@ -1177,6 +1185,8 @@ Tui *tui_load(const char *tui_path) {
                 int64_t *v = st_malloc(sizeof(int64_t));
                 *v = oneInt(of, 2);
                 stHash_insert(tui->seq_len, nm, v);
+                stHash_insert(tui->name2ord, nm,
+                              (void *)(intptr_t)(ord + 1));
             } else {
                 free(nm);
             }
@@ -1190,6 +1200,7 @@ Tui *tui_load(const char *tui_path) {
 
 void tui_destruct(Tui *tui) {
     if (tui == NULL) return;
+    stHash_destruct(tui->name2ord);    // first: shares keys w/ seq_len, NULL destructors
     stHash_destruct(tui->seq_len);
     for (int64_t i = 0; i < tui->nOrd; i++) free(tui->ord2name[i]);
     free(tui->ord2name);
@@ -1216,33 +1227,40 @@ TuiInterval *tui_query(Tui *tui, const char *seq_name,
     int64_t *expect = stHash_search(tui->seq_len, (void *)seq_name);
     if (expect == NULL || start >= end) return NULL;
 
+    // O(1) ordinal lookup (vs the prior O(n_seqs) linear scan).  We stored
+    // ord+1 at load time so a 0-ord seq isn't confused with absent (NULL).
+    void *ov = stHash_search(tui->name2ord, (void *)seq_name);
+    if (ov == NULL) return NULL;
+    int64_t ord = (int64_t)(intptr_t)ov - 1;
+
     OneFile *of = oneFileOpenRead(tui->path, NULL, "tui", 1);
     if (of == NULL) return NULL;
 
+    // Jump straight to the (ord+1)-th S object via the ONElib footer index.
+    // After the goto, oneReadLine() returns the S line, then the matching R
+    // line follows immediately (writer emits S; R; S; R; ... per genome).
+    if (!oneGoto(of, 'S', ord + 1)) { oneFileClose(of); return NULL; }
     int64_t *runs = NULL, m = 0;
-    char *cur = NULL;
-    int found = 0;
-    char c;
-    while (!found && (c = oneReadLine(of)) != 0) {
-        if (c == 'S') {
-            int64_t n = oneLen(of);
-            free(cur);
-            cur = st_malloc(n + 1);
-            memcpy(cur, oneString(of), n);
-            cur[n] = '\0';
-        } else if (c == 'R' && cur != NULL && strcmp(cur, seq_name) == 0) {
-            int64_t raw_len = oneInt(of, 0);
-            int64_t def_len = oneLen(of);
-            const uint8_t *def = (const uint8_t *)oneString(of);
-            int64_t cap = raw_len + 3;          // m <= raw_len/3 -> 3*m <= raw_len
-            runs = st_malloc((cap ? cap : 1) * sizeof(int64_t));
-            m = decode_runs(def, def_len, raw_len, runs, cap);
-            found = 1;
-        }
+    char c = oneReadLine(of);
+    if (c != 'S') { oneFileClose(of); return NULL; }
+    // Sanity check the S name matches what we asked for (would only fail on
+    // a corrupted / wrongly-loaded directory).
+    int64_t sn = oneLen(of);
+    if (sn != (int64_t)strlen(seq_name) ||
+        memcmp(oneString(of), seq_name, sn) != 0) {
+        oneFileClose(of);
+        return NULL;
     }
-    free(cur);
+    c = oneReadLine(of);
+    if (c != 'R') { oneFileClose(of); return NULL; }
+    int64_t raw_len = oneInt(of, 0);
+    int64_t def_len = oneLen(of);
+    const uint8_t *def = (const uint8_t *)oneString(of);
+    int64_t cap = raw_len + 3;              // m <= raw_len/3 -> 3*m <= raw_len
+    runs = st_malloc((cap ? cap : 1) * sizeof(int64_t));
+    m = decode_runs(def, def_len, raw_len, runs, cap);
     oneFileClose(of);
-    if (!found || m == 0) { free(runs); return NULL; }
+    if (m == 0) { free(runs); return NULL; }
 
     // Clip each overlapping run to [start,end), map to a column interval.
     TuiInterval *iv = st_malloc((size_t)m * sizeof(TuiInterval));
@@ -1332,6 +1350,7 @@ TuiRef *tui_col_range_to_ref(const Tui *tui, const TuiInterval *uiv,
 /////////////////////////////////////////////////////////////////////////////
 
 struct _TuiExtractIt {
+    Tui *tui;               // borrowed; owns idxCol/idxFpos used for per-iv seeks
     int is_maf;
     bool rle;
     Alignment *(*readblk)(Alignment *, bool, LI *);
@@ -1401,13 +1420,50 @@ static void tui_compute_runs(TuiExtractIt *it, int64_t pc, int64_t cn) {
     }
 }
 
+// Greatest anchor index `a` with idxCol[a] <= c (idxCol strictly increasing,
+// always has idxCol[0]=0).  O(log N).
+static int64_t tui_anchor_for(const Tui *tui, int64_t c) {
+    int64_t lo = 0, hi = tui->idxN - 1, a = 0;
+    while (lo <= hi) {
+        int64_t mid = (lo + hi) / 2;
+        if (tui->idxCol[mid] <= c) { a = mid; lo = mid + 1; } else hi = mid - 1;
+    }
+    return a;
+}
+
+// Seek the underlying stream to anchor `a` and mirror the (TAF) resync the
+// existing tai_iterator uses, so the next readblk() works regardless of
+// format.  Returns the universal column we're now positioned at.
+static int64_t tui_seek_to_anchor(LI *li, const Tui *tui, int64_t a, int is_maf) {
+    LI_seek(li, tui->idxFpos[a]);
+    LI_get_next_line(li);                       // mirror tai_iterator
+    if (!is_maf) tai_resync_taf_line(LI_peek_at_next_line(li));
+    return tui->idxCol[a];
+}
+
 // Forward-scan (ctx = taf context, not freed here) skipping non-overlapping
 // physical blocks, until one overlaps iv -> it->phys/phys_col/runs(run_i=0),
 // or past the last interval / EOF -> it->phys = NULL.
+//
+// Per-interval seek: at the top of each iteration we check whether the X
+// anchor before iv[iv_cur].start is meaningfully ahead of scan_col -- if so,
+// we LI_seek there before reading the next block, bounding the forward scan
+// per emitted block to at most one X-anchor gap (~10000 cols).  Eliminates
+// the O(c_hi - c_lo) blowup when lifted intervals are scattered in column
+// space (was costing minutes for kilobase-scale leaf-coordinate queries).
 static void tui_extract_advance(TuiExtractIt *it, LI *li, Alignment *ctx) {
     Alignment *prev = ctx;
     it->phys = NULL;
     while (1) {
+        if (it->iv_cur < it->n_iv) {
+            int64_t a = tui_anchor_for(it->tui, it->iv[it->iv_cur].start);
+            if (it->tui->idxCol[a] > it->scan_col) {
+                if (prev != NULL && prev != ctx) alignment_destruct(prev, 1);
+                it->scan_col = tui_seek_to_anchor(li, it->tui, a, it->is_maf);
+                prev = NULL;                            // TAF chain broken by seek
+                continue;
+            }
+        }
         Alignment *b = it->readblk(prev, it->rle, li);
         if (b == NULL) break;
         int64_t cn = b->column_number;
@@ -1422,15 +1478,18 @@ static void tui_extract_advance(TuiExtractIt *it, LI *li, Alignment *ctx) {
         if (it->iv_cur >= it->n_iv || it->scan_col >= it->c_hi) {
             alignment_destruct(b, 1); break;            // past the last interval
         }
-        if (prev != ctx) alignment_destruct(prev, 1);   // intermediate skipped
+        // prev can be NULL here (we just seeked); the original two-way check
+        // didn't have to consider that.  Guard explicitly.
+        if (prev != NULL && prev != ctx) alignment_destruct(prev, 1);
         prev = b;
     }
-    if (prev != ctx && prev != it->phys) alignment_destruct(prev, 1);
+    if (prev != NULL && prev != ctx && prev != it->phys) alignment_destruct(prev, 1);
 }
 
 TuiExtractIt *tui_extract_iterator(Tui *tui, LI *li, int is_maf, bool rle,
                                    const TuiInterval *iv, int64_t n_iv) {
     TuiExtractIt *it = st_calloc(1, sizeof(TuiExtractIt));
+    it->tui = tui;
     it->is_maf = is_maf;
     it->rle = rle;
     it->readblk = is_maf ? tai_maf_read_block : taf_read_block;
@@ -1439,17 +1498,9 @@ TuiExtractIt *tui_extract_iterator(Tui *tui, LI *li, int is_maf, bool rle,
     memcpy(it->iv, iv, (size_t)n_iv * sizeof(TuiInterval));
     it->n_iv = n_iv;
     it->c_hi = iv[n_iv - 1].end;
-    int64_t c_lo = iv[0].start;
-    // anchor = greatest idxCol <= c_lo (idxCol strictly increasing, [0]=0)
-    int64_t lo = 0, hi = tui->idxN - 1, a = 0;
-    while (lo <= hi) {
-        int64_t mid = (lo + hi) / 2;
-        if (tui->idxCol[mid] <= c_lo) { a = mid; lo = mid + 1; } else hi = mid - 1;
-    }
-    LI_seek(li, tui->idxFpos[a]);
-    LI_get_next_line(li);                              // mirror tai_iterator
-    if (!is_maf) tai_resync_taf_line(LI_peek_at_next_line(li));
-    it->scan_col = tui->idxCol[a];
+    // Position scan_col before the first interval; tui_extract_advance will
+    // do its first per-interval seek and start reading from the right anchor.
+    it->scan_col = -1;
     it->iv_cur = 0;
     tui_extract_advance(it, li, NULL);
     return it;
