@@ -162,6 +162,16 @@ int32_t *alignment_get_column_as_int_array(Alignment *alignment, int64_t column_
 void alignment_row_destruct(Alignment_Row *row);
 
 /*
+ * Reorient an alignment block so the row matching `target_seq_name` is row-0
+ * on '+' strand: if that row is currently '-' strand, reverse-complement the
+ * WHOLE block (every row's bases rev-comp'd in place, every row's strand
+ * flipped, every row's start recomputed as `sequence_length - start - length`,
+ * `column_tags` reversed if present); then move the matched row to the head
+ * of the row chain.  No-op if target row not found or already row-0 '+'.
+ */
+void alignment_reorient_to_row(Alignment *aln, const char *target_seq_name);
+
+/*
  * Returns non-zero if left_row represents a substring on the same contig and strand as right_row, but
  * immediately before
  */

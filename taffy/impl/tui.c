@@ -1214,6 +1214,7 @@ struct _TuiExtractIt {
     int64_t *runs;          // covered local-column runs of phys: [j0,j1) pairs
     int64_t runs_cap, n_runs, run_i;
     Alignment *to_free;     // sub-block returned last call (freed next/destruct)
+    int64_t last_col_start; // universal col of the first col of `to_free`
 };
 
 // Build a standalone Alignment = columns [j0,j1) of `src`, every row clipped.
@@ -1329,6 +1330,7 @@ Alignment *tui_extract_next(TuiExtractIt *it, LI *li) {
     if (it->phys == NULL) return NULL;
     int64_t j0 = it->runs[2*it->run_i], j1 = it->runs[2*it->run_i + 1];
     Alignment *sub = tui_subblock(it->phys, j0, j1);
+    it->last_col_start = it->phys_col + j0;             // captured BEFORE advance
     it->run_i++;
     if (it->run_i >= it->n_runs) {                      // this physical block done
         Alignment *old = it->phys;
@@ -1339,6 +1341,8 @@ Alignment *tui_extract_next(TuiExtractIt *it, LI *li) {
     it->to_free = sub;                                  // caller uses before next call
     return sub;
 }
+
+int64_t tui_extract_col_start(const TuiExtractIt *it) { return it->last_col_start; }
 
 bool tui_extract_has_next(TuiExtractIt *it) { return it->phys != NULL; }
 

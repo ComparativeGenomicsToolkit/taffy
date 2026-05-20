@@ -146,6 +146,10 @@ Alignment *tui_extract_next(TuiExtractIt *it, LI *li);
 bool tui_extract_has_next(TuiExtractIt *it);
 void tui_extract_iterator_destruct(TuiExtractIt *it);
 
+/* Universal column of the FIRST column of the sub-block just returned by
+ * tui_extract_next() (i.e. tcol of its row-0).  Call right after _next(). */
+int64_t tui_extract_col_start(const TuiExtractIt *it);
+
 #endif /* TAF_TUI_H_ */
 
 // Local Variables:

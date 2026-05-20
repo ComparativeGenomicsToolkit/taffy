@@ -125,6 +125,62 @@ void alignment_row_destruct(Alignment_Row *row) {
     free(row);
 }
 
+// In-place reverse-complement of a base string of length n.  '-' stays '-';
+// case preserved (lower = softmask convention); unknown chars pass through.
+static char comp_base(char c) {
+    switch (c) {
+        case 'A': return 'T'; case 'T': return 'A';
+        case 'C': return 'G'; case 'G': return 'C';
+        case 'a': return 't'; case 't': return 'a';
+        case 'c': return 'g'; case 'g': return 'c';
+        default: return c;
+    }
+}
+static void rc_bases_inplace(char *b, int64_t n) {
+    int64_t i = 0, j = n - 1;
+    while (i < j) {
+        char a = comp_base(b[i]), c = comp_base(b[j]);
+        b[i++] = c; b[j--] = a;
+    }
+    if (i == j) b[i] = comp_base(b[i]);  // odd length: middle char
+}
+
+void alignment_reorient_to_row(Alignment *aln, const char *target_seq_name) {
+    if (aln == NULL || target_seq_name == NULL || aln->row == NULL) return;
+    // find the target row (and its predecessor for re-linking)
+    Alignment_Row *prev = NULL, *target = NULL;
+    for (Alignment_Row *r = aln->row; r != NULL; prev = r, r = r->n_row) {
+        if (strcmp(r->sequence_name, target_seq_name) == 0) { target = r; break; }
+    }
+    if (target == NULL) return;                          // not present: no-op
+    // 1. reverse-complement the whole block iff target is '-' strand
+    if (!target->strand) {
+        int64_t cn = aln->column_number;
+        for (Alignment_Row *r = aln->row; r != NULL; r = r->n_row) {
+            rc_bases_inplace(r->bases, cn);
+            // forward-span unchanged; MAF/TAF start is from the strand's end,
+            // so on flipping: new_start = sequence_length - old_start - length
+            r->start = r->sequence_length - r->start - r->length;
+            r->strand = !r->strand;
+        }
+        // reverse column_tags array if anything is non-NULL (cactus universal
+        // raw MAF has none; cheap to do regardless)
+        if (aln->column_tags != NULL) {
+            for (int64_t i = 0, j = cn - 1; i < j; i++, j--) {
+                Tag *t = aln->column_tags[i];
+                aln->column_tags[i] = aln->column_tags[j];
+                aln->column_tags[j] = t;
+            }
+        }
+    }
+    // 2. move target row to the head of the chain
+    if (target != aln->row) {
+        prev->n_row = target->n_row;
+        target->n_row = aln->row;
+        aln->row = target;
+    }
+}
+
 void alignment_destruct(Alignment *alignment, bool cleanup_rows) {
     Alignment_Row *row = alignment->row;
     if(cleanup_rows) {

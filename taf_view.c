@@ -10,6 +10,7 @@
 #include "sonLib.h"
 #include <getopt.h>
 #include <time.h>
+#include <unistd.h>
 
 static int64_t repeat_coordinates_every_n_columns = 10000;
 static bool show_only_reference_differences = false;
@@ -27,8 +28,8 @@ static void usage(void) {
     fprintf(stderr, "-p --paf : Output in all-to-one (referenced on first row) PAF format [default=TAF format]\n");
     fprintf(stderr, "-P --paf-all : Output in all-to-all PAF format [default=TAF format]\n");
     fprintf(stderr, "-C --cs : Output PAF cigars in cs instead of cg format\n");
-    fprintf(stderr, "-r --region  : Print only SEQ:START-END, where SEQ is a row-0 sequence name, and START-END are 0-based open-ended like BED\n");
-    fprintf(stderr, "-U --universal : Use the universal column index (<inputFile>.tui, auto-located like the .tai). With -r SEQ:START-END on ANY genome, map the region via Index B+A and extract those blocks through the .tai\n");
+    fprintf(stderr, "-r --region  : Region SEQ:START-END (0-based half-open).  SEQ is a row-0 seq name (.tai path), or ANY genome.seq when a <inputFile>.tui is present (universal lift), or the sentinel `tcol` for a universal-column range\n");
+    fprintf(stderr, "-U --universal MODE : Output mode for the universal lift {ancestor|tcol|query}.  Universal mode is AUTO-ENGAGED when <inputFile>.tui is present; -U just picks the mode.  ancestor = pass-through (default).  tcol = prepend a `tcol` sentinel row carrying the universal column at this block.  query = reorient blocks onto the queried genome (row-0, '+'); incompatible with `-r tcol:..`.  Blocks are always emitted in universal-column (file) order, which on a '-'-strand queried leaf descends in the queried-forward coordinate.\n");
     fprintf(stderr, "-s --repeatCoordinatesEveryNColumns : Repeat TAF coordinates of each sequence at least every n columns. By default: %" PRIi64 "\n", repeat_coordinates_every_n_columns);
     fprintf(stderr, "-u --runLengthEncodeBases : Run length encode output bases in TAF\n");
     fprintf(stderr, "-a --showOnlyReferenceDifferences : Replace matches with the reference (first row) with a * character\n");
@@ -89,7 +90,13 @@ int taf_view_main(int argc, char *argv[]) {
     bool all_to_all_paf = false;
     bool paf_cs = false;
     char *region = NULL;
-    bool universal_index = false;  // -U: lift -r via <inputFile>.tui (Index B+A)
+    // -U/--universal MODE: ancestor (default; pass-through), tcol (prepend
+    // `tcol` sentinel row carrying universal-column coord), query (reorient
+    // onto the queried genome).  Universal mode auto-engages when <input>.tui
+    // is present; -U just picks the mode.  -U with no .tui is an error.
+    enum { U_MODE_ANCESTOR, U_MODE_TCOL, U_MODE_QUERY };
+    int universal_mode = U_MODE_ANCESTOR;
+    bool universal_mode_set = false;
     bool use_compression = false;
     char *nameMapFile = NULL;
     char *phylogeny_file = NULL;
@@ -116,14 +123,14 @@ int taf_view_main(int argc, char *argv[]) {
                                                 { "omitCoordinates", required_argument, 0, 'd' },
                                                 { "repeatCoordinatesEveryNColumns", required_argument, 0, 's' },
                                                 { "region", required_argument, 0, 'r' },
-                                                { "universal", no_argument, 0, 'U' },
+                                                { "universal", required_argument, 0, 'U' },
                                                 { "useCompression", no_argument, 0, 'c' },
                                                 { "nameMapFile", required_argument, 0, 'n' },
                                                 { "help", no_argument, 0, 'h' },
                                                 { 0, 0, 0, 0 } };
 
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:o:mPpCaucs:r:n:habxt:dU", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:o:mPpCaucs:r:n:habxt:dU:", long_options, &option_index);
         if (key == -1) {
             break;
         }
@@ -173,7 +180,13 @@ int taf_view_main(int argc, char *argv[]) {
                 repeat_coordinates_every_n_columns = atol(optarg);
                 break;
             case 'U':
-                universal_index = true;
+                if (strcmp(optarg, "ancestor") == 0)      universal_mode = U_MODE_ANCESTOR;
+                else if (strcmp(optarg, "tcol") == 0)     universal_mode = U_MODE_TCOL;
+                else if (strcmp(optarg, "query") == 0)    universal_mode = U_MODE_QUERY;
+                else { fprintf(stderr,
+                    "Invalid -U mode '%s'; expected ancestor|tcol|query\n", optarg);
+                    return 1; }
+                universal_mode_set = true;
                 break;
             case 'r':
                 region = optarg;
@@ -288,9 +301,20 @@ int taf_view_main(int argc, char *argv[]) {
         return 1;
     }
 
-    if (universal_index && region == NULL) {
+    if (universal_mode_set && region == NULL) {
         fprintf(stderr, "-U/--universal requires -r SEQ:START-END\n");
         return 1;
+    }
+    if (universal_mode_set && inputFile != NULL) {
+        // fail loudly BEFORE header write, so a user-error `-U` invocation
+        // doesn't leave a partial bgzip output (-c) with just the header.
+        char *tp = tui_path(inputFile);
+        if (access(tp, F_OK) != 0) {
+            fprintf(stderr, "-U/--universal requires %s (run `taffy index -u` first)\n", tp);
+            free(tp);
+            return 1;
+        }
+        free(tp);
     }
 
     if (maf_output) {
@@ -321,27 +345,47 @@ int taf_view_main(int argc, char *argv[]) {
         
         st_logInfo("Region: contig=%s start=%" PRIi64 " length=%" PRIi64 "\n", region_seq, region_start, region_length);
 
-      if (universal_index) {
-        // Region on ANY genome. Index B (tui_query) -> universal column
-        // intervals -> the .tui universal-column index drives a single
-        // column-ordered forward scan (no .tai; the monotone universal key
-        // makes the per-contig non-monotonicity that breaks tai_iterator
-        // impossible).  .tui auto-located at <inputFile>.tui.
-        char *tui_fn = tui_path(inputFile);
+      // Auto-detect <inputFile>.tui -> engage universal mode.  Both indexes
+      // present: .tui wins.  -U <mode> picks the OUTPUT shape (default
+      // ancestor).  -U passed but no .tui -> error (don't silently downgrade).
+      // (The -U-but-no-.tui case is already caught pre-header above.)
+      char *tui_fn = tui_path(inputFile);
+      bool tui_present = (access(tui_fn, F_OK) == 0);
+      if (tui_present) {
+        bool tcol_input = (strcmp(region_seq, "tcol") == 0);
+        if (tcol_input && universal_mode == U_MODE_QUERY) {
+            fprintf(stderr, "-U query is incompatible with `-r tcol:..` "
+                    "(no queried genome to reorient on)\n");
+            free(tui_fn);
+            return 1;
+        }
         Tui *tui = tui_load(tui_fn);
         if (tui == NULL) {
-            fprintf(stderr, "Could not open universal index %s. "
-                    "Run `taffy index -u` first.\n", tui_fn);
+            fprintf(stderr, "Could not open universal index %s\n", tui_fn);
             free(tui_fn);
             return 1;
         }
         free(tui_fn);
+        int64_t T = tui_total_columns(tui);
+
+        // Build the universal-column intervals for the extractor.
+        // tcol:x-y bypasses Index B; everything else uses tui_query.
+        TuiInterval *uiv = NULL;       // malloc'd iff !tcol_input
+        TuiInterval tcol_iv;           // stack-resident iff tcol_input
         int64_t n_uiv = 0;
-        TuiInterval *uiv = tui_query(tui, region_seq, region_start,
-                                     region_start + region_length, &n_uiv);
+        if (tcol_input) {
+            int64_t a = region_start, b = region_start + region_length;
+            if (a < 0) a = 0;
+            if (b > T) b = T;
+            if (a < b) { tcol_iv.start = a; tcol_iv.end = b; n_uiv = 1; }
+        } else {
+            uiv = tui_query(tui, region_seq, region_start,
+                            region_start + region_length, &n_uiv);
+        }
+        const TuiInterval *iv_in = tcol_input ? &tcol_iv : uiv;
         TuiExtractIt *xit = tui_extract_iterator(tui, li, !taf_input,
                                                  run_length_encode_input_bases,
-                                                 uiv, n_uiv);
+                                                 iv_in, n_uiv);
         if (!tui_extract_has_next(xit)) {
             fprintf(stderr, "Region %s:%" PRIi64 "-%" PRIi64 " maps to no "
                     "universal columns; emitting header-only output\n",
@@ -349,11 +393,32 @@ int taf_view_main(int argc, char *argv[]) {
         }
         Alignment *alignment = NULL;
         while ((alignment = tui_extract_next(xit, li)) != NULL) {
-            // whole blocks, column order, each once (no dedup needed)
-            modify_alignment(alignment);
+            int64_t col_start = tui_extract_col_start(xit);
+            // Apply the optional rename FIRST so the reorient match below
+            // sees the post-name-map row sequence_name (same convention as
+            // the rest of `taffy view`).
             if (genome_name_map) {
                 apply_genome_name_mapping_to_alignment(genome_name_map, alignment);
             }
+            // Mode transforms (before modify_alignment, so -a/-b see the
+            // intended row-0): ancestor = no-op; tcol = prepend a `tcol`
+            // sentinel row carrying this block's universal column; query =
+            // reorient onto the queried genome (RC if '-', move to row-0).
+            if (universal_mode == U_MODE_TCOL) {
+                Alignment_Row *nr = st_calloc(1, sizeof(Alignment_Row));
+                nr->sequence_name = stString_copy("tcol");
+                nr->start = col_start;
+                nr->length = alignment->column_number;     // gap-free by construction
+                nr->strand = 1;
+                nr->sequence_length = T;
+                nr->bases = stString_copy(alignment->row->bases);  // lossless: per-col content
+                nr->n_row = alignment->row;
+                alignment->row = nr;
+                alignment->row_number++;
+            } else if (universal_mode == U_MODE_QUERY) {
+                alignment_reorient_to_row(alignment, region_seq);
+            }
+            modify_alignment(alignment);
             if (taf_output) {
                 // emitted blocks are generally NOT file-adjacent (the scan
                 // skips non-overlapping ones) -> never delta vs a prior block
@@ -367,9 +432,10 @@ int taf_view_main(int argc, char *argv[]) {
             }
         }
         tui_extract_iterator_destruct(xit);   // owns/frees the yielded blocks
-        free(uiv);
+        free(uiv);                            // NULL for tcol input
         tui_destruct(tui);
       } else {
+        free(tui_fn);
 
         char *tai_fn = tai_path(inputFile);
         FILE *tai_fh = fopen(tai_fn, "r");
