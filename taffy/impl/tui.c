@@ -13,6 +13,8 @@
 #include <stdint.h>
 #include <string.h>
 #include <assert.h>
+#include <signal.h>
+#include <stdlib.h>
 #include <time.h>
 #include <unistd.h>
 #include <zlib.h>
@@ -47,6 +49,85 @@ char *tui_path(const char *maf_path) {
     char *p = st_malloc(strlen(maf_path) + 5);
     sprintf(p, "%s.tui", maf_path);
     return p;
+}
+
+/////////////////////////////////////////////////////////////////////////////
+// Crash/abort cleanup of phase-1 spill files.
+//
+// tui_cleanup() removes spills on the normal return path, but mid-phase-1
+// st_errAbort() (unresolvable genome name, disk-full write, '-' strand
+// row-0, etc.), assert() failures, and user SIGINT all bypass it -- and
+// these spills are multi-GB at vertebrate scale.  We track every spill
+// path in a file-scope list as it's created (`spill_for`, `ref_flush`,
+// `idx_anchor`), and we register an atexit + signal handler that walks the
+// list and remove()s each.  Also tracks the .tui output once oneFileOpenWrite
+// has touched it, so a half-written .tui doesn't masquerade as a real index.
+//
+// On the normal exit path tui_atexit_disarm() is called before tui_cleanup()
+// frees the path strings -- then the handler is a no-op.
+//
+// Single-threaded only.  taffy index runs tui_create once per process; this
+// is not safe to call from multiple threads concurrently.
+/////////////////////////////////////////////////////////////////////////////
+static stList *atexit_spill_paths = NULL;  // owned strdup'd path strings
+static char *atexit_tui_path = NULL;        // owned strdup'd .tui output path
+
+static void tui_atexit_cleanup(void) {
+    if (atexit_spill_paths != NULL) {
+        int64_t n = stList_length(atexit_spill_paths);
+        for (int64_t i = 0; i < n; i++) {
+            (void) remove((char *) stList_get(atexit_spill_paths, i));
+        }
+        stList_destruct(atexit_spill_paths);
+        atexit_spill_paths = NULL;
+    }
+    if (atexit_tui_path != NULL) {
+        (void) remove(atexit_tui_path);
+        free(atexit_tui_path);
+        atexit_tui_path = NULL;
+    }
+}
+
+static void tui_signal_handler(int sig) {
+    tui_atexit_cleanup();
+    // restore default disposition and re-raise so the parent sees the right
+    // exit (don't swallow SIGINT into exit-code-0)
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+// Add `path` to the cleanup-on-abort list.  On first call, registers the
+// atexit handler and a few signal handlers.  Caller retains ownership of the
+// passed string; we strdup.
+static void tui_atexit_track_spill(const char *path) {
+    if (atexit_spill_paths == NULL) {
+        atexit_spill_paths = stList_construct3(0, free);
+        atexit(tui_atexit_cleanup);
+        signal(SIGINT,  tui_signal_handler);
+        signal(SIGTERM, tui_signal_handler);
+        signal(SIGHUP,  tui_signal_handler);
+    }
+    stList_append(atexit_spill_paths, stString_copy(path));
+}
+
+// Track the .tui output path so a half-written file is removed on crash.
+// Called after oneFileOpenWriteNew() succeeds; cleared by tui_atexit_disarm().
+static void tui_atexit_track_tui(const char *path) {
+    if (atexit_tui_path != NULL) { free(atexit_tui_path); }
+    atexit_tui_path = stString_copy(path);
+}
+
+// Disarm the crash cleanup on the normal success path, BEFORE tui_cleanup()
+// frees its path strings.  Idempotent.
+static void tui_atexit_disarm(void) {
+    if (atexit_spill_paths != NULL) {
+        stList_destruct(atexit_spill_paths);
+        atexit_spill_paths = NULL;
+    }
+    if (atexit_tui_path != NULL) {
+        free(atexit_tui_path);
+        atexit_tui_path = NULL;
+    }
 }
 
 // directory component of a path (malloc'd); "." if none. portable (no libgen)
@@ -247,6 +328,7 @@ static void idx_anchor(Phase1 *p1, LI *li, int is_maf, bool rle) {
     if (p1->idx_fh == NULL) {
         p1->idx_path = stString_print("%s/%s.tuiIdx.%ld", p1->tmp_dir,
                                       p1->out_base, (long)getpid());
+        tui_atexit_track_spill(p1->idx_path);
         p1->idx_fh = fopen(p1->idx_path, "w");
         if (p1->idx_fh == NULL) {
             fprintf(stderr, "tui: cannot open idx spill %s\n", p1->idx_path);
@@ -266,6 +348,7 @@ static void ref_flush(Phase1 *p1) {
     if (p1->ref_fh == NULL) {
         p1->ref_path = stString_print("%s/%s.tuiRef.%ld", p1->tmp_dir,
                                       p1->out_base, (long)getpid());
+        tui_atexit_track_spill(p1->ref_path);
         p1->ref_fh = fopen(p1->ref_path, "w");
         if (p1->ref_fh == NULL) {
             fprintf(stderr, "tui: cannot open ref spill %s\n", p1->ref_path);
@@ -317,6 +400,7 @@ static FILE *spill_for(Phase1 *p1, const char *genome) {
         char *path = stString_print("%s/%s.tuiSpill.%ld.%d", p1->tmp_dir,
                                     p1->out_base, (long)getpid(),
                                     p1->next_spill_id++);
+        tui_atexit_track_spill(path);
         fh = fopen(path, "w");
         if (fh == NULL) { fprintf(stderr, "tui: cannot open spill %s\n", path); exit(1); }
         stHash_insert(p1->spill_fh, stString_copy(genome), fh);
@@ -774,8 +858,10 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
         fprintf(stderr, "tui: cannot write %s\n", out_path);
         oneSchemaDestroy(schema);
         tui_cleanup(&p1, seqks, n_seqs, eff_tmp, tree_map);
+        tui_atexit_disarm();
         return 1;
     }
+    tui_atexit_track_tui(out_path);
     oneAddProvenance(of, "taffy", "tui", "universal column index", 0);
 
     // t: total columns
@@ -1011,6 +1097,10 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
     oneSchemaDestroy(schema);
     st_logInfo("tui: build complete in %" PRIi64 " seconds total\n",
                (int64_t)(time(NULL) - t_total_start));
+    // We made it; release the crash-cleanup safety net (the atexit list owns
+    // its own strdup'd copies, so order vs tui_cleanup is not load-bearing,
+    // but disarming first avoids any chance of remove()ing a finalized file).
+    tui_atexit_disarm();
     tui_cleanup(&p1, seqks, n_seqs, eff_tmp, tree_map);
     return 0;
 }
