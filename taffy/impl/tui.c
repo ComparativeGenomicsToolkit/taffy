@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <assert.h>
+#include <time.h>
 #include <unistd.h>
 #include <zlib.h>
 
@@ -699,6 +700,11 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
     // idx_anchor captures the block's anchor offset itself (LI_get_position =
     // start of the peeked block-first line; the exact tai_create_taf
     // convention so LI_seek + the shared readers behave identically at query).
+    time_t t_total_start = time(NULL);
+    time_t t_phase1_start = t_total_start;
+    st_logInfo("tui: starting phase 1 (streaming %s scan, spilling per-genome runs)\n",
+               input_format == 0 ? "TAF" : "MAF");
+    int64_t block_count = 0;
     Alignment *aln, *p_aln = NULL;
     if (input_format == 1) {
         while (1) {
@@ -707,6 +713,7 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
             if (aln == NULL) break;
             tui_phase1_block(&p1, aln);
             alignment_destruct(aln, 1);
+            block_count++;
         }
     } else {
         while (1) {
@@ -716,6 +723,7 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
             tui_phase1_block(&p1, aln);
             if (p_aln != NULL) alignment_destruct(p_aln, 1);
             p_aln = aln;
+            block_count++;
         }
         if (p_aln != NULL) alignment_destruct(p_aln, 1);
     }
@@ -743,6 +751,12 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
         }
     }
     stHash_destructIterator(hit);
+    int64_t n_genomes = (int64_t) stHash_size(p1.spill_path);
+    st_logInfo("tui: phase 1 done in %" PRIi64 " seconds "
+               "(T=%" PRIi64 " columns, %" PRIi64 " blocks, "
+               "%" PRIi64 " genomes, %" PRIi64 " idx anchors)\n",
+               (int64_t)(time(NULL) - t_phase1_start),
+               p1.T, block_count, n_genomes, p1.idx_n);
 
     // deterministic global order: genome-major (true resolved genome), then
     // sequence.  Resolve each genome once here (memoized in SeqKey.genome).
@@ -771,6 +785,8 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
     // A: Index-A reference track.  Resolve each spilled row-0 segment's
     // sequence name to its S-ordinal (== position in the sorted global order),
     // then SoA delta+varint+deflate (colStart dropped = prefix sum of len).
+    time_t t_idxA_start = time(NULL);
+    st_logInfo("tui: Index A: encoding row-0 reference track\n");
     stHash *name2ord = stHash_construct3(stHash_stringKey, stHash_stringEqualKey,
                                          NULL, NULL);
     for (int64_t i = 0; i < n_seqs; i++) {
@@ -830,6 +846,10 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
         oneInt(of, 0) = a_raw;
         oneInt(of, 1) = nSeg;
         oneWriteLine(of, 'A', a_def, adef);
+        st_logInfo("tui: Index A done in %" PRIi64 " seconds "
+                   "(%" PRIi64 " segments, %" PRIi64 " raw bytes, "
+                   "%" PRIi64 " deflated bytes)\n",
+                   (int64_t)(time(NULL) - t_idxA_start), nSeg, a_raw, a_def);
         free(adef);
     }
     free(segOrd); free(segRow0); free(segLen); free(segCol0);
@@ -837,6 +857,8 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
 
     // X: universal-column -> file_pos index (the .tai-equivalent).  Read the
     // column-ordered anchor spill, encode (deflated SoA), write one X line.
+    time_t t_idxX_start = time(NULL);
+    st_logInfo("tui: Index X: encoding universal-column->file-offset anchors\n");
     {
         int64_t *ic = NULL, *iff = NULL, in = 0, icap = 0;
         if (p1.idx_path != NULL) {
@@ -868,10 +890,15 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
         oneInt(of, 0) = x_raw;
         oneInt(of, 1) = in;
         oneWriteLine(of, 'X', x_def, xdef);
+        st_logInfo("tui: Index X done in %" PRIi64 " seconds "
+                   "(%" PRIi64 " anchors, %" PRIi64 " deflated bytes)\n",
+                   (int64_t)(time(NULL) - t_idxX_start), in, x_def);
         free(xdef); free(ic); free(iff);
     }
 
     // d: directory (front of file), S-ordinal == position in global order
+    st_logInfo("tui: writing directory (%" PRIi64 " sequences across %" PRIi64
+               " genomes)\n", n_seqs, n_genomes);
     for (int64_t i = 0; i < n_seqs; i++) {
         char *sk = seqks[i].seq;
         int64_t slen = *(int64_t *)stHash_search(p1.seq_len, sk);
@@ -885,9 +912,14 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
     // per genome: g + S/R objects.  seqks is sorted by the TRUE resolved
     // genome, so one genome's sequences are ONE contiguous block by
     // construction (no first-dot-collision hazard, no re-resolve).
+    time_t t_phase2_start = time(NULL);
+    st_logInfo("tui: starting phase 2 (per-genome sort + encode + write, "
+               "%" PRIi64 " genomes)\n", n_genomes);
+    int64_t genome_idx = 0;
     int64_t i = 0;
     while (i < n_seqs) {
         char *gname = seqks[i].genome;  // groups spill files; not emitted
+        time_t t_g_start = time(NULL);
 
         int64_t nr = 0;
         Run *runs = NULL;
@@ -964,13 +996,21 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
             rc = bnd;   // advance cursor past this seq's runs
             i++;
         }
+        st_logInfo("tui: phase 2 genome %" PRIi64 "/%" PRIi64 " '%s' done in "
+                   "%" PRIi64 " seconds (%" PRIi64 " runs)\n",
+                   ++genome_idx, n_genomes, gname,
+                   (int64_t)(time(NULL) - t_g_start), nr);
         for (int64_t k = 0; k < nr; k++) free(runs[k].seq);
         free(runs);
         // gname is seqks[i].genome -- owned by seqks, freed in tui_cleanup
     }
+    st_logInfo("tui: phase 2 done in %" PRIi64 " seconds\n",
+               (int64_t)(time(NULL) - t_phase2_start));
 
     oneFileClose(of);
     oneSchemaDestroy(schema);
+    st_logInfo("tui: build complete in %" PRIi64 " seconds total\n",
+               (int64_t)(time(NULL) - t_total_start));
     tui_cleanup(&p1, seqks, n_seqs, eff_tmp, tree_map);
     return 0;
 }
