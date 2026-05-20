@@ -9,13 +9,13 @@
  * column_number columns; the count is a stable global integer in [0,T)).
  *
  * This builds, in one streaming scan over all rows, a per-(genome,sequence)
- * piecewise-linear map  genome.seq:pos -> universal column  (Index B).  The
- * ancestral (row-0/reference) genomes are recorded like any other genome;
- * their runs ARE Index A (column <-> ancestral), reconstructed at query time.
+ * piecewise-linear map  genome.seq:pos -> universal column.  Ancestral
+ * (row-0/reference) genomes are recorded like any other genome.
  *
  * Output is a single provenanced ONEcode container (schema `P 3 tui`),
  * written to <maf>.tui, holding every genome's run lists plus a directory,
- * the total column count T, and the set of reference (ancestral) genomes.
+ * the total column count T, and a sparse universal-column -> file-offset
+ * anchor index for random access into the underlying MAF/TAF stream.
  *
  * A "run" maps a contiguous, gap-free, colinear stretch of a sequence to a
  * contiguous column range.  Stored fields (all 0-based, half-open in the
@@ -77,14 +77,11 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
                 stHash *genome_name_map);
 
 /////////////////////////////////////////////////////////////////////////////
-// Reader / query side (Index B: genome.seq:pos -> universal columns).
+// Reader / query side (genome.seq:pos -> universal columns).
 /////////////////////////////////////////////////////////////////////////////
 
 /* A half-open universal-column interval [start, end). */
 typedef struct { int64_t start; int64_t end; } TuiInterval;
-
-/* A row-0 (ancestor) coordinate piece: [start, start+len) of `seq`. */
-typedef struct { char *seq; int64_t start; int64_t len; } TuiRef;
 
 typedef struct _Tui Tui;
 
@@ -104,27 +101,14 @@ int tui_has_sequence(const Tui *tui, const char *seq_name);
 
 /*
  * Map the forward-coordinate interval [start, end) of sequence `seq_name` to
- * universal columns.  Loads that one sequence's runs, clips, and returns a
- * malloc'd array (caller frees) of sorted, merged half-open column intervals;
- * sets *n_out to the count.  Returns NULL with *n_out==0 if the sequence is
- * absent or nothing overlaps (e.g. a lineage-specific insertion, by design).
- *
- * Baseline implementation: re-scans the container to find the sequence's R
- * blob (no oneGoto yet) -- correctness first; expected to be slow.
+ * universal columns.  Loads that one sequence's runs (via oneGoto on the
+ * directory-resolved S-ordinal), clips, and returns a malloc'd array (caller
+ * frees) of sorted, merged half-open column intervals; sets *n_out to the
+ * count.  Returns NULL with *n_out==0 if the sequence is absent or nothing
+ * overlaps (e.g. a lineage-specific insertion, by design).
  */
 TuiInterval *tui_query(Tui *tui, const char *seq_name,
                        int64_t start, int64_t end, int64_t *n_out);
-
-/*
- * Index A: map universal-column intervals to row-0 (ancestor) coordinate
- * pieces via the explicit reference track.  `uiv` is the column-ordered,
- * merged output of tui_query.  Returns a malloc'd array (caller frees the
- * array; the `.seq` pointers are owned by `tui`, do NOT free them) in column
- * order; *n_out = count.  One input interval can yield several pieces on
- * different row-0 sequences/ancestors.  Returns NULL with *n_out==0 if empty.
- */
-TuiRef *tui_col_range_to_ref(const Tui *tui, const TuiInterval *uiv,
-                             int64_t n_uiv, int64_t *n_out);
 
 /////////////////////////////////////////////////////////////////////////////
 // Universal-column block extractor (replaces the .tai for the -U path).

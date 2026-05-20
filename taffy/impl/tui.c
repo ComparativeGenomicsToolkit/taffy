@@ -21,7 +21,8 @@
 
 // ONEcode schema. Exactly one list field per line (STRING / INT_LIST); other
 // fields are scalar INT.  The directory keys on the full genome.sequence name
-// (genome derived identically at build/load via genome_of()).
+// (the writer resolves the "genome" prefix via genome_of() only to group
+// per-genome spills; the reader does no genome resolution at all).
 //
 // R holds one sequence's merged runs as a per-sequence structure-of-arrays
 // delta+varint blob, zlib-deflated (see encode_runs).  The scalar INT is the
@@ -29,21 +30,18 @@
 // deflated bytes.  Absolute (t,g,len) triples defeat ONElib's Huffman; the
 // SoA gap|gsk|lenc form is ~5x smaller than absolute end to end.
 //
-// A is the explicit Index-A reference track (the materialized canonical BED):
-// the column-ordered row-0 (block-reference) segments tiling [0,T).  Stored
-// like R -- (inflatedLen INT, deflated STRING) -- as a SoA delta+varint blob
-// (see encode_refseg); colStart is dropped (= prefix sum of len, since the
-// segments tile [0,T)).  Step-2 query uses it to turn universal columns into
-// row-0 coords for the existing .tai.  Written once, right after `t`, before
-// `d`.  Strand is always '+' (asserted at build; tai rejects a '-' row-0).
+// X is the universal-column -> file-offset anchor index (the .tai-equivalent);
+// strictly increasing, sampled every TUI_IDX_BLOCK universal columns at
+// coordinate-bearing block starts.  Stored like R as a SoA delta+varint blob.
+// The query-time extractor binary-searches it to seek the underlying stream
+// to the nearest anchor <= the queried universal column.
 static const char *TUI_SCHEMA =
     "P 3 tui\n"
     "D t 1 3 INT\n"                          // total columns T (global)
-    "D A 3 3 INT 3 INT 6 STRING\n"           // Index-A: inflatedLen, nSeg, deflate(SoA blob)
-    "D d 4 6 STRING 3 INT 3 INT 3 INT\n"     // dir: seqName, S-ordinal, seqLen, isRef
+    "D X 3 3 INT 3 INT 6 STRING\n"           // univ-col index: inflatedLen, nRec, deflate(SoA)
+    "O d 3 6 STRING 3 INT 3 INT\n"           // dir: seqName, S-ordinal, seqLen -- O so oneGoto works
     "O S 2 6 STRING 3 INT\n"                 // sequence object: seqName, seqLen
-    "D R 2 3 INT 6 STRING\n"                 // runs: inflatedLen, deflate(blob)
-    "D X 3 3 INT 3 INT 6 STRING\n";          // univ-col index: inflatedLen, nRec, deflate(SoA)
+    "D R 2 3 INT 6 STRING\n";                // runs: inflatedLen, deflate(blob)
 
 char *tui_path(const char *maf_path) {
     char *p = st_malloc(strlen(maf_path) + 5);
@@ -58,10 +56,10 @@ char *tui_path(const char *maf_path) {
 // st_errAbort() (unresolvable genome name, disk-full write, '-' strand
 // row-0, etc.), assert() failures, and user SIGINT all bypass it -- and
 // these spills are multi-GB at vertebrate scale.  We track every spill
-// path in a file-scope list as it's created (`spill_for`, `ref_flush`,
-// `idx_anchor`), and we register an atexit + signal handler that walks the
-// list and remove()s each.  Also tracks the .tui output once oneFileOpenWrite
-// has touched it, so a half-written .tui doesn't masquerade as a real index.
+// path in a file-scope list as it's created (`spill_for`, `idx_anchor`),
+// and we register an atexit + signal handler that walks the list and
+// remove()s each.  Also tracks the .tui output once oneFileOpenWrite has
+// touched it, so a half-written .tui doesn't masquerade as a real index.
 //
 // On the normal exit path tui_atexit_disarm() is called before tui_cleanup()
 // frees the path strings -- then the handler is a no-op.
@@ -281,19 +279,11 @@ typedef struct {
     stHash *spill_path;   // genomeName -> char*  (we own/free these)
     stHash *seq_len;      // "genome.seq" -> int64_t* seqLen
     stList *seq_keys;     // distinct "genome.seq", first-seen order
-    stSet  *ref_genomes;  // genomes that appear as row-0 (ancestral)
     int64_t T;            // total columns
     const char *tmp_dir;  // where spill files go
     const char *out_base; // basename of out path (for unique spill names)
     int next_spill_id;
     stHash *gmap;         // optional name map for >1-dot genome resolution
-    // Index-A reference track: one open row-0 segment, colinear-merged on the
-    // fly, flushed (column-ordered) to a single spill file.
-    FILE   *ref_fh;       // ref-track spill (lazy open); NULL until first flush
-    char   *ref_path;     // we own/free this
-    char   *ro_seq;       // open segment's row-0 sequence name (strdup)
-    int64_t ro_col0, ro_row0, ro_len;
-    int     ro_open;
     // Universal-column -> file_pos index (the .tai-equivalent, monotone key).
     // Anchors sampled every TUI_IDX_BLOCK columns at coordinate-bearing block
     // starts (MAF: every block).  Spilled (col<TAB>file_pos), column-ordered.
@@ -342,37 +332,13 @@ static void idx_anchor(Phase1 *p1, LI *li, int is_maf, bool rle) {
     p1->idx_n++;
 }
 
-// Flush the open row-0 segment (if any) to the ref-track spill.
-static void ref_flush(Phase1 *p1) {
-    if (!p1->ro_open) return;
-    if (p1->ref_fh == NULL) {
-        p1->ref_path = stString_print("%s/%s.tuiRef.%ld", p1->tmp_dir,
-                                      p1->out_base, (long)getpid());
-        tui_atexit_track_spill(p1->ref_path);
-        p1->ref_fh = fopen(p1->ref_path, "w");
-        if (p1->ref_fh == NULL) {
-            fprintf(stderr, "tui: cannot open ref spill %s\n", p1->ref_path);
-            exit(1);
-        }
-    }
-    if (fprintf(p1->ref_fh, "%" PRIi64 "\t%s\t%" PRIi64 "\t%" PRIi64 "\n",
-                p1->ro_col0, p1->ro_seq, p1->ro_row0, p1->ro_len) < 0) {
-        st_errAbort("tui: failed writing ref spill (disk full / write error)");
-    }
-    free(p1->ro_seq);
-    p1->ro_seq = NULL;
-    p1->ro_open = 0;
-}
-
-// Record this block's row-0 segment into the on-the-fly-merged ref track.
-// row0 = aln->row (the block reference), col0 = first universal column of the
-// block, cn = column_number (== row-0 base count, since row-0 is gap-free).
-static void ref_track_block(Phase1 *p1, Alignment_Row *row0,
-                            int64_t col0, int64_t cn) {
+// Assert the row-0 invariants the universal lift relies on: '+' strand and
+// gap-free (row-0 base count == column count).  Both are guaranteed by
+// `cactus-hal2maf --universal` (maxRefGap=0); a violation here is bad input.
+static void assert_row0_universal(const Alignment_Row *row0, int64_t cn) {
     if (!row0->strand) {
         st_errAbort("tui: row-0 sequence '%s' is on '-' strand; a universal "
-                    "MAF row-0 must be '+' (the .tai requires it)",
-                    row0->sequence_name);
+                    "MAF row-0 must be '+'", row0->sequence_name);
     }
     if (row0->length != cn) {
         st_errAbort("tui: row-0 '%s' is not gap-free (length %" PRIi64
@@ -380,18 +346,6 @@ static void ref_track_block(Phase1 *p1, Alignment_Row *row0,
                     "maxRefGap==0 expected", row0->sequence_name,
                     row0->length, cn);
     }
-    if (p1->ro_open && p1->ro_row0 + p1->ro_len == row0->start &&
-        strcmp(p1->ro_seq, row0->sequence_name) == 0) {
-        assert(p1->ro_col0 + p1->ro_len == col0);  // columns globally sequential
-        p1->ro_len += cn;
-        return;
-    }
-    ref_flush(p1);
-    p1->ro_seq  = stString_copy(row0->sequence_name);
-    p1->ro_col0 = col0;
-    p1->ro_row0 = row0->start;
-    p1->ro_len  = cn;
-    p1->ro_open = 1;
 }
 
 static FILE *spill_for(Phase1 *p1, const char *genome) {
@@ -422,10 +376,7 @@ static void note_seq(Phase1 *p1, const char *seq_name, int64_t seq_len) {
 static void tui_phase1_block(Phase1 *p1, Alignment *aln) {
     int64_t cn = aln->column_number;
     if (aln->row == NULL) { p1->T += cn; return; }  // degenerate a-line, no rows
-    char *ref_g = genome_of(aln->row->sequence_name, p1->gmap);
-    if (stSet_search(p1->ref_genomes, ref_g) == NULL) stSet_insert(p1->ref_genomes, ref_g);
-    else free(ref_g);
-    ref_track_block(p1, aln->row, p1->T, cn);   // Index A: this block's row-0
+    assert_row0_universal(aln->row, cn);
     for (Alignment_Row *row = aln->row; row != NULL; row = row->n_row) {
         char *gname = genome_of(row->sequence_name, p1->gmap);
         note_seq(p1, row->sequence_name, row->sequence_length);
@@ -440,6 +391,14 @@ static void tui_phase1_block(Phase1 *p1, Alignment *aln) {
 /////////////////////////////////////////////////////////////////////////////
 
 typedef struct { char *seq; int64_t t, g, len; char strand; } Run;
+
+// Directory-line write key: links a name-sorted output position back to the
+// genome-major S-ordinal of the sequence (so the reader can binary-search the
+// d-lines by name and `oneGoto S` straight to the matching object).
+typedef struct { int64_t idx; const char *name; } DKey;
+static int dkey_cmp(const void *a, const void *b) {
+    return strcmp(((const DKey *)a)->name, ((const DKey *)b)->name);
+}
 
 // runs[] hold one genome's runs (one spill), so full-name strcmp is exactly
 // the within-genome order seqs[] uses (genome prefix is constant here).
@@ -581,83 +540,10 @@ static int64_t decode_runs(const uint8_t *def, int64_t def_len,
     return m;
 }
 
-// Index-A reference-track codec.  Same shape as encode_runs (SoA delta+varint,
-// one zlib deflate) but tuned for the row-0 segments.  `colStart` is NOT
-// stored: the segments tile [0,T) exactly (builder asserts contiguity), so
-// colStart is the prefix sum of `len` -- reconstructed at decode.  Streams:
-//   O = zigzag(sOrd - prevOrd)     (often 0: same row-0 seq across a jump)
-//   P = zigzag(row0Start - prevRow0)
-//   L = uvarint(len)
-// header = uvarint(nSeg), uvarint(|O|), uvarint(|P|); raw = hdr+O+P+L.
-static uint8_t *encode_refseg(const int64_t *sOrd, const int64_t *row0,
-                              const int64_t *len, int64_t nSeg,
-                              int64_t *raw_len, int64_t *def_len) {
-    uint8_t *O = st_malloc((size_t)(nSeg * 10 + 1));
-    uint8_t *P = st_malloc((size_t)(nSeg * 10 + 1));
-    uint8_t *L = st_malloc((size_t)(nSeg * 10 + 1));
-    size_t on = 0, pn = 0, ln = 0;
-    int64_t po = 0, pr = 0;
-    for (int64_t k = 0; k < nSeg; k++) {
-        on += put_uvarint(O + on, zigzag(sOrd[k] - po));
-        pn += put_uvarint(P + pn, zigzag(row0[k] - pr));
-        ln += put_uvarint(L + ln, (uint64_t)len[k]);
-        po = sOrd[k]; pr = row0[k];
-    }
-    uint8_t hdr[30];
-    size_t hn = 0;
-    hn += put_uvarint(hdr + hn, (uint64_t)nSeg);
-    hn += put_uvarint(hdr + hn, (uint64_t)on);
-    hn += put_uvarint(hdr + hn, (uint64_t)pn);
-    size_t rn = hn + on + pn + ln;
-    uint8_t *raw = st_malloc(rn ? rn : 1);
-    memcpy(raw, hdr, hn);
-    memcpy(raw + hn, O, on);
-    memcpy(raw + hn + on, P, pn);
-    memcpy(raw + hn + on + pn, L, ln);
-    free(O); free(P); free(L);
-    uLongf cap = compressBound((uLong)rn);
-    uint8_t *def = st_malloc(cap ? cap : 1);
-    uLongf dl = cap;
-    if (compress2(def, &dl, raw, (uLong)rn, 9) != Z_OK) {
-        st_errAbort("tui: zlib compress2 failed (A)");
-    }
-    free(raw);
-    *raw_len = (int64_t)rn;
-    *def_len = (int64_t)dl;
-    return def;
-}
-
-// Inverse of encode_refseg.  Fills colStart/sOrd/row0/len[0..nSeg) (colStart
-// reconstructed as the running prefix sum of len, from 0).  Returns nSeg.
-static int64_t decode_refseg(const uint8_t *def, int64_t def_len,
-                             int64_t raw_len, int64_t *colStart,
-                             int64_t *sOrd, int64_t *row0, int64_t *len) {
-    uint8_t *raw = st_malloc((size_t)(raw_len ? raw_len : 1));
-    uLongf rl = (uLongf)raw_len;
-    if (uncompress(raw, &rl, def, (uLong)def_len) != Z_OK || (int64_t)rl != raw_len) {
-        st_errAbort("tui: zlib uncompress failed (A)");
-    }
-    const uint8_t *h = raw;
-    int64_t nSeg = (int64_t)get_uvarint(&h);
-    int64_t on = (int64_t)get_uvarint(&h);
-    int64_t pn = (int64_t)get_uvarint(&h);
-    const uint8_t *op = h, *pp = h + on, *lp = h + on + pn;
-    int64_t po = 0, pr = 0, col = 0;
-    for (int64_t k = 0; k < nSeg; k++) {
-        int64_t o = po + unzigzag(get_uvarint(&op));
-        int64_t r = pr + unzigzag(get_uvarint(&pp));
-        int64_t l = (int64_t)get_uvarint(&lp);
-        colStart[k] = col; sOrd[k] = o; row0[k] = r; len[k] = l;
-        col += l; po = o; pr = r;
-    }
-    free(raw);
-    return nSeg;
-}
-
 // Universal-column index codec.  n anchors (col, file_pos), both STRICTLY
 // increasing in anchor order, so plain non-negative uvarint deltas (no
 // zigzag).  Two SoA streams C|F; header = uvarint(n), uvarint(|C bytes|);
-// one zlib deflate.  Mirrors encode_refseg.
+// one zlib deflate.  Same shape as encode_runs but tuned for the index pairs.
 static uint8_t *encode_idx(const int64_t *col, const int64_t *fpos, int64_t n,
                            int64_t *raw_len, int64_t *def_len) {
     uint8_t *C = st_malloc((size_t)(n * 10 + 1));
@@ -723,18 +609,14 @@ static void tui_cleanup(Phase1 *p1, SeqKey *seqks, int64_t n_seqs,
         remove((char *)stHash_search(p1->spill_path, gk));
     }
     stHash_destructIterator(hit);
-    if (p1->ref_fh != NULL) fclose(p1->ref_fh);          // error-path: still open
-    if (p1->ref_path != NULL) { remove(p1->ref_path); free(p1->ref_path); }
     if (p1->idx_fh != NULL) fclose(p1->idx_fh);
     if (p1->idx_path != NULL) { remove(p1->idx_path); free(p1->idx_path); }
-    if (p1->ro_open) free(p1->ro_seq);                   // error-path: open segment
     for (int64_t i = 0; i < n_seqs; i++) free(seqks[i].genome);  // .seq owned by seq_len
     free(seqks);
     stHash_destruct(p1->spill_fh);
     stHash_destruct(p1->spill_path);
     stHash_destruct(p1->seq_len);
     stList_destruct(p1->seq_keys);
-    stSet_destruct(p1->ref_genomes);
     if (tree_map != NULL) stHash_destruct(tree_map);
     free(eff_tmp);
 }
@@ -776,9 +658,7 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
     p1.spill_path = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, free, free);
     p1.seq_len = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, free, free);
     p1.seq_keys = stList_construct();
-    p1.ref_genomes = stSet_construct3(stHash_stringKey, stHash_stringEqualKey, free);
     p1.T = 0;
-    p1.ref_fh = NULL; p1.ref_path = NULL; p1.ro_seq = NULL; p1.ro_open = 0;
     p1.idx_fh = NULL; p1.idx_path = NULL; p1.idx_last_col = 0; p1.idx_n = 0;
 
     // idx_anchor captures the block's anchor offset itself (LI_get_position =
@@ -811,15 +691,9 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
         }
         if (p_aln != NULL) alignment_destruct(p_aln, 1);
     }
-    ref_flush(&p1);                       // flush the last open row-0 segment
     // fclose surfaces buffered short writes (e.g. disk full) -> fail loudly
     // here rather than emit a silently-truncated spill that Phase 2 would
-    // later misread as "not contiguous" / "corrupt spill line".
-    if (p1.ref_fh != NULL) {
-        if (fclose(p1.ref_fh) != 0) st_errAbort("tui: ref spill close failed "
-            "(disk full / write error) -- %s", p1.ref_path);
-        p1.ref_fh = NULL;
-    }
+    // later misread as "corrupt spill line".
     if (p1.idx_fh != NULL) {
         if (fclose(p1.idx_fh) != 0) st_errAbort("tui: idx spill close failed "
             "(disk full / write error) -- %s", p1.idx_path);
@@ -868,79 +742,6 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
     oneInt(of, 0) = p1.T;
     oneWriteLine(of, 't', 0, NULL);
 
-    // A: Index-A reference track.  Resolve each spilled row-0 segment's
-    // sequence name to its S-ordinal (== position in the sorted global order),
-    // then SoA delta+varint+deflate (colStart dropped = prefix sum of len).
-    time_t t_idxA_start = time(NULL);
-    st_logInfo("tui: Index A: encoding row-0 reference track\n");
-    stHash *name2ord = stHash_construct3(stHash_stringKey, stHash_stringEqualKey,
-                                         NULL, NULL);
-    for (int64_t i = 0; i < n_seqs; i++) {
-        stHash_insert(name2ord, seqks[i].seq, (void *)(intptr_t)(i + 1));
-    }
-    int64_t *segOrd = NULL, *segRow0 = NULL, *segLen = NULL, *segCol0 = NULL;
-    int64_t nSeg = 0, segCap = 0;
-    if (p1.ref_path != NULL) {
-        FILE *rf = fopen(p1.ref_path, "r");
-        if (rf == NULL) st_errAbort("tui: cannot reopen ref spill %s", p1.ref_path);
-        char line[16384], sbuf[8192];
-        int64_t c0, r0, ln, runcol = 0;
-        while (fgets(line, sizeof(line), rf) != NULL) {
-            if (sscanf(line, "%" SCNi64 "\t%8191s\t%" SCNi64 "\t%" SCNi64,
-                       &c0, sbuf, &r0, &ln) != 4) {
-                st_errAbort("tui: corrupt ref spill line: %s", line);
-            }
-            void *ov = stHash_search(name2ord, sbuf);
-            if (ov == NULL) st_errAbort("tui: ref seq '%s' not in directory", sbuf);
-            // segments must tile [0,T): colStart == running prefix sum of len
-            if (c0 != runcol) {
-                st_errAbort("tui: ref track not contiguous (seg colStart %"
-                            PRIi64 " != expected %" PRIi64 ")", c0, runcol);
-            }
-            runcol += ln;
-            if (nSeg == segCap) {
-                segCap = segCap ? segCap * 2 : 4096;
-                segOrd  = st_realloc(segOrd,  segCap * sizeof(int64_t));
-                segRow0 = st_realloc(segRow0, segCap * sizeof(int64_t));
-                segLen  = st_realloc(segLen,  segCap * sizeof(int64_t));
-                segCol0 = st_realloc(segCol0, segCap * sizeof(int64_t));
-            }
-            segCol0[nSeg] = c0;
-            segOrd[nSeg]  = (int64_t)(intptr_t)ov - 1;
-            segRow0[nSeg] = r0;
-            segLen[nSeg]  = ln;
-            nSeg++;
-        }
-        fclose(rf);
-    }
-    {
-        int64_t a_raw = 0, a_def = 0;
-        uint8_t *adef = encode_refseg(segOrd, segRow0, segLen, nSeg,
-                                      &a_raw, &a_def);
-        // self-check: decode must reproduce the segments (asserts on in taffy)
-        int64_t *cC = st_malloc((nSeg ? nSeg : 1) * sizeof(int64_t));
-        int64_t *cO = st_malloc((nSeg ? nSeg : 1) * sizeof(int64_t));
-        int64_t *cR = st_malloc((nSeg ? nSeg : 1) * sizeof(int64_t));
-        int64_t *cL = st_malloc((nSeg ? nSeg : 1) * sizeof(int64_t));
-        int64_t dn = decode_refseg(adef, a_def, a_raw, cC, cO, cR, cL);
-        assert(dn == nSeg);
-        for (int64_t k = 0; k < nSeg; k++) {
-            assert(cC[k] == segCol0[k] && cO[k] == segOrd[k] &&
-                   cR[k] == segRow0[k] && cL[k] == segLen[k]);
-        }
-        free(cC); free(cO); free(cR); free(cL);
-        oneInt(of, 0) = a_raw;
-        oneInt(of, 1) = nSeg;
-        oneWriteLine(of, 'A', a_def, adef);
-        st_logInfo("tui: Index A done in %" PRIi64 " seconds "
-                   "(%" PRIi64 " segments, %" PRIi64 " raw bytes, "
-                   "%" PRIi64 " deflated bytes)\n",
-                   (int64_t)(time(NULL) - t_idxA_start), nSeg, a_raw, a_def);
-        free(adef);
-    }
-    free(segOrd); free(segRow0); free(segLen); free(segCol0);
-    stHash_destruct(name2ord);
-
     // X: universal-column -> file_pos index (the .tai-equivalent).  Read the
     // column-ordered anchor spill, encode (deflated SoA), write one X line.
     time_t t_idxX_start = time(NULL);
@@ -982,17 +783,28 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
         free(xdef); free(ic); free(iff);
     }
 
-    // d: directory (front of file), S-ordinal == position in global order
+    // d: directory.  Written in NAME-sorted order (independent of the seqks
+    // genome-major order used for S/R), so the reader can binary-search the
+    // d-lines via oneGoto-by-index without preloading the directory.  The
+    // S-ordinal field still points back to the matching S object (== position
+    // in seqks).
     st_logInfo("tui: writing directory (%" PRIi64 " sequences across %" PRIi64
                " genomes)\n", n_seqs, n_genomes);
-    for (int64_t i = 0; i < n_seqs; i++) {
-        char *sk = seqks[i].seq;
-        int64_t slen = *(int64_t *)stHash_search(p1.seq_len, sk);
-        int is_ref = stSet_search(p1.ref_genomes, seqks[i].genome) != NULL ? 1 : 0;
-        oneInt(of, 1) = i;
-        oneInt(of, 2) = slen;
-        oneInt(of, 3) = is_ref;
-        oneWriteLine(of, 'd', strlen(sk), (void *)sk);
+    {
+        DKey *dks = st_malloc((n_seqs ? n_seqs : 1) * sizeof(DKey));
+        for (int64_t i = 0; i < n_seqs; i++) {
+            dks[i].idx = i; dks[i].name = seqks[i].seq;
+        }
+        qsort(dks, n_seqs, sizeof(DKey), dkey_cmp);
+        for (int64_t k = 0; k < n_seqs; k++) {
+            int64_t i = dks[k].idx;
+            char *sk = seqks[i].seq;
+            int64_t slen = *(int64_t *)stHash_search(p1.seq_len, sk);
+            oneInt(of, 1) = i;          // S-ord = position in seqks
+            oneInt(of, 2) = slen;
+            oneWriteLine(of, 'd', strlen(sk), (void *)sk);
+        }
+        free(dks);
     }
 
     // per genome: g + S/R objects.  seqks is sorted by the TRUE resolved
@@ -1106,24 +918,17 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
 }
 
 /////////////////////////////////////////////////////////////////////////////
-// Reader / query side (Index B).  Baseline: re-scan to find a sequence's R
-// blob, inflate+decode it, clip to the query interval.  Correctness first.
+// Reader / query side.  Open keeps only the small global state in RAM (T +
+// the X-anchor table); the directory and per-sequence runs stay on disk and
+// are resolved per query: binary-search the name-sorted d-lines via
+// oneGoto-by-index for the S-ordinal + seq length, then oneGoto on S to fetch
+// the matching R blob.  No directory hashes are built at open time.
 /////////////////////////////////////////////////////////////////////////////
 
 struct _Tui {
-    char   *path;       // .tui path (re-opened per query for now)
+    char   *path;       // .tui path (re-opened per query)
     int64_t T;          // total universal columns
-    stHash *seq_len;    // full "genome.sequence" -> int64_t* sequence length
-    stHash *name2ord;   // full "genome.sequence" -> (int64_t*)(intptr_t)(ord+1)
-                        // (NULL means absent; we store ord+1 so 0 maps to a
-                        // non-NULL pointer).  Lets tui_query jump directly to
-                        // the queried sequence's S/R pair via oneGoto, instead
-                        // of linearly scanning the entire container.
-    // Index-A reference track (column-ordered, tiles [0,T)).
-    int64_t *segCol0, *segOrd, *segRow0, *segLen;
-    int64_t  nSeg;
-    char   **ord2name;  // S-ordinal -> sequence name (we own the strings)
-    int64_t  nOrd;
+    int64_t n_d;        // number of d-lines (binary-search upper bound)
     // Universal-column -> file_pos index (X track); both strictly increasing.
     int64_t *idxCol, *idxFpos;
     int64_t  idxN;
@@ -1134,29 +939,16 @@ Tui *tui_load(const char *tui_path) {
     if (of == NULL) return NULL;
     Tui *tui = st_calloc(1, sizeof(Tui));
     tui->path = stString_copy(tui_path);
-    tui->seq_len = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, free, free);
-    // name2ord shares keys with seq_len's hash (so we pass NULL destructors;
-    // seq_len already owns the strings).  Values are (int64_t)(intptr_t)(ord+1).
-    tui->name2ord = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, NULL, NULL);
-    int64_t ord_cap = 0;
+    // Read only `t` and `X` (small, used by every query).  Stop before the
+    // d-lines.  The directory is left on disk -- tui_query binary-searches
+    // it per call (O(log n_d) seeks).
+    int seen_t = 0, seen_x = 0;
     char c;
-    while ((c = oneReadLine(of)) != 0) {
+    while (!(seen_t && seen_x) && (c = oneReadLine(of)) != 0) {
         if (c == 't') {
             tui->T = oneInt(of, 0);
-        } else if (c == 'A') {                 // Index-A: (rawLen, nSeg, deflate blob)
-            int64_t a_raw = oneInt(of, 0);
-            int64_t nSeg  = oneInt(of, 1);
-            int64_t a_def = oneLen(of);
-            const uint8_t *adef = (const uint8_t *)oneString(of);
-            int64_t cap = nSeg ? nSeg : 1;
-            tui->segCol0 = st_malloc(cap * sizeof(int64_t));
-            tui->segOrd  = st_malloc(cap * sizeof(int64_t));
-            tui->segRow0 = st_malloc(cap * sizeof(int64_t));
-            tui->segLen  = st_malloc(cap * sizeof(int64_t));
-            tui->nSeg = decode_refseg(adef, a_def, a_raw, tui->segCol0,
-                                      tui->segOrd, tui->segRow0, tui->segLen);
-            assert(tui->nSeg == nSeg);
-        } else if (c == 'X') {                 // univ-col index: (rawLen,n,blob)
+            seen_t = 1;
+        } else if (c == 'X') {
             int64_t x_raw = oneInt(of, 0);
             int64_t xn    = oneInt(of, 1);
             int64_t x_def = oneLen(of);
@@ -1166,45 +958,20 @@ Tui *tui_load(const char *tui_path) {
             tui->idxFpos = st_malloc(cap * sizeof(int64_t));
             tui->idxN = decode_idx(xdef, x_def, x_raw, tui->idxCol, tui->idxFpos);
             assert(tui->idxN == xn);
-        } else if (c == 'd') {                 // dir: name(STRING), ord, seqLen, isRef
-            int64_t n = oneLen(of);
-            char *nm = st_malloc(n + 1);
-            memcpy(nm, oneString(of), n);
-            nm[n] = '\0';
-            int64_t ord = oneInt(of, 1);
-            if (ord >= ord_cap) {
-                int64_t nc = ord_cap ? ord_cap * 2 : 1024;
-                while (nc <= ord) nc *= 2;
-                tui->ord2name = st_realloc(tui->ord2name, nc * sizeof(char *));
-                for (int64_t z = ord_cap; z < nc; z++) tui->ord2name[z] = NULL;
-                ord_cap = nc;
-            }
-            tui->ord2name[ord] = stString_copy(nm);
-            if (ord + 1 > tui->nOrd) tui->nOrd = ord + 1;
-            if (stHash_search(tui->seq_len, nm) == NULL) {
-                int64_t *v = st_malloc(sizeof(int64_t));
-                *v = oneInt(of, 2);
-                stHash_insert(tui->seq_len, nm, v);
-                stHash_insert(tui->name2ord, nm,
-                              (void *)(intptr_t)(ord + 1));
-            } else {
-                free(nm);
-            }
-        } else if (c == 'S') {
-            break;                              // directory precedes the objects
+            seen_x = 1;
         }
     }
+    // Directory size for the binary-search bound; populated from the file
+    // footer so it works regardless of how far we read above.
+    I64 nd = 0;
+    oneStats(of, 'd', &nd, NULL, NULL);
+    tui->n_d = nd;
     oneFileClose(of);
     return tui;
 }
 
 void tui_destruct(Tui *tui) {
     if (tui == NULL) return;
-    stHash_destruct(tui->name2ord);    // first: shares keys w/ seq_len, NULL destructors
-    stHash_destruct(tui->seq_len);
-    for (int64_t i = 0; i < tui->nOrd; i++) free(tui->ord2name[i]);
-    free(tui->ord2name);
-    free(tui->segCol0); free(tui->segOrd); free(tui->segRow0); free(tui->segLen);
     free(tui->idxCol); free(tui->idxFpos);
     free(tui->path);
     free(tui);
@@ -1212,8 +979,44 @@ void tui_destruct(Tui *tui) {
 
 int64_t tui_total_columns(const Tui *tui) { return tui->T; }
 
+// Binary-search the d-lines (name-sorted by the writer) for `seq_name`.
+// Returns the S-ordinal (0-indexed; position in the genome-major S/R order),
+// or -1 if not found.  Optionally fills *seqlen.
+// `of` must be a freshly opened (or otherwise idle) tui OneFile -- we move
+// its position via oneGoto.
+static int64_t tui_find_d(OneFile *of, int64_t n_d,
+                          const char *seq_name, int64_t *seqlen_out) {
+    int64_t lo = 1, hi = n_d;
+    // 8192 mirrors the writer's spill scanner "%8191s" upper bound -- the two
+    // sides need to move together if either gets bumped.
+    char buf[8192];
+    while (lo <= hi) {
+        int64_t mid = lo + (hi - lo) / 2;        // overflow-safe shape
+        if (!oneGoto(of, 'd', mid)) return -1;
+        if (oneReadLine(of) != 'd') return -1;
+        int64_t n = oneLen(of);
+        if (n < 0 || n >= (int64_t)sizeof(buf)) return -1;  // see size note above
+        memcpy(buf, oneString(of), (size_t)n);
+        buf[n] = '\0';
+        int cmp = strcmp(buf, seq_name);
+        if (cmp == 0) {
+            if (seqlen_out != NULL) *seqlen_out = oneInt(of, 2);
+            return oneInt(of, 1);
+        } else if (cmp < 0) {
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    return -1;
+}
+
 int tui_has_sequence(const Tui *tui, const char *seq_name) {
-    return stHash_search(tui->seq_len, (void *)seq_name) != NULL;
+    OneFile *of = oneFileOpenRead(tui->path, NULL, "tui", 1);
+    if (of == NULL) return 0;
+    int64_t ord = tui_find_d(of, tui->n_d, seq_name, NULL);
+    oneFileClose(of);
+    return ord >= 0 ? 1 : 0;
 }
 
 static int tui_iv_cmp(const void *a, const void *b) {
@@ -1224,17 +1027,15 @@ static int tui_iv_cmp(const void *a, const void *b) {
 TuiInterval *tui_query(Tui *tui, const char *seq_name,
                        int64_t start, int64_t end, int64_t *n_out) {
     *n_out = 0;
-    int64_t *expect = stHash_search(tui->seq_len, (void *)seq_name);
-    if (expect == NULL || start >= end) return NULL;
-
-    // O(1) ordinal lookup (vs the prior O(n_seqs) linear scan).  We stored
-    // ord+1 at load time so a 0-ord seq isn't confused with absent (NULL).
-    void *ov = stHash_search(tui->name2ord, (void *)seq_name);
-    if (ov == NULL) return NULL;
-    int64_t ord = (int64_t)(intptr_t)ov - 1;
+    if (start >= end) return NULL;
 
     OneFile *of = oneFileOpenRead(tui->path, NULL, "tui", 1);
     if (of == NULL) return NULL;
+
+    // Resolve name -> S-ordinal by binary-searching the (name-sorted) d-lines
+    // via oneGoto; O(log n_d) seeks, no preloaded directory hashes.
+    int64_t ord = tui_find_d(of, tui->n_d, seq_name, NULL);
+    if (ord < 0) { oneFileClose(of); return NULL; }
 
     // Jump straight to the (ord+1)-th S object via the ONElib footer index.
     // After the goto, oneReadLine() returns the S line, then the matching R
@@ -1243,8 +1044,8 @@ TuiInterval *tui_query(Tui *tui, const char *seq_name,
     int64_t *runs = NULL, m = 0;
     char c = oneReadLine(of);
     if (c != 'S') { oneFileClose(of); return NULL; }
-    // Sanity check the S name matches what we asked for (would only fail on
-    // a corrupted / wrongly-loaded directory).
+    // Sanity check the S name matches what the directory said (would only
+    // fail on a corrupted / wrongly-built .tui).
     int64_t sn = oneLen(of);
     if (sn != (int64_t)strlen(seq_name) ||
         memcmp(oneString(of), seq_name, sn) != 0) {
@@ -1294,53 +1095,6 @@ TuiInterval *tui_query(Tui *tui, const char *seq_name,
     }
     *n_out = w + 1;
     return iv;
-}
-
-// Index A: map universal-column intervals -> row-0 (ancestor) coordinate
-// pieces, using the explicit reference track.  segCol0 is sorted ascending
-// and the segments tile [0,T), so a column has exactly one segment (binary
-// search), and an interval spans a contiguous run of segments.  One input
-// interval can yield several pieces on DIFFERENT row-0 sequences/ancestors
-// (e.g. hg38.chr1:1-100 -> AncR..  + AncC..).  Returned array is in column
-// order; .seq points into tui->ord2name (do NOT free per piece -- free the
-// array only).  Strand is always '+' so the map is the affine
-// row0 = segRow0 + (col - segCol0).
-static int64_t tui_seg_find(const Tui *tui, int64_t col) {
-    int64_t lo = 0, hi = tui->nSeg - 1, ans = -1;
-    while (lo <= hi) {
-        int64_t mid = (lo + hi) / 2;
-        if (tui->segCol0[mid] <= col) { ans = mid; lo = mid + 1; }
-        else hi = mid - 1;
-    }
-    return ans;  // greatest seg with segCol0 <= col, or -1
-}
-
-TuiRef *tui_col_range_to_ref(const Tui *tui, const TuiInterval *uiv,
-                             int64_t n_uiv, int64_t *n_out) {
-    *n_out = 0;
-    if (tui->nSeg == 0 || n_uiv == 0) return NULL;
-    int64_t cap = 16, n = 0;
-    TuiRef *out = st_malloc(cap * sizeof(TuiRef));
-    for (int64_t q = 0; q < n_uiv; q++) {
-        int64_t a = uiv[q].start, b = uiv[q].end;     // [a, b) universal columns
-        int64_t s = tui_seg_find(tui, a);
-        if (s < 0) s = 0;                              // before first seg (shouldn't happen)
-        for (; s < tui->nSeg && tui->segCol0[s] < b; s++) {
-            int64_t segA = tui->segCol0[s];
-            int64_t segB = segA + tui->segLen[s];
-            int64_t ca = a > segA ? a : segA;
-            int64_t cb = b < segB ? b : segB;
-            if (ca >= cb) continue;                    // no overlap with this seg
-            if (n == cap) { cap *= 2; out = st_realloc(out, cap * sizeof(TuiRef)); }
-            out[n].seq   = tui->ord2name[tui->segOrd[s]];
-            out[n].start = tui->segRow0[s] + (ca - segA);
-            out[n].len   = cb - ca;
-            n++;
-        }
-    }
-    *n_out = n;
-    if (n == 0) { free(out); return NULL; }
-    return out;
 }
 
 /////////////////////////////////////////////////////////////////////////////
