@@ -1125,6 +1125,13 @@ struct _TuiExtractIt {
 // non-gap bases removed on the left, length = the non-gap bases kept (works
 // for '+' and '-' identically, as clip_alignment does).  src is unchanged so
 // multiple runs of one physical block stay independent.
+//
+// Note: emitted rows have l_row/r_row implicitly NULL (st_calloc).  This is
+// what makes the link-skip in tai_maf_read_block_nolink safe: nothing the
+// .tui extractor emits depends on adjacent-block linkage.  If you ever start
+// using l_row/r_row downstream of this function, you'll need to call
+// alignment_link_adjacent on the emitted chain yourself (or wire the
+// extractor back onto tai_maf_read_block).
 static Alignment *tui_subblock(const Alignment *src, int64_t j0, int64_t j1) {
     int64_t newcol = j1 - j0;
     Alignment *aln = st_calloc(1, sizeof(Alignment));

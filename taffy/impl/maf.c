@@ -28,13 +28,18 @@ static inline char *maf_tok_end(char *p) {
 // detection; MAF s-line integer fields are unsigned in practice and the
 // caller has already done maf_skip_ws.  On the 50 Mb fish profile, atoll +
 // strtoll were ~13% of CPU before this replacement.
+//
+// Accumulator is uint64_t so overflow is well-defined modulo 2^64 rather
+// than signed UB (atoll saturated at INT64_MAX -- this matches that for
+// values up to INT64_MAX; larger inputs wrap, which the caller is expected
+// to bound via MAF being well-formed).
 static inline char *maf_parse_u64(char *p, int64_t *out) {
-    int64_t v = 0;
+    uint64_t v = 0;
     while ((unsigned)(*p - '0') < 10u) {
-        v = v * 10 + (*p - '0');
+        v = v * 10u + (uint64_t)(*p - '0');
         ++p;
     }
-    *out = v;
+    *out = (int64_t)v;
     return p;
 }
 
@@ -166,14 +171,19 @@ static inline int maf_i64_str(int64_t v, char *buf) {
 }
 
 // Write `n` bytes to the LW, routing to bgzf or fh as the LW was opened with.
-// Return values are discarded with the same fail-loud convention as LW_write
-// (which also doesn't check), since downstream errors surface as a truncated
-// output file -- cheap to detect with md5sum, easier than threading errors.
-static inline void maf_lw_putn(LW *lw, const char *buf, int n) {
+// The bgzf branch matches LW_write's assert-on-short-write convention from
+// line_iterator.c.  fwrite's return is intentionally discarded -- LW_write
+// doesn't check it either, and any failure surfaces as a truncated output
+// file (md5sum-detectable) rather than a leaked error.
+//
+// n is size_t (not int) because column_number is int64_t in Alignment and we
+// were silently truncating very large columns through the (int) cast at the
+// call site.
+static inline void maf_lw_putn(LW *lw, const char *buf, size_t n) {
 #ifdef USE_HTSLIB
     if (lw->bgzf) {
         ssize_t r = bgzf_write(lw->bgzf, buf, n);
-        (void)r;   // suppress -Wunused-result
+        assert(r >= 0 && (size_t)r == n);
         return;
     }
 #endif
@@ -204,12 +214,14 @@ void maf_write_block2(Alignment *alignment, LW *lw, bool color_bases) {
             continue;
         }
         // Compose the preamble: "s\t<name>\t<start>\t<length>\t<strand>\t<seqLen>\t"
-        // 1024 covers sequence_name plus six small ints; we fall back to the
-        // slow path defensively if a name ever exceeds that (it shouldn't).
+        // Worst-case bytes written: 2 ('s'\t) + name_n + 5 ('\t' × 5) + 1
+        // (strand char) + 3 × 20 (max int64 decimal width including sign) = 68
+        // + name_n.  Budget 80 + name_n against 1024 so any name shorter than
+        // 944 chars takes the fast path; longer names fall back to LW_write.
         char pre[1024];
         const char *name = row->sequence_name;
         size_t name_n = strlen(name);
-        if (name_n + 64 >= sizeof(pre)) {
+        if (name_n + 80 >= sizeof(pre)) {
             LW_write(lw, "s\t%s\t%" PRIi64 "\t%" PRIi64 "\t%s\t%" PRIi64 "\t%s\n",
                      name, row->start, row->length,
                      row->strand ? "+" : "-", row->sequence_length, row->bases);
@@ -224,8 +236,8 @@ void maf_write_block2(Alignment *alignment, LW *lw, bool color_bases) {
         pre[k++] = row->strand ? '+' : '-'; pre[k++] = '\t';
         k += maf_i64_str(row->sequence_length, pre + k); pre[k++] = '\t';
 
-        maf_lw_putn(lw, pre, k);
-        maf_lw_putn(lw, row->bases, (int)cn);
+        maf_lw_putn(lw, pre, (size_t)k);
+        maf_lw_putn(lw, row->bases, (size_t)cn);
         maf_lw_putn(lw, "\n", 1);
         row = row->n_row;
     }
