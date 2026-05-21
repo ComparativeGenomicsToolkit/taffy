@@ -5,64 +5,115 @@
 #include "sonLib.h"
 #include "line_iterator.h"
 
+// Skip ' ' and '\t' (the only whitespace MAF uses inside a line).  LI strips
+// the trailing newline already so we don't need to worry about \r/\n here.
+static inline char *maf_skip_ws(char *p) {
+    while (*p == ' ' || *p == '\t') ++p;
+    return p;
+}
+
+// Find the end of the current token (first whitespace or NUL) and return a
+// pointer to it.  Caller is responsible for advancing past it.
+static inline char *maf_tok_end(char *p) {
+    while (*p && *p != ' ' && *p != '\t') ++p;
+    return p;
+}
+
 Alignment *maf_read_block(LI *li) {
-    while(1) {
+    // Outer loop: skip blank/comment lines until we find an 'a' block start.
+    // Inner loop (entered on 'a'): consume successive 's' rows in place, then
+    // return the alignment when we hit a blank line or EOF.
+    //
+    // The fast path tokenises each row in place on the LI-owned buffer
+    // (no stString_split / stList / per-token malloc/free pairs).  Only
+    // sequence_name and bases are heap-copied -- they're the only fields
+    // we keep beyond the line's lifetime.  See the older stList-based
+    // version in git history if you need to compare semantics.
+    while (1) {
         char *line = LI_get_next_line(li);
-        if(line == NULL) {
-            return NULL;
-        }
-        stList *tokens = stString_split(line);
+        if (line == NULL) return NULL;
+        char *p = maf_skip_ws(line);
+        if (*p == '\0') { free(line); continue; }            // blank line
+        if (*p != 'a') { free(line); continue; }             // header / comment / non-block
         free(line);
-        if(stList_length(tokens) == 0) {
-            stList_destruct(tokens);
-            continue;
-        }
-        if(strcmp(stList_get(tokens, 0), "a") == 0) { // If is an "a" line
-            stList_destruct(tokens);
-            Alignment *alignment = st_calloc(1, sizeof(Alignment));
-            Alignment_Row **p_row = &(alignment->row);
-            while(1) {
-                line = LI_get_next_line(li);
-                if(line == NULL) {
-                    return alignment;
-                }
-                tokens = stString_split(line);
-                free(line);
-                if(stList_length(tokens) == 0) {
-                    stList_destruct(tokens);
-                    return alignment;
-                }
-                if(strcmp(stList_get(tokens, 0), "s") != 0) {
-                    assert(strcmp(stList_get(tokens, 0), "i") == 0 || strcmp(stList_get(tokens, 0), "e") == 0); // Must be an "i" or "e" line, which we ignore
-                    stList_destruct(tokens);
-                    continue;
-                }
-                assert(strcmp(stList_get(tokens, 0), "s") == 0); // Must be an "s" line
-                Alignment_Row *row = st_calloc(1, sizeof(Alignment_Row));
-                alignment->row_number++;
-                *p_row = row;
-                p_row = &(row->n_row);
-                row->sequence_name = stString_copy(stList_get(tokens, 1));
-                row->start = atol(stList_get(tokens, 2));
-                row->length = atol(stList_get(tokens, 3));
-                assert(strcmp(stList_get(tokens, 4), "+") == 0 || strcmp(stList_get(tokens, 4), "-") == 0);
-                row->strand = strcmp(stList_get(tokens, 4), "+") == 0;
-                row->sequence_length = atol(stList_get(tokens, 5));
-                row->bases = stString_copy(stList_get(tokens, 6));
-                stList_destruct(tokens);
-                if(alignment->row_number == 1) {
-                    alignment->column_number = strlen(row->bases);
-                    alignment->column_tags = st_calloc(alignment->column_number, sizeof(Tag *));
-                }
-                else {
-                    assert(alignment->column_number == strlen(row->bases));
-                }
+
+        Alignment *alignment = st_calloc(1, sizeof(Alignment));
+        Alignment_Row **p_row = &(alignment->row);
+
+        while (1) {
+            line = LI_get_next_line(li);
+            if (line == NULL) return alignment;              // EOF mid-block
+            p = maf_skip_ws(line);
+            if (*p == '\0') { free(line); return alignment; }  // blank line ends block
+            if (*p == 'i' || *p == 'e') { free(line); continue; }
+            if (*p != 's') {
+                // Unrecognised line (could be a '##' comment in the middle of
+                // a block).  Original parser ignored these.  Do the same.
+                free(line); continue;
             }
-            return alignment;
-        }
-        else {
-            assert(strcmp(stList_get(tokens, 0), "s") != 0); // Can not be an s line without a prior a line - we will ignore this line
-            stList_destruct(tokens);
+
+            // 's' line: in-place tokenise.  Format:
+            //   s  <name>  <start>  <length>  <strand>  <seqLen>  <bases>
+            ++p;                                              // skip 's'
+            p = maf_skip_ws(p);
+
+            char *name = p;
+            p = maf_tok_end(p);
+            if (*p == '\0') { free(line); continue; }
+            *p++ = '\0';                                      // terminate name
+
+            p = maf_skip_ws(p);
+            int64_t start = atoll(p);
+            p = maf_tok_end(p);
+            if (*p == '\0') { free(line); continue; }
+            *p++ = '\0';
+
+            p = maf_skip_ws(p);
+            int64_t length = atoll(p);
+            p = maf_tok_end(p);
+            if (*p == '\0') { free(line); continue; }
+            *p++ = '\0';
+
+            p = maf_skip_ws(p);
+            assert(*p == '+' || *p == '-');
+            bool strand = (*p == '+');
+            ++p;
+            if (*p != ' ' && *p != '\t') { free(line); continue; }  // malformed
+            p = maf_skip_ws(p);
+
+            int64_t seq_length = atoll(p);
+            p = maf_tok_end(p);
+            if (*p == '\0') { free(line); continue; }
+            *p++ = '\0';
+
+            p = maf_skip_ws(p);
+            char *bases_start = p;
+            // Bases run to end-of-line.  LI strips '\n' but be defensive about
+            // trailing whitespace (some MAFs have stray spaces post-bases).
+            char *bases_end = p + strlen(p);
+            while (bases_end > bases_start && (bases_end[-1] == ' ' || bases_end[-1] == '\t'))
+                --bases_end;
+            *bases_end = '\0';
+            int64_t cn = bases_end - bases_start;
+
+            Alignment_Row *row = st_calloc(1, sizeof(Alignment_Row));
+            alignment->row_number++;
+            *p_row = row;
+            p_row = &(row->n_row);
+            row->sequence_name   = stString_copy(name);
+            row->start           = start;
+            row->length          = length;
+            row->strand          = strand;
+            row->sequence_length = seq_length;
+            row->bases           = stString_copy(bases_start);
+            free(line);
+
+            if (alignment->row_number == 1) {
+                alignment->column_number = cn;
+                alignment->column_tags = st_calloc(alignment->column_number, sizeof(Tag *));
+            } else {
+                assert(alignment->column_number == cn);
+            }
         }
     }
 }
