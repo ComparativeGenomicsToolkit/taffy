@@ -22,6 +22,22 @@ static inline char *maf_tok_end(char *p) {
     return p;
 }
 
+// Parse a non-negative decimal integer from `p` into `*out`.  Returns the
+// pointer to the first non-digit character (typically whitespace or NUL).
+// Faster than atoll because it skips strtoll's locale, sign, and base
+// detection; MAF s-line integer fields are unsigned in practice and the
+// caller has already done maf_skip_ws.  On the 50 Mb fish profile, atoll +
+// strtoll were ~13% of CPU before this replacement.
+static inline char *maf_parse_u64(char *p, int64_t *out) {
+    int64_t v = 0;
+    while ((unsigned)(*p - '0') < 10u) {
+        v = v * 10 + (*p - '0');
+        ++p;
+    }
+    *out = v;
+    return p;
+}
+
 Alignment *maf_read_block(LI *li) {
     // Outer loop: skip blank/comment lines until we find an 'a' block start.
     // Inner loop (entered on 'a'): consume successive 's' rows in place, then
@@ -66,16 +82,16 @@ Alignment *maf_read_block(LI *li) {
             *p++ = '\0';                                      // terminate name
 
             p = maf_skip_ws(p);
-            int64_t start = atoll(p);
-            p = maf_tok_end(p);
+            int64_t start;
+            p = maf_parse_u64(p, &start);
             if (*p == '\0') { free(line); continue; }
-            *p++ = '\0';
+            ++p;
 
             p = maf_skip_ws(p);
-            int64_t length = atoll(p);
-            p = maf_tok_end(p);
+            int64_t length;
+            p = maf_parse_u64(p, &length);
             if (*p == '\0') { free(line); continue; }
-            *p++ = '\0';
+            ++p;
 
             p = maf_skip_ws(p);
             assert(*p == '+' || *p == '-');
@@ -84,10 +100,10 @@ Alignment *maf_read_block(LI *li) {
             if (*p != ' ' && *p != '\t') { free(line); continue; }  // malformed
             p = maf_skip_ws(p);
 
-            int64_t seq_length = atoll(p);
-            p = maf_tok_end(p);
+            int64_t seq_length;
+            p = maf_parse_u64(p, &seq_length);
             if (*p == '\0') { free(line); continue; }
-            *p++ = '\0';
+            ++p;
 
             p = maf_skip_ws(p);
             char *bases_start = p;
