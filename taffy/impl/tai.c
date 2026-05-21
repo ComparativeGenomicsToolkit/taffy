@@ -374,11 +374,14 @@ Tai *tai_load(FILE* idx_fh, bool maf) {
     return tai;
 }
 
-// dummy function to let us toggle between maf/taf reading at runtime (by providing a
-// maf reader with same interface as taf reader)
-static Alignment *maf_read_block_3(Alignment *p_block, bool run_length_encode_bases, LI *li) {
+// MAF block reader with optional WFA-based adjacent-row linking.  link==1 is
+// the .tai default (downstream consumers may use l_row/r_row).  link==0 skips
+// the alignment_link_adjacent call -- on a 1 Mb fish query that call was 19%
+// of CPU (the WFA chain underneath it) just to populate per-row neighbour
+// pointers that the .tui column-scan extractor never reads.
+static Alignment *maf_read_block_3(Alignment *p_block, bool run_length_encode_bases, LI *li, int link) {
     Alignment *alignment = maf_read_block(li);
-    if(p_block != NULL && alignment != NULL) {
+    if(p_block != NULL && alignment != NULL && link) {
         alignment_link_adjacent(p_block, alignment, 1);
     }
     return alignment;
@@ -388,7 +391,10 @@ static Alignment *maf_read_block_3(Alignment *p_block, bool run_length_encode_ba
 // same TAF-resync and MAF-read implementation as .tai (one source of truth).
 void tai_resync_taf_line(char *line) { change_s_coordinates_to_i(line); }
 Alignment *tai_maf_read_block(Alignment *p_block, bool run_length_encode_bases, LI *li) {
-    return maf_read_block_3(p_block, run_length_encode_bases, li);
+    return maf_read_block_3(p_block, run_length_encode_bases, li, /*link=*/1);
+}
+Alignment *tai_maf_read_block_nolink(Alignment *p_block, bool run_length_encode_bases, LI *li) {
+    return maf_read_block_3(p_block, run_length_encode_bases, li, /*link=*/0);
 }
 int tai_taf_line_is_anchor(stList *tokens, bool run_length_encode_bases) {
     int64_t start; bool strand;
@@ -456,7 +462,7 @@ TaiIt *tai_iterator(Tai* tai, LI *li, bool run_length_encode_bases, const char *
     LI_get_next_line(li);
 
     // all maf / taf logic toggling is handled right here
-    Alignment* (*maftaf_read_block)(Alignment*, bool, LI*) = maf_read_block_3;
+    Alignment* (*maftaf_read_block)(Alignment*, bool, LI*) = tai_maf_read_block;
     if (!tai_it->maf) {
         maftaf_read_block = taf_read_block;
         // force taf to start a new alignment at our current file position by making
@@ -635,7 +641,7 @@ Alignment *tai_next(TaiIt *tai_it, LI *li) {
     // save this alignment, it's what we're gonna return
     tai_it->p_alignment = tai_it->alignment;
 
-    Alignment* (*maftaf_read_block)(Alignment*, bool, LI*) = maf_read_block_3;
+    Alignment* (*maftaf_read_block)(Alignment*, bool, LI*) = tai_maf_read_block;
     if (!tai_it->maf) {
         maftaf_read_block = taf_read_block;
     }
@@ -688,7 +694,7 @@ stHash *tai_sequence_lengths(Tai *tai, LI *li) {
     }
     tag_destruct(tag);
 
-    Alignment* (*maftaf_read_block)(Alignment*, bool, LI*) = maf_read_block_3;
+    Alignment* (*maftaf_read_block)(Alignment*, bool, LI*) = tai_maf_read_block;
     if (!tai->maf) {
         maftaf_read_block = taf_read_block;
     }

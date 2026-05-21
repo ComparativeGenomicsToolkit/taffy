@@ -1246,7 +1246,12 @@ TuiExtractIt *tui_extract_iterator(Tui *tui, LI *li, int is_maf, bool rle,
     it->tui = tui;
     it->is_maf = is_maf;
     it->rle = rle;
-    it->readblk = is_maf ? tai_maf_read_block : taf_read_block;
+    // _nolink: the extractor emits whole MAF blocks and never reads the
+    // per-row l_row/r_row neighbour pointers that alignment_link_adjacent
+    // would populate.  Skipping that step removes ~19% of CPU on the fish
+    // 1 Mb profile (the WFA chain underneath).  taf_read_block doesn't run
+    // alignment_link_adjacent itself, so the TAF side stays as-is.
+    it->readblk = is_maf ? tai_maf_read_block_nolink : taf_read_block;
     if (n_iv <= 0 || tui->idxN == 0) return it;        // empty iterator
     it->iv = st_malloc((size_t)n_iv * sizeof(TuiInterval));
     memcpy(it->iv, iv, (size_t)n_iv * sizeof(TuiInterval));

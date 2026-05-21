@@ -131,6 +131,14 @@ void tai_resync_taf_line(char *line);
 /* maf_read_block + adjacent-block linking (NULL p_block -> fresh start). */
 Alignment *tai_maf_read_block(Alignment *p_block, bool run_length_encode_bases, LI *li);
 
+/* maf_read_block WITHOUT adjacent-block linking.  Skips the WFA-based
+ * alignment_link_adjacent call inside maf_read_block_3 -- on a 1 Mb fish
+ * tui query that call was ~19% of CPU just populating per-row l_row/r_row
+ * pointers that downstream callers (e.g. the .tui column-scan extractor
+ * that emits whole MAF blocks) never read.  Otherwise identical to
+ * tai_maf_read_block. */
+Alignment *tai_maf_read_block_nolink(Alignment *p_block, bool run_length_encode_bases, LI *li);
+
 /*
  * 1 iff this split TAF line is a valid random-access anchor: it carries a
  * coordinate for EVERY row (all-'i' first line, or an all-'s' repeat-
