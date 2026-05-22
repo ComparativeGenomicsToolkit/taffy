@@ -258,3 +258,74 @@ def test_reverse_paralog_strand_flip(tmp_path):
     got = set(_read_wig(out_wig))
     expected = {('simMouse.chr6', 495907), ('simMouse.chr6', 441670)}
     assert got == expected
+
+
+# ---------------------------------------------------------------------------
+# Wig-parser edge cases
+# ---------------------------------------------------------------------------
+
+def test_lift_input_position_0(tmp_path):
+    """Regression: an input wig record at ancestor coord 0 must lift, not be
+    silently dropped.  Earlier wig_parse stored coordinates as (void*)pos
+    in an stHash and (void*)0 collided with the iterator's end sentinel,
+    so any wig record at pos 0 vanished.  The streaming parser doesn't
+    use stHash, but pin the behaviour with a test."""
+    in_wig  = str(tmp_path / 'pos0.wig')
+    out_wig = str(tmp_path / 'pos0.out.wig')
+    # variableStep at pos 1 (1-based) == ancestor coord 0
+    with open(in_wig, 'w') as f:
+        f.write('variableStep chrom=Anc0.Anc0refChr0\n')
+        f.write('1 1.0\n')
+    run(TAFFY, 'lift', '-i', UNI_MAF, '-w', in_wig, '-g', 'simHuman_chr6', '-o', out_wig)
+    got = _read_wig(out_wig)
+    # From the simple block (chr6:0-4): Anc0.Anc0refChr0:0 column lifts to
+    # exactly one simHuman position: simHuman.chr6:0.
+    assert got == [('simHuman.chr6', 0)], (
+        f"expected [(simHuman.chr6, 0)], got {got}")
+
+
+def test_lift_fixedstep_wig(tmp_path):
+    """A fixedStep wig input must lift the same way as the equivalent
+    variableStep wig.  Exercises a separate parser code path."""
+    out_var   = str(tmp_path / 'var.out.wig')
+    out_fixed = str(tmp_path / 'fixed.out.wig')
+
+    var_wig = str(tmp_path / 'var.wig')
+    _write_wig(var_wig, REF_SEQ_FULL, [0, 1, 2, 3])
+    run(TAFFY, 'lift', '-i', UNI_MAF, '-w', var_wig, '-g', 'simMouse_chr6', '-o', out_var)
+
+    fixed_wig = str(tmp_path / 'fixed.wig')
+    with open(fixed_wig, 'w') as f:
+        f.write(f'fixedStep chrom={REF_SEQ_FULL} start=1 step=1\n')
+        for _ in range(4):
+            f.write('1.0\n')
+    run(TAFFY, 'lift', '-i', UNI_MAF, '-w', fixed_wig, '-g', 'simMouse_chr6', '-o', out_fixed)
+
+    assert _read_wig(out_var) == _read_wig(out_fixed)
+    # Sanity: the four simHuman positions 0..3 map to simMouse 0..3 (the
+    # simple-block alignment is 1:1 forward on this prefix).
+    assert _read_wig(out_fixed) == [('simMouse.chr6', i) for i in range(4)]
+
+
+def test_lift_multichrom_wig(tmp_path):
+    """A wig that switches between two ancestor chroms exercises the
+    source-seq cache refresh in taf_lift.c: when a new `variableStep
+    chrom=...` line is seen, the previous cached run table must be
+    flushed and the new one loaded.  Both sources align to the same
+    simMouse column (simMouse.chr6:0) so we expect TWO output records
+    pointing there (one per input record, not merged)."""
+    in_wig  = str(tmp_path / 'multi.wig')
+    out_wig = str(tmp_path / 'multi.out.wig')
+    # Two source chroms, one record each.  Both lift to the same simMouse
+    # column because Anc0.Anc0refChr0:0, simHuman.chr6:0, and simMouse.chr6:0
+    # are all at the same universal column (the simple block at chr6:0-4).
+    with open(in_wig, 'w') as f:
+        f.write('variableStep chrom=Anc0.Anc0refChr0\n')
+        f.write('1 1.0\n')
+        f.write(f'variableStep chrom={REF_SEQ_FULL}\n')
+        f.write('1 1.0\n')
+    run(TAFFY, 'lift', '-i', UNI_MAF, '-w', in_wig, '-g', 'simMouse_chr6', '-o', out_wig)
+    got = _read_wig(out_wig)
+    assert len(got) == 2, f"expected 2 records (one per source), got {len(got)}: {got}"
+    assert all(p == ('simMouse.chr6', 0) for p in got), (
+        f"both sources should lift to simMouse.chr6:0; got {got}")

@@ -161,7 +161,16 @@ int taf_lift_main(int argc, char *argv[]) {
                 if (eq) {
                     *eq = '\0';
                     char *key = tok, *val = eq + 1;
-                    if      (strcmp(key, "chrom") == 0) chrom = val;
+                    if      (strcmp(key, "chrom") == 0) {
+                        // strdup immediately: val points into the line buffer,
+                        // and the *p++ = saved restoration below would put the
+                        // original whitespace back over val's NUL terminator
+                        // -- after which val would read past its intended end
+                        // (e.g. on "chrom=X start=1 step=1", val would become
+                        // "X start=1 step=1" once we restore the separator).
+                        free(chrom);
+                        chrom = stString_copy(val);
+                    }
                     else if (strcmp(key, "start") == 0) fs_start = atoll(val);
                     else if (strcmp(key, "step")  == 0) fs_step  = atoll(val);
                     // span is intentionally ignored for now; the writer that
@@ -173,8 +182,10 @@ int taf_lift_main(int argc, char *argv[]) {
             wig_fixed   = is_fixed;
             wig_fs_pos  = fs_start - 1;   // 1-based -> 0-based
             wig_fs_step = fs_step;
+            // `chrom` is already a heap copy (strdup'd from the line buffer
+            // at parse time); move ownership directly into wig_chrom.
             free(wig_chrom);
-            wig_chrom = chrom ? stString_copy(chrom) : NULL;
+            wig_chrom = chrom;
             // Refresh the cached source-seq runs on chrom change.
             if (wig_chrom != NULL &&
                 (cur_seq == NULL || strcmp(wig_chrom, cur_seq) != 0)) {
