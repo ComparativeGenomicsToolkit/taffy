@@ -116,6 +116,7 @@ taf_lift.o : taf_lift.c ${stTafDependencies} ${libHeaders}
 test : all ${BINDIR}/stTafTests
 	${BINDIR}/stTafTests
 	tests/tai/test_tai.py
+	tests/tui/test_tui.py
 
 python_test: all ${BINDIR}/stTafTests
 	cd tests && python3 taffyTest.py
