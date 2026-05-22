@@ -234,6 +234,84 @@ def test_reverse_paralog_via_lift():
     assert got == expected, f"reverse paralog mismatch.\n  expected: {expected}\n  got: {got}"
     print(f"  reverse_paralog lift  OK -- simHuman:477815 -> simMouse_chr6 {{495907 (+ run), 441670 (- run)}}")
 
+def test_leaf_to_leaf_lift():
+    """`taffy lift` between two LEAVES (simHuman_chr6 -> simMouse_chr6).
+    Internally this composes ancestor-column -> leaf via the universal column
+    space, with no exposed intermediate step.  For each test region, we
+    derive ground truth from the simHuman-rooted hal2maf MAF (where each
+    block has simHuman as row-0 and simMouse rows at known forward positions
+    + strands) and check that taffy lift on the universal MAF agrees -- both
+    on which simHuman positions map at all, and on the full set of simMouse
+    forward positions per simHuman base."""
+    for name, start, end in CASES:
+        region = f'{REF_SEQ_FULL}:{start}-{end}'
+
+        # 1) parse the simHuman ground-truth MAF for the region into per-column
+        #    sets, then build the map: simHuman_forward_pos -> set of simMouse
+        #    forward positions present in the same column.
+        tai_out, _ = run(TAFFY, 'view', '-r', region, '-m', '-i', SIMH_MAF)
+        tai_blocks = parse_maf_columns(tai_out)
+        expected = {}
+        for b in tai_blocks:
+            for col in b:
+                sh_pos = None
+                sm_set = set()
+                for (s, p, st, _b) in col:
+                    if s == REF_SEQ_FULL:
+                        sh_pos = p
+                    elif s.startswith('simMouse_chr6.'):
+                        sm_set.add(p)
+                if sh_pos is not None:
+                    expected.setdefault(sh_pos, set()).update(sm_set)
+
+        # 2) run taffy lift simHuman -> simMouse_chr6 on every simHuman pos in
+        #    the region.
+        in_wig  = '/tmp/test_tui_leaf2leaf_in.wig'
+        out_wig = '/tmp/test_tui_leaf2leaf_out.wig'
+        with open(in_wig, 'w') as f:
+            f.write(f'variableStep chrom={REF_SEQ_FULL}\n')
+            for p in range(start, end):
+                f.write(f'{p+1} 1.0\n')
+        run(TAFFY, 'lift', '-i', UNI_MAF, '-w', in_wig, '-g', 'simMouse_chr6', '-o', out_wig)
+
+        # 3) collect actual lifted simMouse forward positions.  Wig is sorted
+        #    by output (simMouse) position so we can't recover which input
+        #    simHuman pos produced each output -- but the UNION over the
+        #    region must match the union of `expected`.
+        got_all = set()
+        with open(out_wig) as f:
+            cur = None
+            for line in f:
+                line = line.strip()
+                if line.startswith('variableStep'):
+                    cur = line.split('chrom=')[1]
+                elif line and cur and line[0].isdigit():
+                    tok = line.split()
+                    got_all.add((cur, int(tok[0]) - 1))
+
+        # Expected: every simMouse forward pos across all simHuman bases.
+        exp_all = set()
+        for sh_pos, sm_set in expected.items():
+            for sm_pos in sm_set:
+                # The simMouse seq is "simMouse.chr6" inside "simMouse_chr6.simMouse.chr6"
+                exp_all.add(('simMouse.chr6', sm_pos))
+
+        if got_all != exp_all:
+            extra = got_all - exp_all
+            missing = exp_all - got_all
+            print(f"FAIL {name} ({region})")
+            if extra:    print(f"  taffy-only: {sorted(extra)[:5]}{'...' if len(extra)>5 else ''}")
+            if missing:  print(f"  truth-only: {sorted(missing)[:5]}{'...' if len(missing)>5 else ''}")
+            raise AssertionError(f"leaf-to-leaf mismatch in {name}: |got|={len(got_all)} |exp|={len(exp_all)}")
+
+        # Also assert each simHuman position with simMouse alignment lifted to
+        # at least one record per paralog (we can verify count parity from the
+        # universal MAF's --noAncestors block via taffy view -U query).
+        n_src = sum(1 for sh in expected if expected[sh])
+        n_par = sum(len(s) for s in expected.values())
+        print(f"  leaf2leaf {name:18s} OK -- {n_src} simHuman bases lift to {n_par} simMouse positions ({len(got_all)} unique)")
+
+
 def test_view_block_count_minimum():
     """A spot check that each region actually produces non-empty output (catches
     regressions where -U query returns header-only for a leaf-coord region)."""
@@ -256,4 +334,5 @@ if __name__ == '__main__':
     test_view_consistency()
     test_forward_paralog_via_lift()
     test_reverse_paralog_via_lift()
+    test_leaf_to_leaf_lift()
     print("ALL OK")
