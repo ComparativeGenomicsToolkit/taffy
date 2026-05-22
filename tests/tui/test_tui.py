@@ -307,6 +307,97 @@ def test_lift_fixedstep_wig(tmp_path):
     assert _read_wig(out_fixed) == [('simMouse.chr6', i) for i in range(4)]
 
 
+def test_view_tcol_round_trip(tmp_path):
+    """`taffy view -U tcol` prepends a `s tcol <col> ...` sentinel row to every
+    emitted block.  Querying via that column with `-r tcol:N-N+1` must return
+    the same block (modulo headers) as querying via the leaf coord that
+    points at the same column."""
+    # 1) Get the universal column for simHuman:0 via -U tcol.
+    out1, _ = run(TAFFY, 'view', '-U', 'tcol', '-r', f'{REF_SEQ_FULL}:0-1', '-m', '-i', UNI_MAF)
+    tcol_row = next((L for L in out1.splitlines() if L.startswith('s\ttcol\t')), None)
+    assert tcol_row is not None, "no `tcol` sentinel row in -U tcol output"
+    parts = tcol_row.split('\t')
+    col, length = int(parts[2]), int(parts[3])
+    assert length == 1, f"expected single-column query, got tcol length {length}"
+
+    # 2) Re-query directly by column with `-r tcol:N-N+1`.  Should return the
+    #    same block contents (rows, positions, bases) as the leaf-coord query
+    #    above.
+    out2, _ = run(TAFFY, 'view', '-U', 'tcol', '-r', f'tcol:{col}-{col+1}', '-m', '-i', UNI_MAF)
+
+    # Compare per-column LEAF sets (column-keyed, row-order-agnostic, ignores
+    # the prepended `tcol` sentinel which is identical in both outputs).
+    assert _leaf_cols(parse_maf_columns(out1)) == _leaf_cols(parse_maf_columns(out2))
+
+
+def test_lift_unknown_target_genome(tmp_path):
+    """`taffy lift -g BogusGenome` must exit non-zero with a useful stderr
+    message -- not segfault, hang, or quietly emit empty output that the
+    caller would silently consume."""
+    in_wig = str(tmp_path / 'in.wig')
+    _write_wig(in_wig, REF_SEQ_FULL, [0])
+    p = subprocess.run(
+        [TAFFY, 'lift', '-i', UNI_MAF, '-w', in_wig, '-g', 'NoSuchGenome',
+         '-o', str(tmp_path / 'out.wig')],
+        capture_output=True, text=True)
+    assert p.returncode != 0, (
+        f"expected non-zero exit for unknown target genome, "
+        f"got rc={p.returncode}, stderr={p.stderr!r}")
+    assert 'NoSuchGenome' in p.stderr or 'not found' in p.stderr.lower(), (
+        f"stderr should mention the offending genome or 'not found'; "
+        f"got: {p.stderr!r}")
+
+
+def test_lift_identity_simhuman_to_simhuman(tmp_path):
+    """For every simHuman input position that's aligned in the universal
+    MAF, lifting back to simHuman must include that same position in the
+    output (possibly with extra paralog records at the same column).
+    Positions that don't appear in the alignment (lineage-specific
+    insertions) are excluded -- they legitimately produce no output."""
+    # Drawn from CASES: each starts a block whose simHuman row appears.
+    positions = [c.values[1] for c in CASES]   # 0, 7659, 187350, 477815
+    in_wig  = str(tmp_path / 'in.wig')
+    out_wig = str(tmp_path / 'out.wig')
+    _write_wig(in_wig, REF_SEQ_FULL, positions)
+    run(TAFFY, 'lift', '-i', UNI_MAF, '-w', in_wig, '-g', REF_GENOME, '-o', out_wig)
+    got = {p for (_seq, p) in _read_wig(out_wig)}
+    missing = set(positions) - got
+    assert not missing, (
+        f"identity lift dropped {len(missing)} simHuman position(s): "
+        f"{sorted(missing)}")
+
+
+def test_view_empty_and_out_of_range(tmp_path):
+    """Region-parsing edge cases on the .tui code path:
+      * a zero-length region (start == end) is intentionally rejected
+        (exit 1, "Invalid region" on stderr) -- documented as half-open
+        [start, end);
+      * a syntactically valid range past the end of the sequence returns
+        a clean header-only MAF with exit 0;
+      * an unknown contig name behaves the same way as out-of-range.
+    Mirrors the tai Bug 1 regression on the .tui side."""
+    # zero-length: rejected with rc != 0
+    p = subprocess.run(
+        [TAFFY, 'view', '-U', 'query', '-r', f'{REF_SEQ_FULL}:100-100',
+         '-m', '-i', UNI_MAF],
+        capture_output=True, text=True)
+    assert p.returncode != 0, "zero-length region should be rejected"
+    assert 'Invalid region' in p.stderr, (
+        f"expected 'Invalid region' on stderr, got: {p.stderr!r}")
+
+    # past-end of seq: valid syntax, no overlap, header-only output, rc=0
+    out, _ = run(TAFFY, 'view', '-U', 'query', '-r', f'{REF_SEQ_FULL}:601863-601864',
+                 '-m', '-i', UNI_MAF)
+    assert sum(1 for L in out.splitlines() if L.startswith('a')) == 0
+    assert out.startswith('##maf')
+
+    # unknown contig: same shape as out-of-range -- header-only, rc=0
+    out, _ = run(TAFFY, 'view', '-U', 'query', '-r', 'NoSuchSeq:0-10',
+                 '-m', '-i', UNI_MAF)
+    assert sum(1 for L in out.splitlines() if L.startswith('a')) == 0
+    assert out.startswith('##maf')
+
+
 def test_lift_multichrom_wig(tmp_path):
     """A wig that switches between two ancestor chroms exercises the
     source-seq cache refresh in taf_lift.c: when a new `variableStep
