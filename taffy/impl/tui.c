@@ -1097,6 +1097,38 @@ TuiInterval *tui_query(Tui *tui, const char *seq_name,
     return iv;
 }
 
+int64_t *tui_load_seq_runs(Tui *tui, const char *seq_name, int64_t *n_out) {
+    *n_out = 0;
+    if (tui == NULL || seq_name == NULL) return NULL;
+
+    OneFile *of = oneFileOpenRead(tui->path, NULL, "tui", 1);
+    if (of == NULL) return NULL;
+
+    int64_t ord = tui_find_d(of, tui->n_d, seq_name, NULL);
+    if (ord < 0) { oneFileClose(of); return NULL; }
+    if (!oneGoto(of, 'S', ord + 1)) { oneFileClose(of); return NULL; }
+    char c = oneReadLine(of);
+    if (c != 'S') { oneFileClose(of); return NULL; }
+    int64_t sn = oneLen(of);
+    if (sn != (int64_t)strlen(seq_name) ||
+        memcmp(oneString(of), seq_name, sn) != 0) {
+        oneFileClose(of);
+        return NULL;
+    }
+    c = oneReadLine(of);
+    if (c != 'R') { oneFileClose(of); return NULL; }
+    int64_t raw_len = oneInt(of, 0);
+    int64_t def_len = oneLen(of);
+    const uint8_t *def = (const uint8_t *)oneString(of);
+    int64_t cap = raw_len + 3;
+    int64_t *runs = st_malloc((cap ? cap : 1) * sizeof(int64_t));
+    int64_t m = decode_runs(def, def_len, raw_len, runs, cap);
+    oneFileClose(of);
+    if (m == 0) { free(runs); return NULL; }
+    *n_out = m;
+    return runs;
+}
+
 /////////////////////////////////////////////////////////////////////////////
 // Reverse lookup: universal column -> target genome coord.
 /////////////////////////////////////////////////////////////////////////////

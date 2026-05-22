@@ -110,6 +110,22 @@ int tui_has_sequence(const Tui *tui, const char *seq_name);
 TuiInterval *tui_query(Tui *tui, const char *seq_name,
                        int64_t start, int64_t end, int64_t *n_out);
 
+/*
+ * Decode and return ALL of `seq_name`'s runs as a flat array of
+ * (t_start, g_start, lenc) triples (where lenc = len << 1 | strand, same
+ * encoding the on-disk format uses).  Returned array has 3 * (*n_out)
+ * int64 elements; caller frees.  *n_out == 0 and NULL return iff the
+ * sequence is absent from the index.
+ *
+ * Intended for batch callers that need to do many lookups against the
+ * SAME sequence's runs: load once, then binary-search the array directly
+ * by t_start.  Each call opens + closes the .tui internally, so this is
+ * exactly as expensive as one tui_query call -- but avoids the per-lookup
+ * open/close that makes tui_query unsuitable in a tight loop.  (See
+ * taf_lift.c for the cache-by-source-seq usage pattern.)
+ */
+int64_t *tui_load_seq_runs(Tui *tui, const char *seq_name, int64_t *n_out);
+
 /////////////////////////////////////////////////////////////////////////////
 // Reverse lookup: universal column -> a target genome's coordinate.
 //

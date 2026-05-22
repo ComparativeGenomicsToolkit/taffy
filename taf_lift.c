@@ -98,81 +98,164 @@ int taf_lift_main(int argc, char *argv[]) {
     st_logInfo("Loaded %" PRIi64 " runs for target genome '%s' in %" PRIi64 " s\n",
                tui_genome_lift_n_runs(gl), target_genome, (int64_t)(time(NULL) - t0));
 
-    t0 = time(NULL);
-    stHash *wig = wig_parse(wig_file, "", 1);    // zero-based internally
-    if (wig == NULL) {
-        fprintf(stderr, "ERROR: failed to parse wig %s\n", wig_file);
-        tui_genome_lift_destruct(gl);
-        tui_destruct(tui);
-        free(tui_p);
-        return 1;
-    }
-    st_logInfo("Parsed wig in %" PRIi64 " s\n", (int64_t)(time(NULL) - t0));
-
-    // Build a string-table for the target sequence names produced by the
-    // lift so the output records can be sorted by (seq_idx, pos) cheaply.
+    // String-table for the output target-sequence names so the output
+    // records can be sorted by (seq_idx, pos) cheaply.
     stHash *seqtab = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, NULL, NULL);
     stList *seqs   = stList_construct3(0, NULL);
     LiftRec *out = NULL;
     int64_t out_n = 0, out_cap = 0;
     int64_t n_in = 0, n_lifted = 0, n_no_column = 0, n_no_genome = 0;
 
-    t0 = time(NULL);
-    stHashIterator *it = stHash_getIterator(wig);
-    char *anc_seq;
-    while ((anc_seq = stHash_getNext(it)) != NULL) {
-        stHash *inner = stHash_search(wig, anc_seq);
-        if (inner == NULL) continue;
-        stHashIterator *jt = stHash_getIterator(inner);
-        void *kv;
-        while ((kv = stHash_getNext(jt)) != NULL) {
-            int64_t coord = (int64_t)kv;
-            double  value = *(double*)stHash_search(inner, kv);
-            n_in++;
-
-            int64_t n_iv = 0;
-            TuiInterval *iv = tui_query(tui, anc_seq, coord, coord + 1, &n_iv);
-            if (n_iv == 0 || iv == NULL) {
-                free(iv);
-                n_no_column++;
-                continue;
-            }
-            int64_t column = iv[0].start;
-            free(iv);
-
-            const char *tseq_name = NULL;
-            int64_t tpos = 0;
-            bool tstrand = true;
-            if (!tui_genome_lift_column(gl, column, &tseq_name, &tpos, &tstrand)) {
-                n_no_genome++;
-                continue;
-            }
-
-            // String-table the target sequence name (gl owns the string;
-            // we just need a stable integer index for sort).
-            void *v = stHash_search(seqtab, (void *)tseq_name);
-            int64_t seq_idx;
-            if (v == NULL) {
-                seq_idx = stList_length(seqs);
-                stList_append(seqs, (void *)tseq_name);
-                stHash_insert(seqtab, (void *)tseq_name, (void *)(intptr_t)(seq_idx + 1));
-            } else {
-                seq_idx = (intptr_t)v - 1;
-            }
-
-            if (out_n == out_cap) {
-                out_cap = out_cap ? out_cap * 2 : 1024;
-                out = st_realloc(out, out_cap * sizeof(LiftRec));
-            }
-            out[out_n].seq_idx = seq_idx;
-            out[out_n].pos     = tpos;
-            out[out_n].value   = value;
-            out_n++;
-            n_lifted++;
-        }
-        stHash_destructIterator(jt);
+    // Stream-parse the wig directly instead of going through wig_parse.
+    // wig_parse builds an stHash<seq, stHash<coord -> double*>> which (a) costs
+    // ~150 MB per million records and (b) uses (void*)coord as the inner-hash
+    // key -- when coord == 0 the key is NULL, indistinguishable from the
+    // stHash_getNext end-of-iteration sentinel, so any wig containing
+    // ancestor position 0 silently iterates to zero records.  Streaming
+    // avoids both issues and is closer to constant memory.
+    FILE *wf = fopen(wig_file, "r");
+    if (wf == NULL) {
+        fprintf(stderr, "ERROR: failed to open wig %s\n", wig_file);
+        tui_genome_lift_destruct(gl);
+        tui_destruct(tui);
+        free(tui_p);
+        return 1;
     }
-    stHash_destructIterator(it);
+    LI *wli = LI_construct(wf);
+
+    // Wig parser state.
+    char    *wig_chrom = NULL;     // borrowed-then-owned chrom from latest header
+    int      wig_fixed = 0;        // 0 = variableStep, 1 = fixedStep
+    int64_t  wig_fs_pos = 0;       // next 0-based coord for fixedStep
+    int64_t  wig_fs_step = 1;
+
+    // Single-slot cache of the most-recently-loaded source-seq runs.  Refreshed
+    // on each wig header line.  Wigs almost always group records by chrom so
+    // this hits 100% after the first record of each chrom.
+    char    *cur_seq  = NULL;
+    int64_t *cur_runs = NULL;      // 3 * cur_n int64s: (t_start, g_start, lenc)
+    int64_t  cur_n    = 0;
+    int      cur_seq_in_tui = 0;
+
+    t0 = time(NULL);
+    char *line;
+    while ((line = LI_get_next_line(wli)) != NULL) {
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '\0' || *p == '#') { free(line); continue; }
+
+        int is_fixed = (strncmp(p, "fixedStep",   9) == 0);
+        int is_var   = (strncmp(p, "variableStep", 12) == 0);
+        if (is_fixed || is_var) {
+            // Header line: tokenize the rest as key=value pairs.
+            char *chrom = NULL;
+            int64_t fs_start = 1, fs_step = 1;
+            while (*p && *p != ' ' && *p != '\t') p++;  // skip keyword
+            while (1) {
+                while (*p == ' ' || *p == '\t') p++;
+                if (!*p) break;
+                char *tok = p;
+                while (*p && *p != ' ' && *p != '\t') p++;
+                char saved = *p; *p = '\0';
+                char *eq = strchr(tok, '=');
+                if (eq) {
+                    *eq = '\0';
+                    char *key = tok, *val = eq + 1;
+                    if      (strcmp(key, "chrom") == 0) chrom = val;
+                    else if (strcmp(key, "start") == 0) fs_start = atoll(val);
+                    else if (strcmp(key, "step")  == 0) fs_step  = atoll(val);
+                    // span is intentionally ignored for now; the writer that
+                    // we care about (GERP & friends) emits step=1 + span=1.
+                }
+                if (saved == 0) break;
+                *p++ = saved;
+            }
+            wig_fixed   = is_fixed;
+            wig_fs_pos  = fs_start - 1;   // 1-based -> 0-based
+            wig_fs_step = fs_step;
+            free(wig_chrom);
+            wig_chrom = chrom ? stString_copy(chrom) : NULL;
+            // Refresh the cached source-seq runs on chrom change.
+            if (wig_chrom != NULL &&
+                (cur_seq == NULL || strcmp(wig_chrom, cur_seq) != 0)) {
+                free(cur_seq); free(cur_runs);
+                cur_seq = stString_copy(wig_chrom);
+                cur_runs = tui_load_seq_runs(tui, wig_chrom, &cur_n);
+                cur_seq_in_tui = (cur_runs != NULL);
+            }
+            free(line);
+            continue;
+        }
+
+        // Data line.
+        if (wig_chrom == NULL) { free(line); continue; }
+        int64_t coord;
+        double  value;
+        if (wig_fixed) {
+            value = atof(p);
+            coord = wig_fs_pos;
+            wig_fs_pos += wig_fs_step;
+        } else {
+            char *q = p;
+            while (*q && *q != ' ' && *q != '\t') q++;
+            if (!*q) { free(line); continue; }
+            *q = '\0';
+            coord = atoll(p) - 1;          // wig is 1-based
+            value = atof(q + 1);
+        }
+        n_in++;
+        free(line);
+
+        if (!cur_seq_in_tui) { n_no_column++; continue; }
+
+        // Binary-search cur_runs (sorted by t_start) for the run covering
+        // coord, then map to a universal column.
+        int64_t lo = 0, hi = cur_n;
+        while (lo < hi) {
+            int64_t mid = (lo + hi) / 2;
+            if (cur_runs[3*mid + 0] <= coord) lo = mid + 1; else hi = mid;
+        }
+        int64_t i = lo - 1;
+        if (i < 0) { n_no_column++; continue; }
+        int64_t t    = cur_runs[3*i + 0];
+        int64_t g    = cur_runs[3*i + 1];
+        int64_t lenc = cur_runs[3*i + 2];
+        int64_t len  = lenc >> 1;
+        int     rev  = (int)(lenc & 1);
+        if (coord >= t + len) { n_no_column++; continue; }
+        int64_t column = rev ? g + (t + len - 1 - coord)
+                             : g + (coord - t);
+
+        const char *tseq_name = NULL;
+        int64_t tpos = 0;
+        bool tstrand = true;
+        if (!tui_genome_lift_column(gl, column, &tseq_name, &tpos, &tstrand)) {
+            n_no_genome++;
+            continue;
+        }
+        void *v = stHash_search(seqtab, (void *)tseq_name);
+        int64_t seq_idx;
+        if (v == NULL) {
+            seq_idx = stList_length(seqs);
+            stList_append(seqs, (void *)tseq_name);
+            stHash_insert(seqtab, (void *)tseq_name, (void *)(intptr_t)(seq_idx + 1));
+        } else {
+            seq_idx = (intptr_t)v - 1;
+        }
+        if (out_n == out_cap) {
+            out_cap = out_cap ? out_cap * 2 : 1024;
+            out = st_realloc(out, out_cap * sizeof(LiftRec));
+        }
+        out[out_n].seq_idx = seq_idx;
+        out[out_n].pos     = tpos;
+        out[out_n].value   = value;
+        out_n++;
+        n_lifted++;
+    }
+    LI_destruct(wli);
+    fclose(wf);
+    free(wig_chrom);
+
     st_logInfo("Lifted %" PRIi64 "/%" PRIi64 " records in %" PRIi64 " s "
                "(no-column=%" PRIi64 ", no-genome=%" PRIi64 ")\n",
                n_lifted, n_in, (int64_t)(time(NULL) - t0),
@@ -185,19 +268,19 @@ int taf_lift_main(int argc, char *argv[]) {
     if (fh == NULL) {
         fprintf(stderr, "ERROR: failed to open output %s\n", output_file);
         free(out);
+        free(cur_seq); free(cur_runs);
         stList_destruct(seqs);
         stHash_destruct(seqtab);
-        stHash_destruct(wig);
         tui_genome_lift_destruct(gl);
         tui_destruct(tui);
         free(tui_p);
         return 1;
     }
-    int64_t cur_seq = -1;
+    int64_t cur_out_seq = -1;
     for (int64_t i = 0; i < out_n; i++) {
-        if (out[i].seq_idx != cur_seq) {
-            cur_seq = out[i].seq_idx;
-            fprintf(fh, "variableStep chrom=%s\n", (const char*)stList_get(seqs, cur_seq));
+        if (out[i].seq_idx != cur_out_seq) {
+            cur_out_seq = out[i].seq_idx;
+            fprintf(fh, "variableStep chrom=%s\n", (const char*)stList_get(seqs, cur_out_seq));
         }
         // wig is 1-based by spec; our internal coord is 0-based.
         fprintf(fh, "%" PRIi64 " %g\n", out[i].pos + 1, out[i].value);
@@ -205,9 +288,10 @@ int taf_lift_main(int argc, char *argv[]) {
     if (output_file) fclose(fh);
 
     free(out);
+    free(cur_seq);
+    free(cur_runs);
     stList_destruct(seqs);
     stHash_destruct(seqtab);
-    stHash_destruct(wig);
     tui_genome_lift_destruct(gl);
     tui_destruct(tui);
     free(tui_p);
