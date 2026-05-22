@@ -24,3 +24,5 @@ classifiers = [
 [project.urls]
 "Homepage" = "https://github.com/ComparativeGenomicsToolkit/taffy"
 "Bug Tracker" = "https://github.com/ComparativeGenomicsToolkit/taffy/issues"
+[tool.pytest.ini_options]
+testpaths = ["tests/tai", "tests/tui"]

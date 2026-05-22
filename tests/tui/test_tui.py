@@ -1,43 +1,44 @@
-#!/usr/bin/env python3
 """
-tests/tui/test_tui.py -- exercises taffy view + taffy lift on a
-.tui-indexed universal MAF, using a hal2maf-rooted MAF (rooted at
-simHuman_chr6) as ground truth.
+Tests for taffy view + taffy lift on a .tui-indexed universal MAF, using a
+hal2maf-rooted MAF (rooted at simHuman_chr6) as ground truth.
 
-Fixtures (built once and committed in tests/tui/):
+Fixtures (committed under tests/tui/, ~6 MB total):
   evolverMammals.uni.maf.gz       cactus-hal2maf --universal --refGenome Anc0
   evolverMammals.uni.maf.gz.tui   cactus-hal2maf --index (passes -u to taffy)
   evolverMammals.simHuman.maf.gz  hal2maf --refGenome simHuman_chr6
   evolverMammals.simHuman.maf.gz.tai  taffy index -i ...
 
-Cases covered (each picked by surveying the universal MAF):
-  forward                 simHuman:0-4         all '+', no paralogs
-  reverse non-row-0       simHuman:7659-7720   some leaves on '-'
-  forward paralog         simHuman:187350-...  simCow & Anc2 appear twice on '+'
-  reverse paralog         simHuman:477815-...  simMouse & simRat each with +/- copies
+Cases (each picked by surveying the universal MAF for the structural shape):
+  forward             simHuman:0-4         all '+' strand, no paralogs
+  reverse_nonref      simHuman:7659-7720   leaves on '-' strand
+  forward_paralog     simHuman:187350-...  simCow & Anc2 appear twice on '+'
+  reverse_paralog     simHuman:477815-...  simMouse & simRat each in +/- copies
 
-Run from the taffy root:
-  python3 tests/tui/test_tui.py
+Run from the repo root with:
+    pytest tests/tui
 """
-import os, sys, subprocess
+import os
+import subprocess
 
-HERE       = os.path.dirname(os.path.abspath(__file__))
-ROOT       = os.path.abspath(os.path.join(HERE, '..', '..'))
-TAFFY      = os.path.join(ROOT, 'bin', 'taffy')
-UNI_MAF    = os.path.join(HERE, 'evolverMammals.uni.maf.gz')
-SIMH_MAF   = os.path.join(HERE, 'evolverMammals.simHuman.maf.gz')
+import pytest
 
-REF_GENOME    = 'simHuman_chr6'
-REF_SEQ       = 'simHuman.chr6'
-REF_SEQ_FULL  = f'{REF_GENOME}.{REF_SEQ}'
 
-# Curated regions (start, end), each picked from the universal MAF as the
-# smallest containing one of the structural shapes we want to exercise.
+HERE         = os.path.dirname(os.path.abspath(__file__))
+ROOT         = os.path.abspath(os.path.join(HERE, '..', '..'))
+TAFFY        = os.path.join(ROOT, 'bin', 'taffy')
+UNI_MAF      = os.path.join(HERE, 'evolverMammals.uni.maf.gz')
+SIMH_MAF     = os.path.join(HERE, 'evolverMammals.simHuman.maf.gz')
+
+REF_GENOME   = 'simHuman_chr6'
+REF_SEQ      = 'simHuman.chr6'
+REF_SEQ_FULL = f'{REF_GENOME}.{REF_SEQ}'
+
+# (id, start, end) -- one block of the universal MAF picked per structural shape
 CASES = [
-    ('forward',            0,       4),
-    ('reverse_nonref',     7659,    7720),
-    ('forward_paralog',    187350,  187354),
-    ('reverse_paralog',    477815,  477842),
+    pytest.param('forward',          0,       4,       id='forward'),
+    pytest.param('reverse_nonref',   7659,    7720,    id='reverse_nonref'),
+    pytest.param('forward_paralog',  187350,  187354,  id='forward_paralog'),
+    pytest.param('reverse_paralog',  477815,  477842,  id='reverse_paralog'),
 ]
 
 
@@ -45,23 +46,24 @@ CASES = [
 # Helpers
 # ---------------------------------------------------------------------------
 
-def run(*args, check=True):
-    p = subprocess.run(args, capture_output=True, text=True)
-    if check and p.returncode != 0:
-        sys.stderr.write(f"FAIL: {' '.join(args)}\n{p.stderr}\n")
-        raise SystemExit(1)
+def run(*args):
+    """Run a subprocess, return (stdout, stderr).  Fails the test on non-zero."""
+    p = subprocess.run(list(args), capture_output=True, text=True)
+    assert p.returncode == 0, (
+        f"\nCommand failed: {' '.join(args)}\nstderr: {p.stderr}")
     return p.stdout, p.stderr
+
 
 def parse_maf_columns(maf_text):
     """
-    Parse a MAF string into a list of blocks; each block is a list of columns;
-    each column is a frozenset of (full_seq_name, forward_pos, strand_char,
-    base_lowercased) tuples.  The forward_pos is the column-resolved forward
-    coordinate (start + nongap_index, on '+' or seq_len-1-(...) on '-').
+    Parse MAF text into a list of blocks; each block is a list of columns;
+    each column is a set of (full_seq_name, forward_pos, strand_char,
+    base_lowercased) tuples.  forward_pos is column-resolved (start +
+    nongap_index on '+', seqlen-1-(start+nongap_index) on '-' — i.e. always
+    the forward-strand coordinate of the base at that column).
 
-    Block ordering is preserved, but the column set is identical regardless of
-    row ordering -- so this comparator is robust to row-order differences
-    between two MAF backends.
+    Robust to row ordering, so two backends can be compared per-column even
+    when they emit rows in different orders.
     """
     blocks = []
     cur = None
@@ -69,7 +71,7 @@ def parse_maf_columns(maf_text):
         if not line or line.startswith('#'):
             continue
         if line.startswith('a'):
-            if cur is not None and cur:
+            if cur:
                 blocks.append(cur)
             cur = []
             continue
@@ -78,144 +80,54 @@ def parse_maf_columns(maf_text):
         parts = line.split('\t')
         if len(parts) < 7:
             parts = line.split()
-        # s seq start length strand seqLen bases
-        seq    = parts[1]
-        start  = int(parts[2])
-        length = int(parts[3])
-        strand = parts[4]
-        seqlen = int(parts[5])
-        bases  = parts[6]
-        # forward range covered by this row
+        seq, start, length, strand, seqlen, bases = (
+            parts[1], int(parts[2]), int(parts[3]), parts[4],
+            int(parts[5]), parts[6])
         if strand == '+':
-            forward_base_at = lambda nongap_i, s=start: s + nongap_i
+            forward = lambda i, s=start: s + i
         else:
-            # strand '-': MAF start is from the OTHER end of the sequence.
-            # forward coord of the nongap_i-th base read (column order) is
-            # seqlen - start - 1 - nongap_i  (DECREASING in column order).
-            forward_base_at = lambda nongap_i, s=start, L=seqlen, n=length: L - s - 1 - nongap_i
-        # walk columns, count non-gap to find each base's forward coord
-        ng = 0
-        if cur is None: cur = []
-        # extend cur to len(bases) columns
+            forward = lambda i, s=start, L=seqlen: L - s - 1 - i
         while len(cur) < len(bases):
             cur.append(set())
+        ng = 0
         for j, b in enumerate(bases):
             if b == '-':
                 continue
-            cur[j].add((seq, forward_base_at(ng), strand, b.lower()))
+            cur[j].add((seq, forward(ng), strand, b.lower()))
             ng += 1
     if cur:
         blocks.append(cur)
     return blocks
 
-def columns_set(blocks):
-    """Flatten blocks into one big column-key set: frozenset of (seq, pos, strand, base) tuples per column."""
-    cols = []
+
+def _is_ancestor_genome(seq_name):
+    """Return True if the genome part of 'genome.seq' is an evolverMammals
+    ancestor (anything not a simXXX_chr6 leaf)."""
+    g = seq_name.split('.', 1)[0]
+    return g in ('Anc0', 'Anc1', 'Anc2', 'mr')
+
+
+def _leaf_cols(blocks):
+    """Flatten blocks to a set of (seq, forward_pos, strand) for leaf rows
+    only.  Used for backend-agnostic comparisons -- the universal MAF carries
+    one ancestor row per block (--noAncestors), hal2maf carries every
+    intermediate, so an ancestors-inclusive comparison would be apples-to-
+    oranges."""
+    keys = set()
     for b in blocks:
         for col in b:
-            cols.append(frozenset(col))
-    return cols
-
-def column_genome_positions(blocks):
-    """For each column, return frozenset of (seq, forward_pos, strand) -- no base, used when comparing two backends that may differ on case."""
-    out = []
-    for b in blocks:
-        for col in b:
-            out.append(frozenset((s, p, st) for (s, p, st, _b) in col))
-    return out
+            for (s, p, st, _b) in col:
+                if _is_ancestor_genome(s):
+                    continue
+                keys.add((s, p, st))
+    return keys
 
 
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
-
-def test_view_consistency():
-    """taffy view -U query on the universal MAF must produce the same per-column
-    set of (genome, pos, strand) triples as taffy view on the simHuman .tai MAF
-    for every test region.  The two backends may pick different ancestor sets
-    (universal MAF has only the row-0 ancestor per block; hal2maf has every
-    intermediate ancestor) so we restrict the comparison to LEAF rows
-    (genome.seq with no 'Anc' prefix and no 'mr' which is the human-rodent
-    inner ancestor in evolverMammals)."""
-    failed = []
-    for name, start, end in CASES:
-        region = f'{REF_SEQ_FULL}:{start}-{end}'
-
-        uni_out, _ = run(TAFFY, 'view', '-U', 'query', '-r', region, '-m', '-i', UNI_MAF)
-        tai_out, _ = run(TAFFY, 'view',                '-r', region, '-m', '-i', SIMH_MAF)
-
-        uni_blocks = parse_maf_columns(uni_out)
-        tai_blocks = parse_maf_columns(tai_out)
-
-        # union of per-column (genome.seq, pos, strand) keys, leaf-only
-        def leaves(blocks):
-            keys = set()
-            for b in blocks:
-                for col in b:
-                    for (s, p, st, _b) in col:
-                        g = s.split('.', 1)[0]
-                        if g in ('Anc0','Anc1','Anc2','mr'):  # ancestor / inner node
-                            continue
-                        keys.add((s, p, st))
-            return keys
-
-        u = leaves(uni_blocks); t = leaves(tai_blocks)
-        if u != t:
-            failed.append((name, region, u - t, t - u))
-        else:
-            print(f"  view consistency {name:18s} OK -- {len(u)} leaf (seq,pos,strand) triples match")
-    if failed:
-        for name, region, u_only, t_only in failed:
-            print(f"FAIL {name} ({region})")
-            if u_only: print(f"  uni-only: {sorted(u_only)[:5]}{'...' if len(u_only)>5 else ''}")
-            if t_only: print(f"  tai-only: {sorted(t_only)[:5]}{'...' if len(t_only)>5 else ''}")
-        raise AssertionError(f"view consistency failed for {len(failed)} region(s)")
-
-def test_forward_paralog_via_lift():
-    """In the forward_paralog block (simHuman:187350-187354), simCow and
-    Anc2 appear twice on '+' strand.  Lifting any base of simHuman in that
-    range to simCow_chr6 via `taffy lift` must produce TWO records per
-    input base (one for each simCow copy)."""
-    name, start, end = next(c for c in CASES if c[0] == 'forward_paralog')
-    in_wig = '/tmp/test_tui_paralog_in.wig'
-    out_wig = '/tmp/test_tui_paralog_out.wig'
-    with open(in_wig, 'w') as f:
-        f.write(f'variableStep chrom={REF_SEQ_FULL}\n')
-        for p in range(start, end):
-            f.write(f'{p+1} 1.0\n')   # 1-based wig pos
-
-    run(TAFFY, 'lift', '-i', UNI_MAF, '-w', in_wig, '-g', 'simCow_chr6', '-o', out_wig)
+def _read_wig(path):
+    """Parse a variableStep wig into a list of (chrom, 0-based pos)."""
     pts = []
-    with open(out_wig) as f:
-        cur = None
-        for line in f:
-            line = line.strip()
-            if line.startswith('variableStep'):
-                cur = line.split('chrom=')[1]
-            elif line and cur and line[0].isdigit():
-                tok = line.split()
-                pts.append((cur, int(tok[0]) - 1, float(tok[1])))
-    # 4 source bases * 2 paralogs = 8 lifted records
-    assert len(pts) == 8, f"expected 8 lifted records (4 src * 2 simCow paralogs), got {len(pts)}: {pts}"
-    print(f"  forward_paralog lift  OK -- 4 simHuman positions -> 8 simCow records (2 paralogs)")
-
-def test_reverse_paralog_via_lift():
-    """In the reverse_paralog block (simHuman:477815-477842), simMouse and
-    simRat each appear in both + and - copies.  Lifting any base of
-    simHuman in that range to simMouse_chr6 must produce TWO records --
-    one '+'-strand and one '-'-strand forward position."""
-    name, start, end = next(c for c in CASES if c[0] == 'reverse_paralog')
-    in_wig = '/tmp/test_tui_revpar_in.wig'
-    out_wig = '/tmp/test_tui_revpar_out.wig'
-    with open(in_wig, 'w') as f:
-        f.write(f'variableStep chrom={REF_SEQ_FULL}\n')
-        for p in range(start, start + 1):    # 1 source base is enough
-            f.write(f'{p+1} 1.0\n')
-
-    run(TAFFY, 'lift', '-i', UNI_MAF, '-w', in_wig, '-g', 'simMouse_chr6', '-o', out_wig)
-    pts = []
-    with open(out_wig) as f:
-        cur = None
+    cur = None
+    with open(path) as f:
         for line in f:
             line = line.strip()
             if line.startswith('variableStep'):
@@ -223,116 +135,126 @@ def test_reverse_paralog_via_lift():
             elif line and cur and line[0].isdigit():
                 tok = line.split()
                 pts.append((cur, int(tok[0]) - 1))
-
-    # The two simMouse paralogs at simHuman:477815 are at FORWARD positions:
-    #   - '+' row at maf_start=495907 length=27 strand='+': forward = 495907
-    #   - '-' row at maf_start=194591 length=27 strand='-':
-    #          forward = seqlen - start - 1 = 636262 - 194591 - 1 = 441670
-    # taffy lift emits both forward positions.
-    expected = {('simMouse.chr6', 495907), ('simMouse.chr6', 441670)}
-    got = set(pts)
-    assert got == expected, f"reverse paralog mismatch.\n  expected: {expected}\n  got: {got}"
-    print(f"  reverse_paralog lift  OK -- simHuman:477815 -> simMouse_chr6 {{495907 (+ run), 441670 (- run)}}")
-
-def test_leaf_to_leaf_lift():
-    """`taffy lift` between two LEAVES (simHuman_chr6 -> simMouse_chr6).
-    Internally this composes ancestor-column -> leaf via the universal column
-    space, with no exposed intermediate step.  For each test region, we
-    derive ground truth from the simHuman-rooted hal2maf MAF (where each
-    block has simHuman as row-0 and simMouse rows at known forward positions
-    + strands) and check that taffy lift on the universal MAF agrees -- both
-    on which simHuman positions map at all, and on the full set of simMouse
-    forward positions per simHuman base."""
-    for name, start, end in CASES:
-        region = f'{REF_SEQ_FULL}:{start}-{end}'
-
-        # 1) parse the simHuman ground-truth MAF for the region into per-column
-        #    sets, then build the map: simHuman_forward_pos -> set of simMouse
-        #    forward positions present in the same column.
-        tai_out, _ = run(TAFFY, 'view', '-r', region, '-m', '-i', SIMH_MAF)
-        tai_blocks = parse_maf_columns(tai_out)
-        expected = {}
-        for b in tai_blocks:
-            for col in b:
-                sh_pos = None
-                sm_set = set()
-                for (s, p, st, _b) in col:
-                    if s == REF_SEQ_FULL:
-                        sh_pos = p
-                    elif s.startswith('simMouse_chr6.'):
-                        sm_set.add(p)
-                if sh_pos is not None:
-                    expected.setdefault(sh_pos, set()).update(sm_set)
-
-        # 2) run taffy lift simHuman -> simMouse_chr6 on every simHuman pos in
-        #    the region.
-        in_wig  = '/tmp/test_tui_leaf2leaf_in.wig'
-        out_wig = '/tmp/test_tui_leaf2leaf_out.wig'
-        with open(in_wig, 'w') as f:
-            f.write(f'variableStep chrom={REF_SEQ_FULL}\n')
-            for p in range(start, end):
-                f.write(f'{p+1} 1.0\n')
-        run(TAFFY, 'lift', '-i', UNI_MAF, '-w', in_wig, '-g', 'simMouse_chr6', '-o', out_wig)
-
-        # 3) collect actual lifted simMouse forward positions.  Wig is sorted
-        #    by output (simMouse) position so we can't recover which input
-        #    simHuman pos produced each output -- but the UNION over the
-        #    region must match the union of `expected`.
-        got_all = set()
-        with open(out_wig) as f:
-            cur = None
-            for line in f:
-                line = line.strip()
-                if line.startswith('variableStep'):
-                    cur = line.split('chrom=')[1]
-                elif line and cur and line[0].isdigit():
-                    tok = line.split()
-                    got_all.add((cur, int(tok[0]) - 1))
-
-        # Expected: every simMouse forward pos across all simHuman bases.
-        exp_all = set()
-        for sh_pos, sm_set in expected.items():
-            for sm_pos in sm_set:
-                # The simMouse seq is "simMouse.chr6" inside "simMouse_chr6.simMouse.chr6"
-                exp_all.add(('simMouse.chr6', sm_pos))
-
-        if got_all != exp_all:
-            extra = got_all - exp_all
-            missing = exp_all - got_all
-            print(f"FAIL {name} ({region})")
-            if extra:    print(f"  taffy-only: {sorted(extra)[:5]}{'...' if len(extra)>5 else ''}")
-            if missing:  print(f"  truth-only: {sorted(missing)[:5]}{'...' if len(missing)>5 else ''}")
-            raise AssertionError(f"leaf-to-leaf mismatch in {name}: |got|={len(got_all)} |exp|={len(exp_all)}")
-
-        # Also assert each simHuman position with simMouse alignment lifted to
-        # at least one record per paralog (we can verify count parity from the
-        # universal MAF's --noAncestors block via taffy view -U query).
-        n_src = sum(1 for sh in expected if expected[sh])
-        n_par = sum(len(s) for s in expected.values())
-        print(f"  leaf2leaf {name:18s} OK -- {n_src} simHuman bases lift to {n_par} simMouse positions ({len(got_all)} unique)")
+    return pts
 
 
-def test_view_block_count_minimum():
-    """A spot check that each region actually produces non-empty output (catches
-    regressions where -U query returns header-only for a leaf-coord region)."""
-    for name, start, end in CASES:
-        region = f'{REF_SEQ_FULL}:{start}-{end}'
-        uni_out, _ = run(TAFFY, 'view', '-U', 'query', '-r', region, '-m', '-i', UNI_MAF)
-        n_blocks = sum(1 for L in uni_out.splitlines() if L.startswith('a'))
-        n_rows   = sum(1 for L in uni_out.splitlines() if L.startswith('s'))
-        assert n_blocks >= 1 and n_rows >= n_blocks * 2, (
-            f"region {region} ({name}) returned empty output ({n_blocks} blocks, {n_rows} rows)")
-    print(f"  block-count sanity    OK -- all {len(CASES)} regions return non-empty MAF")
+def _write_wig(path, chrom, positions):
+    """Emit a 1-based variableStep wig at the given positions (value=1.0)."""
+    with open(path, 'w') as f:
+        f.write(f'variableStep chrom={chrom}\n')
+        for p in positions:
+            f.write(f'{p + 1} 1.0\n')
 
 
-if __name__ == '__main__':
-    assert os.path.isfile(TAFFY), f"taffy not at {TAFFY}; run from repo root after `make all`"
-    assert os.path.isfile(UNI_MAF), f"missing fixture: {UNI_MAF}"
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="session", autouse=True)
+def _check_fixtures():
+    """Sanity-check the binary + data files before any test runs."""
+    assert os.path.isfile(TAFFY),    f"taffy not at {TAFFY}; run `make all` first"
+    assert os.path.isfile(UNI_MAF),  f"missing fixture: {UNI_MAF}"
     assert os.path.isfile(SIMH_MAF), f"missing fixture: {SIMH_MAF}"
-    print("== tests/tui/test_tui.py ==")
-    test_view_block_count_minimum()
-    test_view_consistency()
-    test_forward_paralog_via_lift()
-    test_reverse_paralog_via_lift()
-    test_leaf_to_leaf_lift()
-    print("ALL OK")
+
+
+@pytest.fixture(scope="session")
+def truth_blocks():
+    """For each region, the simHuman .tai MAF parsed once into per-column sets.
+    Used as ground truth by tests that compare against the universal MAF or
+    against taffy lift output."""
+    out = {}
+    for p in CASES:
+        name, start, end = p.values
+        region = f'{REF_SEQ_FULL}:{start}-{end}'
+        tai_out, _ = run(TAFFY, 'view', '-r', region, '-m', '-i', SIMH_MAF)
+        out[name] = parse_maf_columns(tai_out)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Tests -- parametrized across CASES where structure allows
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("name,start,end", CASES)
+def test_view_returns_nonempty(name, start, end):
+    """taffy view -U query at each region must return at least one block with
+    at least two rows (row-0 + something).  Catches header-only regressions."""
+    region = f'{REF_SEQ_FULL}:{start}-{end}'
+    uni_out, _ = run(TAFFY, 'view', '-U', 'query', '-r', region, '-m', '-i', UNI_MAF)
+    lines = uni_out.splitlines()
+    n_blocks = sum(1 for L in lines if L.startswith('a'))
+    n_rows   = sum(1 for L in lines if L.startswith('s'))
+    assert n_blocks >= 1, f"region {region} returned no blocks"
+    assert n_rows >= n_blocks * 2, (
+        f"region {region} returned {n_blocks} blocks with only {n_rows} rows total")
+
+
+@pytest.mark.parametrize("name,start,end", CASES)
+def test_view_consistency_tui_vs_tai(name, start, end, truth_blocks):
+    """taffy view -U query on the universal MAF (.tui-indexed) must produce
+    the same per-column leaf (genome.seq, forward_pos, strand) set as
+    taffy view on the simHuman-rooted MAF (.tai-indexed)."""
+    region = f'{REF_SEQ_FULL}:{start}-{end}'
+    uni_out, _ = run(TAFFY, 'view', '-U', 'query', '-r', region, '-m', '-i', UNI_MAF)
+    uni_leaves = _leaf_cols(parse_maf_columns(uni_out))
+    tai_leaves = _leaf_cols(truth_blocks[name])
+    assert uni_leaves == tai_leaves
+
+
+@pytest.mark.parametrize("name,start,end", CASES)
+def test_leaf_to_leaf_lift(name, start, end, truth_blocks, tmp_path):
+    """`taffy lift` between two leaves (simHuman -> simMouse) must agree, on
+    the union of lifted simMouse forward positions, with the simMouse rows
+    present in the simHuman-rooted truth MAF at the same columns."""
+    region = f'{REF_SEQ_FULL}:{start}-{end}'
+
+    # Expected: for each column in the simHuman MAF block(s) covering the
+    # region, collect every simMouse forward position aligned at that column.
+    expected = set()
+    for b in truth_blocks[name]:
+        for col in b:
+            sh_in_col = any(s == REF_SEQ_FULL for (s, _p, _st, _bs) in col)
+            if not sh_in_col:
+                continue
+            for (s, p, _st, _bs) in col:
+                if s.startswith('simMouse_chr6.'):
+                    expected.add((s.split('.', 1)[1], p))
+
+    # Lift every simHuman base in the region to simMouse_chr6.
+    in_wig  = str(tmp_path / 'in.wig')
+    out_wig = str(tmp_path / 'out.wig')
+    _write_wig(in_wig, REF_SEQ_FULL, range(start, end))
+    run(TAFFY, 'lift', '-i', UNI_MAF, '-w', in_wig, '-g', 'simMouse_chr6', '-o', out_wig)
+    got = set(_read_wig(out_wig))
+
+    assert got == expected
+
+
+def test_forward_paralog_record_count(tmp_path):
+    """forward_paralog block: simCow appears twice on '+' for all 4 simHuman
+    bases.  `taffy lift simHuman -> simCow_chr6` must emit exactly 4*2 = 8
+    records (no merging, no de-dup) -- a strict count check that
+    complements test_leaf_to_leaf_lift's union-based comparison."""
+    start, end = 187350, 187354
+    in_wig  = str(tmp_path / 'in.wig')
+    out_wig = str(tmp_path / 'out.wig')
+    _write_wig(in_wig, REF_SEQ_FULL, range(start, end))
+    run(TAFFY, 'lift', '-i', UNI_MAF, '-w', in_wig, '-g', 'simCow_chr6', '-o', out_wig)
+    got = _read_wig(out_wig)
+    assert len(got) == 8, f"expected 8 records (4 src * 2 simCow paralogs), got {len(got)}"
+
+
+def test_reverse_paralog_strand_flip(tmp_path):
+    """reverse_paralog block: simMouse appears twice -- once '+' at
+    simMouse:495907 (forward = 495907) and once '-' at maf_start 194591
+    length 27 (forward = 636262 - 194591 - 1 = 441670).  Lifting simHuman:
+    477815 -> simMouse_chr6 must emit BOTH forward positions.  Exercises
+    the strand-flip math in the paralog scan."""
+    in_wig  = str(tmp_path / 'in.wig')
+    out_wig = str(tmp_path / 'out.wig')
+    _write_wig(in_wig, REF_SEQ_FULL, [477815])
+    run(TAFFY, 'lift', '-i', UNI_MAF, '-w', in_wig, '-g', 'simMouse_chr6', '-o', out_wig)
+    got = set(_read_wig(out_wig))
+    expected = {('simMouse.chr6', 495907), ('simMouse.chr6', 441670)}
+    assert got == expected
