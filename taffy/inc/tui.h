@@ -111,6 +111,43 @@ TuiInterval *tui_query(Tui *tui, const char *seq_name,
                        int64_t start, int64_t end, int64_t *n_out);
 
 /////////////////////////////////////////////////////////////////////////////
+// Reverse lookup: universal column -> a target genome's coordinate.
+//
+// The on-disk lift table is sorted by (sequence, t_start), i.e. genome
+// coord -- the primary `taffy view` use case is "genome.seq:p -> columns".
+// For column-keyed lookups (e.g. annotation liftover from row-0 to a leaf)
+// we need a column-sorted view.  Build one at load time by concatenating
+// every sequence's runs that belongs to the target genome and qsort'ing by
+// the universal-column start.  Then each column lookup is O(log n_runs).
+// One-time load cost is O(n_runs) decode + O(n_runs log n_runs) sort; for
+// a vertebrate leaf that's a few seconds and a few hundred MB.
+/////////////////////////////////////////////////////////////////////////////
+
+typedef struct _TuiGenomeLift TuiGenomeLift;
+
+/*
+ * Load every "<genome_name>.*" sequence's runs from the .tui, decode, merge,
+ * sort by universal column.  Returns NULL on I/O error or if no d-line
+ * matches the prefix.
+ */
+TuiGenomeLift *tui_genome_lift_load(Tui *tui, const char *genome_name);
+
+void tui_genome_lift_destruct(TuiGenomeLift *gl);
+
+/*
+ * Look up the target genome coordinate at universal column `column`.
+ * Returns 1 on success (sets *out_seq -- BORROWED, owned by gl; *out_pos --
+ * 0-based forward coord; *out_strand -- true for '+'); returns 0 if the
+ * column has no base from this genome.
+ */
+int tui_genome_lift_column(const TuiGenomeLift *gl, int64_t column,
+                           const char **out_seq, int64_t *out_pos,
+                           bool *out_strand);
+
+/* Number of column-sorted runs loaded (diagnostics / sizing). */
+int64_t tui_genome_lift_n_runs(const TuiGenomeLift *gl);
+
+/////////////////////////////////////////////////////////////////////////////
 // Universal-column block extractor (replaces the .tai for the -U path).
 //
 // Drives the SHARED random-access primitives (LI_seek + tai_resync_taf_line +

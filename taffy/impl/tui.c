@@ -1098,6 +1098,177 @@ TuiInterval *tui_query(Tui *tui, const char *seq_name,
 }
 
 /////////////////////////////////////////////////////////////////////////////
+// Reverse lookup: universal column -> target genome coord.
+/////////////////////////////////////////////////////////////////////////////
+
+typedef struct {
+    int64_t g_start;     // universal-column start of the run
+    int64_t t_start;     // forward coord in the genome sequence
+    int64_t length;      // run length in bases
+    int64_t seq_idx;     // index into TuiGenomeLift::seq_names
+    int     strand;      // 1 = '+', 0 = '-'
+} GLRun;
+
+struct _TuiGenomeLift {
+    char  **seq_names;   // owned; one per sequence loaded
+    int64_t n_seq;
+    GLRun  *runs;        // owned; sorted by g_start
+    int64_t n_runs;
+};
+
+static int glrun_cmp(const void *a, const void *b) {
+    const GLRun *x = a, *y = b;
+    return (x->g_start < y->g_start) ? -1 : (x->g_start > y->g_start) ? 1 : 0;
+}
+
+// Smallest d-line ordinal whose name >= prefix (1-based, like tui_find_d),
+// or n_d+1 if all names sort before prefix.  Uses oneGoto-by-index just like
+// tui_find_d; same 8192 buf size convention.
+static int64_t tui_find_d_lower_bound(OneFile *of, int64_t n_d, const char *prefix) {
+    size_t plen = strlen(prefix);
+    int64_t lo = 1, hi = n_d + 1;
+    char buf[8192];
+    while (lo < hi) {
+        int64_t mid = lo + (hi - lo) / 2;
+        if (!oneGoto(of, 'd', mid)) return n_d + 1;
+        if (oneReadLine(of) != 'd')  return n_d + 1;
+        int64_t n = oneLen(of);
+        if (n < 0 || n >= (int64_t)sizeof(buf)) return n_d + 1;
+        memcpy(buf, oneString(of), (size_t)n);
+        buf[n] = '\0';
+        int cmp = strncmp(buf, prefix, plen);
+        // First plen chars compared.  If equal so far, buf >= prefix iff
+        // either buf is strictly longer or strcmp == 0 (== prefix means
+        // buf == prefix exactly, also >= prefix).
+        int ge = (cmp > 0) || (cmp == 0);
+        if (ge) hi = mid; else lo = mid + 1;
+    }
+    return lo;
+}
+
+TuiGenomeLift *tui_genome_lift_load(Tui *tui, const char *genome_name) {
+    if (tui == NULL || genome_name == NULL || *genome_name == 0) return NULL;
+
+    OneFile *of = oneFileOpenRead(tui->path, NULL, "tui", 1);
+    if (of == NULL) return NULL;
+
+    // Match d-lines on prefix "<genome_name>." -- the writer's d-line names
+    // are always "<genome>.<sequence>".
+    size_t gn = strlen(genome_name);
+    char *prefix = st_malloc(gn + 2);
+    memcpy(prefix, genome_name, gn);
+    prefix[gn] = '.';
+    prefix[gn + 1] = 0;
+    size_t plen = gn + 1;
+
+    int64_t first = tui_find_d_lower_bound(of, tui->n_d, prefix);
+    if (first > tui->n_d) { free(prefix); oneFileClose(of); return NULL; }
+
+    // Pass 1: collect (S-ord, name, seqlen) for all matching d-lines.
+    // d-lines are name-sorted so a prefix match is a contiguous range; stop
+    // at the first non-match.
+    typedef struct { int64_t ord; char *name; int64_t seqlen; } DEnt;
+    int64_t cap = 16, n = 0;
+    DEnt *ents = st_malloc(cap * sizeof(DEnt));
+    char buf[8192];
+    for (int64_t i = first; i <= tui->n_d; i++) {
+        if (!oneGoto(of, 'd', i)) break;
+        if (oneReadLine(of) != 'd') break;
+        int64_t bn = oneLen(of);
+        if (bn < 0 || bn >= (int64_t)sizeof(buf)) break;
+        memcpy(buf, oneString(of), (size_t)bn);
+        buf[bn] = 0;
+        if (strncmp(buf, prefix, plen) != 0) break;
+        if (n == cap) { cap *= 2; ents = st_realloc(ents, cap * sizeof(DEnt)); }
+        ents[n].ord    = oneInt(of, 1);
+        ents[n].seqlen = oneInt(of, 2);
+        // Store just the sequence part (skip the "<genome>." prefix) so the
+        // returned wig records carry the bare contig name.
+        ents[n].name   = stString_copy(buf + plen);
+        n++;
+    }
+    free(prefix);
+
+    if (n == 0) { free(ents); oneFileClose(of); return NULL; }
+
+    // Pass 2: oneGoto each S-ordinal, read S+R, decode_runs, push.  Runs
+    // accumulate into one big GLRun array we'll sort at the end.
+    int64_t rcap = 1024, rn = 0;
+    GLRun *runs = st_malloc(rcap * sizeof(GLRun));
+    for (int64_t k = 0; k < n; k++) {
+        if (!oneGoto(of, 'S', ents[k].ord + 1)) continue;
+        char c = oneReadLine(of);
+        if (c != 'S') continue;
+        c = oneReadLine(of);
+        if (c != 'R') continue;
+        int64_t raw_len = oneInt(of, 0);
+        int64_t def_len = oneLen(of);
+        const uint8_t *def = (const uint8_t *)oneString(of);
+        int64_t bcap = raw_len + 3;
+        int64_t *tmp = st_malloc((bcap ? bcap : 1) * sizeof(int64_t));
+        int64_t m = decode_runs(def, def_len, raw_len, tmp, bcap);
+        for (int64_t r = 0; r < m; r++) {
+            int64_t t = tmp[3*r+0], g = tmp[3*r+1], lenc = tmp[3*r+2];
+            if (rn == rcap) { rcap *= 2; runs = st_realloc(runs, rcap * sizeof(GLRun)); }
+            runs[rn].g_start = g;
+            runs[rn].t_start = t;
+            runs[rn].length  = lenc >> 1;
+            runs[rn].strand  = (int)(1 - (lenc & 1));   // lenc&1 == 1 means reverse
+            runs[rn].seq_idx = k;
+            rn++;
+        }
+        free(tmp);
+    }
+    oneFileClose(of);
+
+    qsort(runs, rn, sizeof(GLRun), glrun_cmp);
+
+    TuiGenomeLift *gl = st_calloc(1, sizeof(TuiGenomeLift));
+    gl->n_seq = n;
+    gl->seq_names = st_malloc(n * sizeof(char*));
+    for (int64_t i = 0; i < n; i++) gl->seq_names[i] = ents[i].name;
+    free(ents);
+    gl->runs = runs;
+    gl->n_runs = rn;
+    return gl;
+}
+
+void tui_genome_lift_destruct(TuiGenomeLift *gl) {
+    if (gl == NULL) return;
+    for (int64_t i = 0; i < gl->n_seq; i++) free(gl->seq_names[i]);
+    free(gl->seq_names);
+    free(gl->runs);
+    free(gl);
+}
+
+int tui_genome_lift_column(const TuiGenomeLift *gl, int64_t column,
+                           const char **out_seq, int64_t *out_pos,
+                           bool *out_strand) {
+    if (gl == NULL || gl->n_runs == 0) return 0;
+    // Binary-search for the largest g_start <= column.
+    int64_t lo = 0, hi = gl->n_runs;
+    while (lo < hi) {
+        int64_t m = lo + (hi - lo) / 2;
+        if (gl->runs[m].g_start <= column) lo = m + 1; else hi = m;
+    }
+    int64_t i = lo - 1;
+    if (i < 0) return 0;
+    const GLRun *r = &gl->runs[i];
+    if (column >= r->g_start + r->length) return 0;
+    int64_t offset = column - r->g_start;
+    int64_t pos = r->strand ? r->t_start + offset
+                            : r->t_start + r->length - 1 - offset;
+    if (out_seq)    *out_seq    = gl->seq_names[r->seq_idx];
+    if (out_pos)    *out_pos    = pos;
+    if (out_strand) *out_strand = (r->strand != 0);
+    return 1;
+}
+
+int64_t tui_genome_lift_n_runs(const TuiGenomeLift *gl) {
+    return gl == NULL ? 0 : gl->n_runs;
+}
+
+/////////////////////////////////////////////////////////////////////////////
 // Universal-column block extractor.  Single forward scan in column order from
 // the X-index anchor; reuses tai's seek/resync/read primitives.  No per-
 // contig key => the C1 (non-monotone row-0 ancestor) failure is impossible.
