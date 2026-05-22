@@ -1146,6 +1146,13 @@ struct _TuiGenomeLift {
     int64_t n_seq;
     GLRun  *runs;        // owned; sorted by g_start
     int64_t n_runs;
+    // max_end_prefix[i] = max(runs[k].g_start + runs[k].length for k in [0..i]).
+    // Used as an early-exit during the backward scan in column lookup: if
+    // max_end_prefix[i-1] <= column, no run before index i can cover column.
+    // Bounds the scan to O(log n + paralog_count) in practice; without this
+    // the scan would be O(n) on data with a long-extending run early in the
+    // array.
+    int64_t *max_end_prefix;
 };
 
 static int glrun_cmp(const void *a, const void *b) {
@@ -1255,6 +1262,21 @@ TuiGenomeLift *tui_genome_lift_load(Tui *tui, const char *genome_name) {
 
     qsort(runs, rn, sizeof(GLRun), glrun_cmp);
 
+    // Running max of (g_start + length) over runs[0..i].  See comment on
+    // the struct field.  One int64 per run; modest overhead (~8 MB per
+    // million runs, ~200 MB on a vertebrate-scale leaf).
+    int64_t *mep = NULL;
+    if (rn > 0) {
+        mep = st_malloc(rn * sizeof(int64_t));
+        int64_t running = runs[0].g_start + runs[0].length;
+        mep[0] = running;
+        for (int64_t i = 1; i < rn; i++) {
+            int64_t e = runs[i].g_start + runs[i].length;
+            if (e > running) running = e;
+            mep[i] = running;
+        }
+    }
+
     TuiGenomeLift *gl = st_calloc(1, sizeof(TuiGenomeLift));
     gl->n_seq = n;
     gl->seq_names = st_malloc(n * sizeof(char*));
@@ -1262,6 +1284,7 @@ TuiGenomeLift *tui_genome_lift_load(Tui *tui, const char *genome_name) {
     free(ents);
     gl->runs = runs;
     gl->n_runs = rn;
+    gl->max_end_prefix = mep;
     return gl;
 }
 
@@ -1270,30 +1293,47 @@ void tui_genome_lift_destruct(TuiGenomeLift *gl) {
     for (int64_t i = 0; i < gl->n_seq; i++) free(gl->seq_names[i]);
     free(gl->seq_names);
     free(gl->runs);
+    free(gl->max_end_prefix);
     free(gl);
 }
 
 int tui_genome_lift_column(const TuiGenomeLift *gl, int64_t column,
-                           const char **out_seq, int64_t *out_pos,
-                           bool *out_strand) {
+                           TuiGenomeMatch *out, int cap) {
     if (gl == NULL || gl->n_runs == 0) return 0;
-    // Binary-search for the largest g_start <= column.
+    // Binary-search for the rightmost run with g_start <= column.
     int64_t lo = 0, hi = gl->n_runs;
     while (lo < hi) {
         int64_t m = lo + (hi - lo) / 2;
         if (gl->runs[m].g_start <= column) lo = m + 1; else hi = m;
     }
-    int64_t i = lo - 1;
-    if (i < 0) return 0;
-    const GLRun *r = &gl->runs[i];
-    if (column >= r->g_start + r->length) return 0;
-    int64_t offset = column - r->g_start;
-    int64_t pos = r->strand ? r->t_start + offset
-                            : r->t_start + r->length - 1 - offset;
-    if (out_seq)    *out_seq    = gl->seq_names[r->seq_idx];
-    if (out_pos)    *out_pos    = pos;
-    if (out_strand) *out_strand = (r->strand != 0);
-    return 1;
+    int64_t j = lo - 1;
+    if (j < 0) return 0;
+
+    // Scan backward, collecting every run whose [g_start, g_start+length)
+    // contains column.  Terminate via max_end_prefix[j-1] <= column, which
+    // proves no earlier run can cover.  Without this guard the scan would be
+    // O(n) on data with one early long run; with it, scan length is bounded
+    // by the local paralog density (~1 for unique sequence, a small handful
+    // for typical gene duplications).
+    int count = 0;
+    while (j >= 0) {
+        const GLRun *r = &gl->runs[j];
+        if (column < r->g_start + r->length) {
+            if (count < cap && out != NULL) {
+                int64_t offset = column - r->g_start;
+                out[count].seq    = gl->seq_names[r->seq_idx];
+                out[count].pos    = r->strand
+                    ? r->t_start + offset
+                    : r->t_start + r->length - 1 - offset;
+                out[count].strand = (r->strand != 0);
+            }
+            count++;
+        }
+        if (j == 0) break;
+        if (gl->max_end_prefix[j - 1] <= column) break;
+        j--;
+    }
+    return count;
 }
 
 int64_t tui_genome_lift_n_runs(const TuiGenomeLift *gl) {

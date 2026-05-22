@@ -226,31 +226,43 @@ int taf_lift_main(int argc, char *argv[]) {
         int64_t column = rev ? g + (t + len - 1 - coord)
                              : g + (coord - t);
 
-        const char *tseq_name = NULL;
-        int64_t tpos = 0;
-        bool tstrand = true;
-        if (!tui_genome_lift_column(gl, column, &tseq_name, &tpos, &tstrand)) {
-            n_no_genome++;
-            continue;
+        // Universal column -> target genome bases.  One source position can
+        // lift to MULTIPLE target positions (paralogs of the same target
+        // genome aligning to the same ancestral column).  Stack buffer for
+        // the common case (0 or 1 paralog); fall back to heap on overflow.
+        TuiGenomeMatch stack_m[32];
+        TuiGenomeMatch *m = stack_m;
+        TuiGenomeMatch *heap_m = NULL;
+        int nm = tui_genome_lift_column(gl, column, stack_m, 32);
+        if (nm == 0) { n_no_genome++; continue; }
+        if (nm > 32) {
+            heap_m = st_malloc((size_t)nm * sizeof(TuiGenomeMatch));
+            tui_genome_lift_column(gl, column, heap_m, nm);
+            m = heap_m;
         }
-        void *v = stHash_search(seqtab, (void *)tseq_name);
-        int64_t seq_idx;
-        if (v == NULL) {
-            seq_idx = stList_length(seqs);
-            stList_append(seqs, (void *)tseq_name);
-            stHash_insert(seqtab, (void *)tseq_name, (void *)(intptr_t)(seq_idx + 1));
-        } else {
-            seq_idx = (intptr_t)v - 1;
+        for (int k = 0; k < nm; k++) {
+            const char *tseq_name = m[k].seq;
+            int64_t     tpos      = m[k].pos;
+            void *v = stHash_search(seqtab, (void *)tseq_name);
+            int64_t seq_idx;
+            if (v == NULL) {
+                seq_idx = stList_length(seqs);
+                stList_append(seqs, (void *)tseq_name);
+                stHash_insert(seqtab, (void *)tseq_name, (void *)(intptr_t)(seq_idx + 1));
+            } else {
+                seq_idx = (intptr_t)v - 1;
+            }
+            if (out_n == out_cap) {
+                out_cap = out_cap ? out_cap * 2 : 1024;
+                out = st_realloc(out, out_cap * sizeof(LiftRec));
+            }
+            out[out_n].seq_idx = seq_idx;
+            out[out_n].pos     = tpos;
+            out[out_n].value   = value;
+            out_n++;
+            n_lifted++;
         }
-        if (out_n == out_cap) {
-            out_cap = out_cap ? out_cap * 2 : 1024;
-            out = st_realloc(out, out_cap * sizeof(LiftRec));
-        }
-        out[out_n].seq_idx = seq_idx;
-        out[out_n].pos     = tpos;
-        out[out_n].value   = value;
-        out_n++;
-        n_lifted++;
+        free(heap_m);
     }
     LI_destruct(wli);
     fclose(wf);

@@ -151,14 +151,30 @@ TuiGenomeLift *tui_genome_lift_load(Tui *tui, const char *genome_name);
 void tui_genome_lift_destruct(TuiGenomeLift *gl);
 
 /*
- * Look up the target genome coordinate at universal column `column`.
- * Returns 1 on success (sets *out_seq -- BORROWED, owned by gl; *out_pos --
- * 0-based forward coord; *out_strand -- true for '+'); returns 0 if the
- * column has no base from this genome.
+ * One (sequence, position, strand) match returned by tui_genome_lift_column.
+ * `seq` is BORROWED from the gl -- valid until tui_genome_lift_destruct.
+ */
+typedef struct {
+    const char *seq;
+    int64_t     pos;
+    bool        strand;
+} TuiGenomeMatch;
+
+/*
+ * Look up ALL of the target genome's bases mapped to universal column
+ * `column`.  The one-to-many direction: every base of a genome maps to at
+ * most one column (cactus-hal2maf --universal --noRefDupes invariant), but
+ * one column can carry several bases of the same genome -- paralogs aligned
+ * to the same ancestral position.
+ *
+ * Fills the caller-supplied `out[]` buffer with up to `cap` matches (in
+ * unspecified order) and returns the ACTUAL match count.  If the return
+ * value exceeds `cap`, only the first `cap` entries are filled; the caller
+ * may retry with a larger buffer to get the remainder.  Pass cap=0 (out can
+ * be NULL) to just count.
  */
 int tui_genome_lift_column(const TuiGenomeLift *gl, int64_t column,
-                           const char **out_seq, int64_t *out_pos,
-                           bool *out_strand);
+                           TuiGenomeMatch *out, int cap);
 
 /* Number of column-sorted runs loaded (diagnostics / sizing). */
 int64_t tui_genome_lift_n_runs(const TuiGenomeLift *gl);
