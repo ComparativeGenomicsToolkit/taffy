@@ -132,19 +132,34 @@ int64_t *tui_load_seq_runs(Tui *tui, const char *seq_name, int64_t *n_out);
 // The on-disk lift table is sorted by (sequence, t_start), i.e. genome
 // coord -- the primary `taffy view` use case is "genome.seq:p -> columns".
 // For column-keyed lookups (e.g. annotation liftover from row-0 to a leaf)
-// we need a column-sorted view.  Build one at load time by concatenating
-// every sequence's runs that belongs to the target genome and qsort'ing by
-// the universal-column start.  Then each column lookup is O(log n_runs).
-// One-time load cost is O(n_runs) decode + O(n_runs log n_runs) sort; for
-// a vertebrate leaf that's a few seconds and a few hundred MB.
+// we need a column-sorted view.  The .tui groups each sequence's runs into
+// column-window chunks (writer's TUI_CHUNK_RUNS); load time pulls only each
+// chunk's (g_min, g_max) plus a pointer to its R blob.  The R blob's runs
+// are decoded LAZILY on the first column query that hits that chunk -- so
+// narrow queries (annotation lift to one chromosome) pay only a handful of
+// decodes, not the full per-genome decode cost.
+//
+// Memory: once decoded, a chunk's runs stay resident for the lifetime of
+// the TuiGenomeLift (no eviction; the lift access pattern is a sequential
+// sweep through universal columns, where LRU would thrash).  Worst case
+// (full-genome lift touches every chunk) holds the entire target genome's
+// lift table in memory, same memory ceiling as a single-shot eager load
+// would have used, just amortized as queries fire.
+//
+// Thread-safety: the TuiGenomeLift holds an open OneFile cursor for lazy R
+// decoding AND lazily mutates chunk state on first hit.  All calls on the
+// same TuiGenomeLift must be serialized.  (The parent Tui is a separate
+// object and can be shared across threads as long as each thread builds
+// its own TuiGenomeLift via tui_genome_lift_load.)
 /////////////////////////////////////////////////////////////////////////////
 
 typedef struct _TuiGenomeLift TuiGenomeLift;
 
 /*
- * Load every "<genome_name>.*" sequence's runs from the .tui, decode, merge,
- * sort by universal column.  Returns NULL on I/O error or if no d-line
- * matches the prefix.
+ * Open the per-genome lift table for "<genome_name>.*" sequences.  Reads
+ * each sequence's chunk metadata (small) but does NOT decode the per-chunk
+ * R blobs -- those are loaded on first query hit (see header comment).
+ * Returns NULL on I/O error or if no d-line matches the prefix.
  */
 TuiGenomeLift *tui_genome_lift_load(Tui *tui, const char *genome_name);
 
@@ -176,7 +191,13 @@ typedef struct {
 int tui_genome_lift_column(const TuiGenomeLift *gl, int64_t column,
                            TuiGenomeMatch *out, int cap);
 
-/* Number of column-sorted runs loaded (diagnostics / sizing). */
+/* Number of column chunks indexed for this genome (set at load time;
+ * does NOT grow with lazy decodes).  Use for the startup diagnostic. */
+int64_t tui_genome_lift_n_chunks(const TuiGenomeLift *gl);
+
+/* Cumulative count of runs currently decoded into memory.  Starts at 0
+ * (lazy load) and grows monotonically as queries hit new chunks.  Useful
+ * for end-of-run diagnostics, NOT for sizing at load time. */
 int64_t tui_genome_lift_n_runs(const TuiGenomeLift *gl);
 
 /////////////////////////////////////////////////////////////////////////////

@@ -45,7 +45,15 @@ static const char *TUI_SCHEMA =
     "D X 3 3 INT 3 INT 6 STRING\n"           // univ-col index: inflatedLen, nRec, deflate(SoA)
     "O d 3 6 STRING 3 INT 3 INT\n"           // dir: seqName, S-ordinal, seqLen -- O so oneGoto works
     "O S 2 6 STRING 3 INT\n"                 // sequence object: seqName, seqLen
-    "D R 2 3 INT 6 STRING\n";                // runs: inflatedLen, deflate(blob)
+    "O C 4 3 INT 3 INT 3 INT 3 INT\n"        // chunk header: g_min, g_max, parent S-ord (1-based), self c_ord (1-based)
+    "D R 2 3 INT 6 STRING\n";                // runs (one per chunk): inflatedLen, deflate(blob)
+
+// Writer-side chunk size: target chunk has at most this many merged runs.
+// Picked to keep each R blob a few MB compressed (a typical run encodes to
+// ~25 bytes after delta+varint+deflate at 64k runs/chunk ≈ ~1.6 MB).  This
+// gives ~250 chunks per gorilla chr1 (~16M runs) which is the lazy-load
+// granularity for narrow queries.
+#define TUI_CHUNK_RUNS 65536
 
 char *tui_path(const char *maf_path) {
     char *p = st_malloc(strlen(maf_path) + 5);
@@ -944,6 +952,11 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
                "%" PRIi64 " genomes)\n", n_genomes);
     int64_t genome_idx = 0;
     int64_t i = 0;
+    // File-order C ordinal counter, incremented as each C is emitted.
+    // Stored back in the C record itself (C's 4th field) so the reader
+    // doesn't have to rely on ONElib's oneObject() accumulator -- which is
+    // off-by-one after a cross-type oneGoto in this lib version.
+    int64_t c_ord_emit = 0;
     while (i < n_seqs) {
         char *gname = seqks[i].genome;  // groups spill files; not emitted
         time_t t_g_start = time(NULL);
@@ -1006,19 +1019,52 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
                 buf[3*m+2] = (rl << 1) | (rs == '-' ? 1 : 0);
                 m++;
             }
-            // Encode merged triples -> zigzag-delta varint -> deflate.
-            int64_t raw_len = 0, def_len = 0;
-            uint8_t *def = encode_runs(buf, m, &raw_len, &def_len);
-            // Self-check: decode must reproduce the triples exactly.  taffy
-            // builds with asserts on, so this validates the codec on every
-            // file (incl. the real vertebrate-scale ones), losslessly.
-            int64_t *chk = st_malloc((m ? 3 * m : 1) * sizeof(int64_t));
-            int64_t dm = decode_runs(def, def_len, raw_len, chk, 3 * m);
-            assert(dm == m && memcmp(chk, buf, (size_t)(3 * m) * sizeof(int64_t)) == 0);
-            free(chk);
-            oneInt(of, 0) = raw_len;
-            oneWriteLine(of, 'R', def_len, def);
-            free(def);
+            // Partition the merged-run array into chunks of <= TUI_CHUNK_RUNS
+            // triples, emit a C (g_min, g_max, parent_S_ord, self_c_ord)
+            // header + an R blob per chunk.  Empty sequences (m == 0) emit
+            // no chunks.  self_c_ord is the 1-based file-order C ordinal of
+            // THIS C; the reader uses it for oneGoto(C, c_ord) during lazy
+            // R decode -- ONElib's oneObject(C) accumulator after a
+            // cross-type oneGoto returns the wrong value in this version,
+            // so we carry the ordinal explicitly.
+            int64_t s_ord = i + 1;  // 1-based S ordinal of THIS sequence
+            int64_t chunk_pos = 0;
+            while (chunk_pos < m) {
+                int64_t cm = m - chunk_pos;
+                if (cm > TUI_CHUNK_RUNS) cm = TUI_CHUNK_RUNS;
+                int64_t *cb = &buf[3 * chunk_pos];
+                // Compute (g_min, g_max) over the chunk's runs in UNIVERSAL
+                // COLUMN coords (cb[3*k+1] == g).  cb[3*k+0] is genome-forward
+                // t, which is NOT what the lift-by-column query keys on --
+                // mixing them up makes every chunk's range appear in the
+                // wrong coordinate space and the reader misses matches.
+                int64_t g_min = cb[1];
+                int64_t g_max = cb[1] + (cb[2] >> 1);
+                for (int64_t k = 1; k < cm; k++) {
+                    int64_t g  = cb[3*k+1];
+                    int64_t le = (cb[3*k+2] >> 1);
+                    if (g < g_min) g_min = g;
+                    if (g + le > g_max) g_max = g + le;
+                }
+                ++c_ord_emit;
+                oneInt(of, 0) = g_min;
+                oneInt(of, 1) = g_max;
+                oneInt(of, 2) = s_ord;
+                oneInt(of, 3) = c_ord_emit;
+                oneWriteLine(of, 'C', 0, NULL);
+                int64_t raw_len = 0, def_len = 0;
+                uint8_t *def = encode_runs(cb, cm, &raw_len, &def_len);
+                // Self-check the codec per-chunk (same validation as the
+                // pre-chunked path).
+                int64_t *chk = st_malloc((cm ? 3 * cm : 1) * sizeof(int64_t));
+                int64_t dm = decode_runs(def, def_len, raw_len, chk, 3 * cm);
+                assert(dm == cm && memcmp(chk, cb, (size_t)(3 * cm) * sizeof(int64_t)) == 0);
+                free(chk);
+                oneInt(of, 0) = raw_len;
+                oneWriteLine(of, 'R', def_len, def);
+                free(def);
+                chunk_pos += cm;
+            }
             free(buf);
             rc = bnd;   // advance cursor past this seq's runs
             i++;
@@ -1166,30 +1212,34 @@ TuiInterval *tui_query(Tui *tui, const char *seq_name,
     int64_t ord = tui_find_d(of, tui->n_d, seq_name, NULL);
     if (ord < 0) { oneFileClose(of); return NULL; }
 
-    // Jump straight to the (ord+1)-th S object via the ONElib footer index.
-    // After the goto, oneReadLine() returns the S line, then the matching R
-    // line follows immediately (writer emits S; R; S; R; ... per genome).
+    // Jump to the (ord+1)-th S object via the ONElib footer index; after the
+    // goto, oneReadLine() returns S then (C, R)+ chunk pairs.
     if (!oneGoto(of, 'S', ord + 1)) { oneFileClose(of); return NULL; }
-    int64_t *runs = NULL, m = 0;
+    int64_t *runs = NULL;
     char c = oneReadLine(of);
     if (c != 'S') { oneFileClose(of); return NULL; }
-    // Sanity check the S name matches what the directory said (would only
-    // fail on a corrupted / wrongly-built .tui).
     int64_t sn = oneLen(of);
     if (sn != (int64_t)strlen(seq_name) ||
         memcmp(oneString(of), seq_name, sn) != 0) {
         oneFileClose(of);
         return NULL;
     }
-    c = oneReadLine(of);
-    if (c != 'R') { oneFileClose(of); return NULL; }
-    int64_t raw_len = oneInt(of, 0);
-    int64_t def_len = oneLen(of);
-    const uint8_t *def = (const uint8_t *)oneString(of);
-    int64_t cap = raw_len + 3;              // m <= raw_len/3 -> 3*m <= raw_len
-    runs = st_malloc((cap ? cap : 1) * sizeof(int64_t));
-    m = decode_runs(def, def_len, raw_len, runs, cap);
+    int64_t total = 0, cap = 0;
+    while ((c = oneReadLine(of)) == 'C') {
+        if (oneReadLine(of) != 'R') break;
+        int64_t raw_len = oneInt(of, 0);
+        int64_t def_len = oneLen(of);
+        const uint8_t *def = (const uint8_t *)oneString(of);
+        int64_t need = total + raw_len + 3;
+        if (need > cap) {
+            cap = need;
+            runs = st_realloc(runs, (cap ? cap : 1) * sizeof(int64_t));
+        }
+        int64_t cm = decode_runs(def, def_len, raw_len, runs + total, raw_len + 3);
+        total += 3 * cm;
+    }
     oneFileClose(of);
+    int64_t m = total / 3;
     if (m == 0) { free(runs); return NULL; }
 
     // Clip each overlapping run to [start,end), map to a column interval.
@@ -1244,17 +1294,25 @@ int64_t *tui_load_seq_runs(Tui *tui, const char *seq_name, int64_t *n_out) {
         oneFileClose(of);
         return NULL;
     }
-    c = oneReadLine(of);
-    if (c != 'R') { oneFileClose(of); return NULL; }
-    int64_t raw_len = oneInt(of, 0);
-    int64_t def_len = oneLen(of);
-    const uint8_t *def = (const uint8_t *)oneString(of);
-    int64_t cap = raw_len + 3;
-    int64_t *runs = st_malloc((cap ? cap : 1) * sizeof(int64_t));
-    int64_t m = decode_runs(def, def_len, raw_len, runs, cap);
+    // Walk (C, R)+ chunk pairs and concat decoded triples into one flat array.
+    int64_t *runs = NULL;
+    int64_t total = 0, cap = 0;
+    while ((c = oneReadLine(of)) == 'C') {
+        if (oneReadLine(of) != 'R') break;
+        int64_t raw_len = oneInt(of, 0);
+        int64_t def_len = oneLen(of);
+        const uint8_t *def = (const uint8_t *)oneString(of);
+        int64_t need = total + raw_len + 3;
+        if (need > cap) {
+            cap = need;
+            runs = st_realloc(runs, (cap ? cap : 1) * sizeof(int64_t));
+        }
+        int64_t cm = decode_runs(def, def_len, raw_len, runs + total, raw_len + 3);
+        total += 3 * cm;
+    }
     oneFileClose(of);
-    if (m == 0) { free(runs); return NULL; }
-    *n_out = m;
+    if (total == 0) { free(runs); return NULL; }
+    *n_out = total / 3;
     return runs;
 }
 
@@ -1270,23 +1328,42 @@ typedef struct {
     int     strand;      // 1 = '+', 0 = '-'
 } GLRun;
 
-struct _TuiGenomeLift {
-    char  **seq_names;   // owned; one per sequence loaded
-    int64_t n_seq;
-    GLRun  *runs;        // owned; sorted by g_start
+// One chunk of a sequence's runs.  The .tui's C metadata is read at open
+// (cheap) into these structs; the GLRun array is built lazily on first
+// query hit via chunk_decode().  g_min / g_max enable a "skip if column
+// outside" test before paying the decode cost.
+typedef struct {
+    int64_t g_min, g_max;        // column range from the C record
+    int64_t c_ord;               // 1-based C ordinal for oneGoto lazy load
+    int64_t seq_idx;             // index into TuiGenomeLift::seq_names
+    GLRun  *runs;                // NULL until decoded; sorted by g_start
     int64_t n_runs;
-    // max_end_prefix[i] = max(runs[k].g_start + runs[k].length for k in [0..i]).
-    // Used as an early-exit during the backward scan in column lookup: if
-    // max_end_prefix[i-1] <= column, no run before index i can cover column.
-    // Bounds the scan to O(log n + paralog_count) in practice; without this
-    // the scan would be O(n) on data with a long-extending run early in the
-    // array.
+    // max_end_prefix[i] = max(runs[k].g_start + runs[k].length for k in
+    // [0..i]).  Used as an early-exit during the backward scan in
+    // chunk_collect: if max_end_prefix[j-1] <= column, no earlier run can
+    // cover.  Bounds the scan to O(log n + paralog_count).
     int64_t *max_end_prefix;
+} TGLChunk;
+
+struct _TuiGenomeLift {
+    char     **seq_names;        // owned; one per sequence loaded
+    int64_t    n_seq;
+    TGLChunk  *chunks;           // owned; sorted by g_min
+    int64_t    n_chunks;
+    // Running max(chunk.g_max) over chunks[0..i] -- same shape as
+    // TGLChunk::max_end_prefix, but over chunks for the outer scan.
+    int64_t   *chunk_max_end;
+    OneFile   *of;               // kept open for lazy R decoding
 };
 
 static int glrun_cmp(const void *a, const void *b) {
     const GLRun *x = a, *y = b;
     return (x->g_start < y->g_start) ? -1 : (x->g_start > y->g_start) ? 1 : 0;
+}
+
+static int tglchunk_cmp_gmin(const void *a, const void *b) {
+    const TGLChunk *x = a, *y = b;
+    return (x->g_min < y->g_min) ? -1 : (x->g_min > y->g_min) ? 1 : 0;
 }
 
 // Smallest d-line ordinal whose name >= prefix (1-based, like tui_find_d),
@@ -1359,51 +1436,63 @@ TuiGenomeLift *tui_genome_lift_load(Tui *tui, const char *genome_name) {
 
     if (n == 0) { free(ents); oneFileClose(of); return NULL; }
 
-    // Pass 2: oneGoto each S-ordinal, read S+R, decode_runs, push.  Runs
-    // accumulate into one big GLRun array we'll sort at the end.
-    int64_t rcap = 1024, rn = 0;
-    GLRun *runs = st_malloc(rcap * sizeof(GLRun));
-    for (int64_t k = 0; k < n; k++) {
-        if (!oneGoto(of, 'S', ents[k].ord + 1)) continue;
-        char c = oneReadLine(of);
-        if (c != 'S') continue;
-        c = oneReadLine(of);
-        if (c != 'R') continue;
-        int64_t raw_len = oneInt(of, 0);
-        int64_t def_len = oneLen(of);
-        const uint8_t *def = (const uint8_t *)oneString(of);
-        int64_t bcap = raw_len + 3;
-        int64_t *tmp = st_malloc((bcap ? bcap : 1) * sizeof(int64_t));
-        int64_t m = decode_runs(def, def_len, raw_len, tmp, bcap);
-        for (int64_t r = 0; r < m; r++) {
-            int64_t t = tmp[3*r+0], g = tmp[3*r+1], lenc = tmp[3*r+2];
-            if (rn == rcap) { rcap *= 2; runs = st_realloc(runs, rcap * sizeof(GLRun)); }
-            runs[rn].g_start = g;
-            runs[rn].t_start = t;
-            runs[rn].length  = lenc >> 1;
-            runs[rn].strand  = (int)(1 - (lenc & 1));   // lenc&1 == 1 means reverse
-            runs[rn].seq_idx = k;
-            rn++;
+    // Pass 2: per-S walk -- for each of our target's sequences, oneGoto its
+    // S, then iterate (C, R)+ pairs reading only the C (oneGoto past R via
+    // its next-C ordinal).  Bypasses the global C list (which can be
+    // ~hundreds of thousands at vertebrate scale -- this targets only our
+    // few-tens to few-thousand seqs).  R blobs stay on disk; chunk_decode
+    // pulls them lazily on first column-query hit.
+    int64_t cap_c = 1024, nc = 0;
+    TGLChunk *chunks = st_malloc(cap_c * sizeof(TGLChunk));
+    for (int64_t k_seq = 0; k_seq < n; k_seq++) {
+        int64_t s_ord = ents[k_seq].ord + 1;
+        if (!oneGoto(of, 'S', s_ord)) continue;
+        if (oneReadLine(of) != 'S') continue;
+        char c;
+        while ((c = oneReadLine(of)) == 'C') {
+            // The writer always pairs each C with the same seq's R+ chunks,
+            // so the parent S-ord on a C should match the seq we jumped to.
+            // A mismatch means we've walked into the next seq's chunks --
+            // bail to the next outer iteration.  c_ord (the 4th field) is
+            // the writer-stamped file-order ordinal; we use it instead of
+            // ONElib's oneObject() since the accumulator is unreliable
+            // after a cross-type oneGoto in this lib version.
+            if (oneInt(of, 2) != s_ord) break;
+            int64_t cur_c_ord = oneInt(of, 3);
+            if (nc == cap_c) { cap_c *= 2; chunks = st_realloc(chunks, cap_c * sizeof(TGLChunk)); }
+            chunks[nc].g_min          = oneInt(of, 0);
+            chunks[nc].g_max          = oneInt(of, 1);
+            chunks[nc].c_ord          = cur_c_ord;
+            chunks[nc].seq_idx        = k_seq;
+            chunks[nc].runs           = NULL;
+            chunks[nc].n_runs         = 0;
+            chunks[nc].max_end_prefix = NULL;
+            nc++;
+            // Skip the paired R by oneGoto-ing to the next C in the file.
+            // Avoids reading R's deflated bytes -- only the C metadata
+            // crosses the disk at open; R waits for the first column hit.
+            if (!oneGoto(of, 'C', cur_c_ord + 1)) break;
         }
-        free(tmp);
+        (void)c;
     }
-    oneFileClose(of);
 
-    qsort(runs, rn, sizeof(GLRun), glrun_cmp);
+    if (nc == 0) {
+        // Target has no chunks (empty sequences or unknown genome).
+        free(chunks);
+        for (int64_t i = 0; i < n; i++) free(ents[i].name);
+        free(ents);
+        oneFileClose(of);
+        return NULL;
+    }
+    qsort(chunks, nc, sizeof(TGLChunk), tglchunk_cmp_gmin);
 
-    // Running max of (g_start + length) over runs[0..i].  See comment on
-    // the struct field.  One int64 per run; modest overhead (~8 MB per
-    // million runs, ~200 MB on a vertebrate-scale leaf).
-    int64_t *mep = NULL;
-    if (rn > 0) {
-        mep = st_malloc(rn * sizeof(int64_t));
-        int64_t running = runs[0].g_start + runs[0].length;
-        mep[0] = running;
-        for (int64_t i = 1; i < rn; i++) {
-            int64_t e = runs[i].g_start + runs[i].length;
-            if (e > running) running = e;
-            mep[i] = running;
-        }
+    // Running max(g_max) over chunks[0..i] for the outer scan's early exit.
+    int64_t *cme = st_malloc(nc * sizeof(int64_t));
+    int64_t running = chunks[0].g_max;
+    cme[0] = running;
+    for (int64_t i = 1; i < nc; i++) {
+        if (chunks[i].g_max > running) running = chunks[i].g_max;
+        cme[i] = running;
     }
 
     TuiGenomeLift *gl = st_calloc(1, sizeof(TuiGenomeLift));
@@ -1411,9 +1500,10 @@ TuiGenomeLift *tui_genome_lift_load(Tui *tui, const char *genome_name) {
     gl->seq_names = st_malloc(n * sizeof(char*));
     for (int64_t i = 0; i < n; i++) gl->seq_names[i] = ents[i].name;
     free(ents);
-    gl->runs = runs;
-    gl->n_runs = rn;
-    gl->max_end_prefix = mep;
+    gl->chunks        = chunks;
+    gl->n_chunks      = nc;
+    gl->chunk_max_end = cme;
+    gl->of            = of;     // kept open; destruct closes
     return gl;
 }
 
@@ -1421,36 +1511,77 @@ void tui_genome_lift_destruct(TuiGenomeLift *gl) {
     if (gl == NULL) return;
     for (int64_t i = 0; i < gl->n_seq; i++) free(gl->seq_names[i]);
     free(gl->seq_names);
-    free(gl->runs);
-    free(gl->max_end_prefix);
+    for (int64_t i = 0; i < gl->n_chunks; i++) {
+        free(gl->chunks[i].runs);
+        free(gl->chunks[i].max_end_prefix);
+    }
+    free(gl->chunks);
+    free(gl->chunk_max_end);
+    if (gl->of != NULL) oneFileClose(gl->of);
     free(gl);
 }
 
-int tui_genome_lift_column(const TuiGenomeLift *gl, int64_t column,
-                           TuiGenomeMatch *out, int cap) {
-    if (gl == NULL || gl->n_runs == 0) return 0;
-    // Binary-search for the rightmost run with g_start <= column.
-    int64_t lo = 0, hi = gl->n_runs;
+// Lazy-decode one chunk: oneGoto its C, read past C into the paired R, decode
+// the run triples, build GLRun array (sorted by g_start), build per-chunk
+// max_end_prefix.  No-op if already decoded.  Caller must serialize calls
+// on the same gl (the OneFile handle is not thread-safe).
+static void chunk_decode(TGLChunk *ch, OneFile *of) {
+    if (ch->runs != NULL) return;
+    if (!oneGoto(of, 'C', ch->c_ord)) return;
+    char c = oneReadLine(of);                  // C
+    if (c != 'C') return;
+    c = oneReadLine(of);                       // R (paired)
+    if (c != 'R') return;
+    int64_t raw_len = oneInt(of, 0);
+    int64_t def_len = oneLen(of);
+    const uint8_t *def = (const uint8_t *)oneString(of);
+    int64_t bcap = raw_len + 3;
+    int64_t *tmp = st_malloc((bcap ? bcap : 1) * sizeof(int64_t));
+    int64_t m = decode_runs(def, def_len, raw_len, tmp, bcap);
+    if (m == 0) { free(tmp); ch->n_runs = 0; ch->runs = (GLRun *)st_calloc(1, 1); return; }
+    GLRun *rs = st_malloc((size_t)m * sizeof(GLRun));
+    for (int64_t i = 0; i < m; i++) {
+        int64_t t = tmp[3*i+0], g = tmp[3*i+1], lenc = tmp[3*i+2];
+        rs[i].g_start = g;
+        rs[i].t_start = t;
+        rs[i].length  = lenc >> 1;
+        rs[i].strand  = (int)(1 - (lenc & 1));
+        rs[i].seq_idx = ch->seq_idx;
+    }
+    free(tmp);
+    qsort(rs, m, sizeof(GLRun), glrun_cmp);
+    int64_t *mep = st_malloc((size_t)m * sizeof(int64_t));
+    int64_t running = rs[0].g_start + rs[0].length;
+    mep[0] = running;
+    for (int64_t i = 1; i < m; i++) {
+        int64_t e = rs[i].g_start + rs[i].length;
+        if (e > running) running = e;
+        mep[i] = running;
+    }
+    ch->runs           = rs;
+    ch->n_runs         = m;
+    ch->max_end_prefix = mep;
+}
+
+// Search within one decoded chunk for runs covering `column`; append to out[].
+// Mirrors the legacy backward-scan-with-prefix-bound; bounded by per-chunk
+// paralog density.
+static int chunk_collect(const TGLChunk *ch, int64_t column,
+                         TuiGenomeMatch *out, int cap, int already, const char *seq_name) {
+    if (ch->n_runs == 0) return already;
+    int64_t lo = 0, hi = ch->n_runs;
     while (lo < hi) {
         int64_t m = lo + (hi - lo) / 2;
-        if (gl->runs[m].g_start <= column) lo = m + 1; else hi = m;
+        if (ch->runs[m].g_start <= column) lo = m + 1; else hi = m;
     }
     int64_t j = lo - 1;
-    if (j < 0) return 0;
-
-    // Scan backward, collecting every run whose [g_start, g_start+length)
-    // contains column.  Terminate via max_end_prefix[j-1] <= column, which
-    // proves no earlier run can cover.  Without this guard the scan would be
-    // O(n) on data with one early long run; with it, scan length is bounded
-    // by the local paralog density (~1 for unique sequence, a small handful
-    // for typical gene duplications).
-    int count = 0;
+    int count = already;
     while (j >= 0) {
-        const GLRun *r = &gl->runs[j];
+        const GLRun *r = &ch->runs[j];
         if (column < r->g_start + r->length) {
             if (count < cap && out != NULL) {
                 int64_t offset = column - r->g_start;
-                out[count].seq    = gl->seq_names[r->seq_idx];
+                out[count].seq    = seq_name;
                 out[count].pos    = r->strand
                     ? r->t_start + offset
                     : r->t_start + r->length - 1 - offset;
@@ -1459,14 +1590,55 @@ int tui_genome_lift_column(const TuiGenomeLift *gl, int64_t column,
             count++;
         }
         if (j == 0) break;
-        if (gl->max_end_prefix[j - 1] <= column) break;
+        if (ch->max_end_prefix[j - 1] <= column) break;
         j--;
     }
     return count;
 }
 
+// Find chunks intersecting `column`, lazy-decode them on first hit, search
+// within.  The outer scan terminates via chunk_max_end[i-1] <= column (same
+// early-exit shape as the per-chunk max_end_prefix used in chunk_collect,
+// just lifted to chunks).
+int tui_genome_lift_column(const TuiGenomeLift *gl, int64_t column,
+                           TuiGenomeMatch *out, int cap) {
+    if (gl == NULL || gl->n_chunks == 0) return 0;
+    // chunks are logically mutable for lazy decode -- the gl pointer is
+    // const-by-API but the underlying entries get filled in on first hit.
+    TGLChunk *cs = gl->chunks;
+    int64_t lo = 0, hi = gl->n_chunks;
+    while (lo < hi) {
+        int64_t m = lo + (hi - lo) / 2;
+        if (cs[m].g_min <= column) lo = m + 1; else hi = m;
+    }
+    int64_t j = lo - 1;
+    int count = 0;
+    while (j >= 0) {
+        TGLChunk *ch = &cs[j];
+        if (column < ch->g_max) {
+            if (ch->runs == NULL) chunk_decode(ch, gl->of);
+            count = chunk_collect(ch, column, out, cap, count,
+                                  gl->seq_names[ch->seq_idx]);
+        }
+        if (j == 0) break;
+        if (gl->chunk_max_end[j - 1] <= column) break;
+        j--;
+    }
+    return count;
+}
+
+int64_t tui_genome_lift_n_chunks(const TuiGenomeLift *gl) {
+    return gl == NULL ? 0 : gl->n_chunks;
+}
+
+// Cumulative count of runs currently decoded into memory.  Starts at 0
+// (lazy load) and grows monotonically as queries hit new chunks.  Useful
+// for end-of-run diagnostics; for a static "size at load" use n_chunks.
 int64_t tui_genome_lift_n_runs(const TuiGenomeLift *gl) {
-    return gl == NULL ? 0 : gl->n_runs;
+    if (gl == NULL) return 0;
+    int64_t s = 0;
+    for (int64_t i = 0; i < gl->n_chunks; i++) s += gl->chunks[i].n_runs;
+    return s;
 }
 
 /////////////////////////////////////////////////////////////////////////////

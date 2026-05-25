@@ -95,8 +95,8 @@ int taf_lift_main(int argc, char *argv[]) {
         free(tui_p);
         return 1;
     }
-    st_logInfo("Loaded %" PRIi64 " runs for target genome '%s' in %" PRIi64 " s\n",
-               tui_genome_lift_n_runs(gl), target_genome, (int64_t)(time(NULL) - t0));
+    st_logInfo("Indexed %" PRIi64 " chunks for target genome '%s' in %" PRIi64 " s\n",
+               tui_genome_lift_n_chunks(gl), target_genome, (int64_t)(time(NULL) - t0));
 
     // String-table for the output target-sequence names so the output
     // records can be sorted by (seq_idx, pos) cheaply.
