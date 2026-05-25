@@ -24,12 +24,13 @@
 
 static void usage(void) {
     fprintf(stderr, "taffy lift [options]\n");
-    fprintf(stderr, "Lift a .wig annotation from universal MAF row-0 (ancestor) coords to a target leaf genome via the .tui index\n");
+    fprintf(stderr, "Lift a .wig OR a BED annotation from universal MAF row-0 (ancestor) coords to a target leaf genome via the .tui index\n");
     fprintf(stderr, "-i --inputFile [FILE_NAME] : REQUIRED Path to the universal MAF/TAF (its .tui sidecar is expected at <input>.tui)\n");
-    fprintf(stderr, "-w --wig       [FILE_NAME] : REQUIRED Input .wig in ancestor row-0 coords (chrom = full genome.sequence)\n");
+    fprintf(stderr, "-w --wig       [FILE_NAME] : Input .wig in ancestor row-0 coords (chrom = full genome.sequence) -- OR --\n");
+    fprintf(stderr, "-b --bed       [FILE_NAME] : Input BED3+ in ancestor row-0 coords (chrom = full genome.sequence).  Exactly one of -w / -b is required.\n");
     fprintf(stderr, "-g --genome    [STRING]    : REQUIRED Target genome name (e.g. hg38)\n");
-    fprintf(stderr, "-o --outputFile [FILE_NAME] : Output wig (default stdout)\n");
-    fprintf(stderr, "-m --memCap    [SIZE]      : Max in-memory output buffer before spilling to disk; suffix K/M/G allowed (default 2G).  Env TAFFY_LIFT_BUDGET_MB also honored (CLI wins).\n");
+    fprintf(stderr, "-o --outputFile [FILE_NAME] : Output (wig if input was wig, BED if input was BED; default stdout)\n");
+    fprintf(stderr, "-m --memCap    [SIZE]      : (wig mode) Max in-memory output buffer before spilling to disk; suffix K/M/G allowed (default 2G).  Env TAFFY_LIFT_BUDGET_MB also honored (CLI wins).\n");
     fprintf(stderr, "-l --logLevel  : Set log level\n");
     fprintf(stderr, "-h --help      : Print this help\n");
 }
@@ -452,11 +453,277 @@ static int lift_merge_spills(char **paths, int n_paths, FILE *out_fh, stList *se
     return 0;
 }
 
+/////////////////////////////////////////////////////////////////////////////
+// BED lift path: input BED3+ in source-genome coords -> output BED with the
+// same shape (BED3 in -> BED3 out; BED4+ in -> BED4+ out with target coords
+// substituted for cols 0-2 and the target strand recomputed for col 5).
+//
+// For each input interval:
+//   1. tui_query() maps the source seq range to a set of universal-column
+//      intervals (sorted, disjoint, half-open).
+//   2. Within each column interval, walk column by column.  For each column
+//      tui_genome_lift_column() returns up to N target matches (paralogs).
+//   3. Maintain a small fixed array of "open" target intervals.  Each match
+//      either extends an existing open (same seq+strand, next consecutive
+//      target pos) or starts a new one.  Opens not extended on a given
+//      column are closed + emitted; opens still active at the end of a
+//      column-interval are also closed (a gap in the universal-column
+//      walk corresponds to non-monotonic / non-orthologous target coords
+//      where we can't continue the run).
+//
+// Output is emitted in source-walk order, NOT globally sorted by target.
+// Users wanting target-sorted output can pipe through `sort -k1,1 -k2,2n`.
+/////////////////////////////////////////////////////////////////////////////
+
+#define BED_MAX_OPEN 32   // max simultaneous open target intervals (= paralog cap)
+
+typedef struct {
+    const char *seq;      // borrowed from gl->seq_names; pointer-stable per gl
+    int64_t     start;    // 0-based inclusive
+    int64_t     end;      // 0-based exclusive
+    int         strand;   // 1 = '+', 0 = '-'
+    int         active;
+} OpenBedInterval;
+
+// Emit one BED line.  out_strand is '+' or '-'; pass 0 to omit the strand
+// column entirely (used when input BED had no strand column).  Cols 3+
+// (name, score, ...) are passed through verbatim from `extra` (may be NULL
+// or empty).  Caller computes target strand from (input_strand XOR match
+// strand) BEFORE this call.
+static void emit_bed_line(FILE *fh, const char *seq, int64_t start,
+                          int64_t end, const char *name, const char *score,
+                          char out_strand) {
+    fprintf(fh, "%s\t%" PRIi64 "\t%" PRIi64, seq, start, end);
+    if (name) {
+        fprintf(fh, "\t%s", name);
+        if (score) {
+            fprintf(fh, "\t%s", score);
+            if (out_strand) {
+                fprintf(fh, "\t%c", out_strand);
+            }
+        }
+    }
+    fputc('\n', fh);
+}
+
+// Close open BED intervals matching the predicate, emit one BED line per
+// closed interval, and bump *n_out_p (NULL OK).  `used_this_col` is a
+// per-call mask: if NULL, every active open is closed; if non-NULL, only
+// active opens NOT in the mask are closed (i.e. those that didn't get
+// extended this column).  Output strand for each closed interval is the
+// XOR of `input_strand_sign` (+1 / -1) and the open's alignment strand;
+// `emit_strand` controls whether the strand column appears at all (set
+// false for BED3/4/5 in -> no strand out, or input strand '.').
+static void close_opens(FILE *fh, OpenBedInterval *open, int n_open,
+                        const int *used_this_col, int input_strand_sign,
+                        const char *name, const char *score, int emit_strand,
+                        int64_t *n_out_p) {
+    for (int s = 0; s < n_open; s++) {
+        if (!open[s].active) continue;
+        if (used_this_col && used_this_col[s]) continue;
+        char out_strand = 0;
+        if (emit_strand) {
+            int sign = (open[s].strand ? +1 : -1) * input_strand_sign;
+            out_strand = (sign >= 0) ? '+' : '-';
+        }
+        emit_bed_line(fh, open[s].seq, open[s].start, open[s].end,
+                      name, score, out_strand);
+        open[s].active = 0;
+        if (n_out_p) (*n_out_p)++;
+    }
+}
+
+static int bed_lift_main_impl(Tui *tui, TuiGenomeLift *gl,
+                              const char *bed_file, const char *output_file) {
+    FILE *bf = fopen(bed_file, "r");
+    if (bf == NULL) {
+        fprintf(stderr, "ERROR: failed to open bed %s: %s\n", bed_file, strerror(errno));
+        return 1;
+    }
+    FILE *fh = output_file ? fopen(output_file, "w") : stdout;
+    if (fh == NULL) {
+        fprintf(stderr, "ERROR: failed to open output %s: %s\n", output_file, strerror(errno));
+        fclose(bf);
+        return 1;
+    }
+
+    OpenBedInterval open[BED_MAX_OPEN];
+    int used_this_col[BED_MAX_OPEN];
+    char *line = NULL;
+    size_t cap = 0;
+    int64_t lineno = 0, n_in = 0, n_out = 0, n_unmapped = 0;
+    time_t t0 = time(NULL);
+
+    ssize_t got;
+    while ((got = getline(&line, &cap, bf)) > 0) {
+        lineno++;
+        if (line[0] == '#' || line[0] == '\n' || line[0] == 0) continue;
+        // Strip trailing newline / CR.
+        while (got > 0 && (line[got-1] == '\n' || line[got-1] == '\r')) line[--got] = 0;
+        // Tokenize by tab.  Cols 0-2 required; 3 (name), 4 (score), 5 (strand)
+        // optional.  Cols >= 6 (thickStart etc.) ignored.
+        char *fields[6] = {0};
+        int n_fields = 0;
+        char *p = line;
+        while (n_fields < 6 && p) {
+            fields[n_fields++] = p;
+            char *t = strchr(p, '\t');
+            if (t) { *t = 0; p = t + 1; } else p = NULL;
+        }
+        if (n_fields < 3) {
+            fprintf(stderr, "WARN: skipping bed line %" PRIi64 " (need >=3 cols, got %d)\n",
+                    lineno, n_fields);
+            continue;
+        }
+        const char *chrom  = fields[0];
+        int64_t start = atoll(fields[1]);
+        int64_t end   = atoll(fields[2]);
+        const char *name   = (n_fields >= 4) ? fields[3] : NULL;
+        const char *score  = (n_fields >= 5) ? fields[4] : NULL;
+        const char *strand = (n_fields >= 6) ? fields[5] : NULL;
+        int input_strand_sign = (strand && strand[0] == '-') ? -1 : +1;
+        // BED convention: strand of '.' means "unknown / unstranded".  Treat
+        // it as no-strand-column (skip the strand on output) rather than
+        // forcing a definite output direction derived purely from the
+        // alignment.  All other strand values produce a definite output.
+        int emit_strand = (strand != NULL && strand[0] != '.');
+
+        n_in++;
+
+        // tui_query expects the FULL "<genome>.<chrom>" key.
+        int64_t n_iv = 0;
+        TuiInterval *iv = tui_query(tui, chrom, start, end, &n_iv);
+        if (iv == NULL || n_iv == 0) {
+            free(iv);
+            n_unmapped++;
+            continue;
+        }
+
+        for (int s = 0; s < BED_MAX_OPEN; s++) open[s].active = 0;
+
+        for (int64_t k = 0; k < n_iv; k++) {
+            int64_t c_lo = iv[k].start;
+            int64_t c_hi = iv[k].end;
+            // Per-column lift; group consecutive same-(seq,strand) hits.
+            // After each column we close opens that weren't extended.
+            for (int64_t c = c_lo; c < c_hi; c++) {
+                TuiGenomeMatch m[BED_MAX_OPEN];
+                int nm = tui_genome_lift_column(gl, c, m, BED_MAX_OPEN);
+                if (nm == 0) {
+                    // No target hit at this column -- close all opens.
+                    close_opens(fh, open, BED_MAX_OPEN, NULL,
+                                input_strand_sign, name, score, emit_strand,
+                                &n_out);
+                    continue;
+                }
+                // `nm` is the actual match count.  tui_genome_lift_column
+                // caps writes into m[] at BED_MAX_OPEN; matches beyond that
+                // (return value > cap) silently drop here.  In practice the
+                // chunk-collect backend rarely produces >32 paralogs at one
+                // column; this is defensive against pathological data.
+                int nm_capped = (nm > BED_MAX_OPEN) ? BED_MAX_OPEN : nm;
+                memset(used_this_col, 0, sizeof(used_this_col));
+                // For each match, find an extending open or open a new one.
+                // Extension semantics differ by strand:
+                //   '+' (m.strand=1): target pos advances; next expected =
+                //                     open.end, and on hit we open.end++.
+                //   '-' (m.strand=0): target pos decreases as source advances
+                //                     (reverse-complement alignment); next
+                //                     expected = open.start - 1, and on hit
+                //                     we open.start-- to grow the interval
+                //                     downward.
+                //
+                // tui_genome_lift_column returns matches in an order
+                // determined by chunk/run layout, not column content
+                // (backward scan over chunks sorted by g_min, then within
+                // each chunk a backward scan over runs sorted by g_start --
+                // see chunk_collect in tui.c).  A given paralog pair (A,B)
+                // shows up in the same relative order at every column they
+                // co-occur, so an open's slot remains stable across the
+                // paralog's whole run length without the "find a matching
+                // slot" loop ever picking the wrong open.
+                for (int i = 0; i < nm_capped; i++) {
+                    int m_strand = (m[i].strand ? 1 : 0);
+                    int slot = -1;
+                    for (int s = 0; s < BED_MAX_OPEN; s++) {
+                        if (!open[s].active || used_this_col[s]) continue;
+                        if (open[s].seq != m[i].seq) continue;
+                        if (open[s].strand != m_strand) continue;
+                        int extends = m_strand
+                            ? (open[s].end == m[i].pos)
+                            : (open[s].start == m[i].pos + 1);
+                        if (extends) { slot = s; break; }
+                    }
+                    if (slot >= 0) {
+                        if (m_strand) open[slot].end++;
+                        else          open[slot].start--;
+                        used_this_col[slot] = 1;
+                    } else {
+                        // Find an unused slot (inactive OR not used this column).
+                        for (int s = 0; s < BED_MAX_OPEN; s++) {
+                            if (!open[s].active) { slot = s; break; }
+                        }
+                        if (slot < 0) {
+                            // All slots active and unmatched -- evict the
+                            // first not-used-this-column to make room.
+                            for (int s = 0; s < BED_MAX_OPEN; s++) {
+                                if (!used_this_col[s]) { slot = s; break; }
+                            }
+                        }
+                        if (slot < 0) {
+                            // BED_MAX_OPEN matches all used this round and
+                            // a 33rd paralog showed up -- drop it (rare).
+                            continue;
+                        }
+                        if (open[slot].active) {
+                            // Evicting an active slot to make room: close it.
+                            // (close_opens skips inactive; passing a one-slot
+                            // mask would emit only this one.)  We use a
+                            // single-element mask trick: mark every OTHER
+                            // slot as used so close_opens only emits ours.
+                            int evict_mask[BED_MAX_OPEN];
+                            for (int t = 0; t < BED_MAX_OPEN; t++) evict_mask[t] = (t != slot);
+                            close_opens(fh, open, BED_MAX_OPEN, evict_mask,
+                                        input_strand_sign, name, score,
+                                        emit_strand, &n_out);
+                        }
+                        open[slot] = (OpenBedInterval){
+                            .seq = m[i].seq,
+                            .start = m[i].pos,
+                            .end = m[i].pos + 1,
+                            .strand = (m[i].strand ? 1 : 0),
+                            .active = 1,
+                        };
+                        used_this_col[slot] = 1;
+                    }
+                }
+                // Close opens that weren't extended this column.
+                close_opens(fh, open, BED_MAX_OPEN, used_this_col,
+                            input_strand_sign, name, score, emit_strand, &n_out);
+            }
+            // End of this column-interval -- close all opens (universal-col
+            // gap means we can't carry the run through).
+            close_opens(fh, open, BED_MAX_OPEN, NULL,
+                        input_strand_sign, name, score, emit_strand, &n_out);
+        }
+        free(iv);
+    }
+    free(line);
+    fclose(bf);
+    if (output_file) fclose(fh);
+
+    st_logInfo("BED lift: %" PRIi64 " input -> %" PRIi64 " output intervals "
+               "(%" PRIi64 " unmapped) in %" PRIi64 " s\n",
+               n_in, n_out, n_unmapped, (int64_t)(time(NULL) - t0));
+    return 0;
+}
+
 int taf_lift_main(int argc, char *argv[]) {
     time_t startTime = time(NULL);
     char *logLevelString = NULL;
     char *maf_file       = NULL;
     char *wig_file       = NULL;
+    char *bed_file       = NULL;
     char *target_genome  = NULL;
     char *output_file    = NULL;
     int64_t mem_cap_cli  = -1;     // -1 sentinel = "not set on CLI"
@@ -466,6 +733,7 @@ int taf_lift_main(int argc, char *argv[]) {
             { "logLevel",   required_argument, 0, 'l' },
             { "inputFile",  required_argument, 0, 'i' },
             { "wig",        required_argument, 0, 'w' },
+            { "bed",        required_argument, 0, 'b' },
             { "genome",     required_argument, 0, 'g' },
             { "outputFile", required_argument, 0, 'o' },
             { "memCap",     required_argument, 0, 'm' },
@@ -473,12 +741,13 @@ int taf_lift_main(int argc, char *argv[]) {
             { 0, 0, 0, 0 }
         };
         int idx = 0;
-        int key = getopt_long(argc, argv, "l:i:w:g:o:m:h", long_options, &idx);
+        int key = getopt_long(argc, argv, "l:i:w:b:g:o:m:h", long_options, &idx);
         if (key == -1) break;
         switch (key) {
             case 'l': logLevelString = optarg; break;
             case 'i': maf_file       = optarg; break;
             case 'w': wig_file       = optarg; break;
+            case 'b': bed_file       = optarg; break;
             case 'g': target_genome  = optarg; break;
             case 'o': output_file    = optarg; break;
             case 'm':
@@ -494,8 +763,13 @@ int taf_lift_main(int argc, char *argv[]) {
     }
     st_setLogLevelFromString(logLevelString);
 
-    if (maf_file == NULL || wig_file == NULL || target_genome == NULL) {
-        fprintf(stderr, "ERROR: -i, -w, and -g are required\n");
+    if (maf_file == NULL || target_genome == NULL) {
+        fprintf(stderr, "ERROR: -i and -g are required\n");
+        usage();
+        return 1;
+    }
+    if ((wig_file == NULL) == (bed_file == NULL)) {
+        fprintf(stderr, "ERROR: exactly one of -w/--wig or -b/--bed must be specified\n");
         usage();
         return 1;
     }
@@ -521,6 +795,19 @@ int taf_lift_main(int argc, char *argv[]) {
     }
     st_logInfo("Indexed %" PRIi64 " chunks for target genome '%s' in %" PRIi64 " s\n",
                tui_genome_lift_n_chunks(gl), target_genome, (int64_t)(time(NULL) - t0));
+
+    // BED mode: separate code path that emits target-coord intervals in
+    // source-walk order (no global sort, no spill machinery -- typical
+    // BED inputs are intervals, not per-base, so output volume is
+    // manageable in O(open paralog count) memory).
+    if (bed_file != NULL) {
+        int rc = bed_lift_main_impl(tui, gl, bed_file, output_file);
+        tui_genome_lift_destruct(gl);
+        tui_destruct(tui);
+        free(tui_p);
+        st_logInfo("Total wall: %" PRIi64 " s\n", (int64_t)(time(NULL) - startTime));
+        return rc;
+    }
 
     // String-table for the output target-sequence names so the output
     // records can be sorted by (seq_idx, pos) cheaply.

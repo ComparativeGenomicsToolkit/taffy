@@ -440,3 +440,132 @@ def test_lift_multichrom_wig(tmp_path):
     assert len(got) == 2, f"expected 2 records (one per source), got {len(got)}: {got}"
     assert all(p == ('simMouse.chr6', 0) for p in got), (
         f"both sources should lift to simMouse.chr6:0; got {got}")
+
+
+def _read_bed(path):
+    """Parse a BED file into a list of dicts."""
+    out = []
+    with open(path) as f:
+        for line in f:
+            line = line.rstrip('\n').rstrip('\r')
+            if not line or line.startswith('#'): continue
+            f = line.split('\t')
+            d = {'chrom': f[0], 'start': int(f[1]), 'end': int(f[2])}
+            if len(f) >= 4: d['name']   = f[3]
+            if len(f) >= 5: d['score']  = f[4]
+            if len(f) >= 6: d['strand'] = f[5]
+            out.append(d)
+    return out
+
+
+def test_lift_bed_equivalent_to_wig(tmp_path):
+    """A BED interval covering [s,e) should produce target intervals whose
+    base set matches what the same range gives via per-position wig lift.
+    Exercises the -b path against the -w path (which has its own tests)."""
+    region_start, region_end = 10000, 11000
+    in_bed  = str(tmp_path / 'in.bed')
+    out_bed = str(tmp_path / 'out.bed')
+    in_wig  = str(tmp_path / 'in.wig')
+    out_wig = str(tmp_path / 'out.wig')
+    with open(in_bed, 'w') as f:
+        f.write(f'{REF_SEQ_FULL}\t{region_start}\t{region_end}\tg1\t0\t+\n')
+    _write_wig(in_wig, REF_SEQ_FULL, range(region_start, region_end))
+    run(TAFFY, 'lift', '-i', UNI_MAF, '-b', in_bed, '-g', 'simMouse_chr6', '-o', out_bed)
+    run(TAFFY, 'lift', '-i', UNI_MAF, '-w', in_wig, '-g', 'simMouse_chr6', '-o', out_wig)
+
+    # Expand BED intervals into a (chrom, pos) set; compare to wig output's set.
+    bed_set = set()
+    for r in _read_bed(out_bed):
+        for p in range(r['start'], r['end']):
+            bed_set.add((r['chrom'], p))
+    wig_set = set(_read_wig(out_wig))
+    assert bed_set == wig_set, (
+        f"bed vs wig base set differs: only-in-bed={len(bed_set - wig_set)} "
+        f"only-in-wig={len(wig_set - bed_set)}")
+
+
+def test_lift_bed_strand_xor(tmp_path):
+    """An input BED on '-' lifted via a '-' alignment should output '+'.
+    For [10000,11000) on REF_SEQ which lifts to simMouse via reverse-strand
+    alignment, '-' input should produce all-'+' output records."""
+    in_bed  = str(tmp_path / 'in.bed')
+    out_bed = str(tmp_path / 'out.bed')
+    with open(in_bed, 'w') as f:
+        f.write(f'{REF_SEQ_FULL}\t10000\t11000\tg1\t99\t-\n')
+    run(TAFFY, 'lift', '-i', UNI_MAF, '-b', in_bed, '-g', 'simMouse_chr6', '-o', out_bed)
+    recs = _read_bed(out_bed)
+    assert len(recs) > 0, "expected some output for [10000,11000)"
+    strands = {r['strand'] for r in recs}
+    assert strands == {'+'}, f"input '-' through reverse alignment should give '+'; got {strands}"
+    # Score + name passthrough.
+    assert all(r['name'] == 'g1' and r['score'] == '99' for r in recs)
+
+
+def test_lift_bed_bed3_in_bed3_out(tmp_path):
+    """BED3 in -> BED3 out (no name, score, strand columns added)."""
+    in_bed  = str(tmp_path / 'in.bed')
+    out_bed = str(tmp_path / 'out.bed')
+    with open(in_bed, 'w') as f:
+        f.write(f'{REF_SEQ_FULL}\t10000\t11000\n')
+    run(TAFFY, 'lift', '-i', UNI_MAF, '-b', in_bed, '-g', 'simMouse_chr6', '-o', out_bed)
+    with open(out_bed) as f:
+        for line in f:
+            line = line.rstrip()
+            if not line: continue
+            cols = line.split('\t')
+            assert len(cols) == 3, f"BED3 in should give BED3 out, got {len(cols)} cols: {line}"
+
+
+def test_lift_bed_unknown_source_seq(tmp_path):
+    """Unknown source seq produces empty output (warning logged, no error)."""
+    in_bed  = str(tmp_path / 'in.bed')
+    out_bed = str(tmp_path / 'out.bed')
+    with open(in_bed, 'w') as f:
+        f.write('nonexistent_seq\t0\t100\tx\n')
+    run(TAFFY, 'lift', '-i', UNI_MAF, '-b', in_bed, '-g', 'simMouse_chr6', '-o', out_bed)
+    assert os.path.getsize(out_bed) == 0
+
+
+def test_lift_bed_empty_input(tmp_path):
+    """Empty BED input -> empty output, exit success."""
+    in_bed  = str(tmp_path / 'in.bed')
+    out_bed = str(tmp_path / 'out.bed')
+    open(in_bed, 'w').close()
+    run(TAFFY, 'lift', '-i', UNI_MAF, '-b', in_bed, '-g', 'simMouse_chr6', '-o', out_bed)
+    assert os.path.getsize(out_bed) == 0
+
+
+@pytest.mark.parametrize("n_cols", [4, 5])
+def test_lift_bed_arity_preserved(tmp_path, n_cols):
+    """BED4 / BED5 in -> BED4 / BED5 out: extras propagate."""
+    in_bed  = str(tmp_path / 'in.bed')
+    out_bed = str(tmp_path / 'out.bed')
+    fields = [REF_SEQ_FULL, '10000', '11000', 'g1', '42']
+    with open(in_bed, 'w') as f:
+        f.write('\t'.join(fields[:n_cols]) + '\n')
+    run(TAFFY, 'lift', '-i', UNI_MAF, '-b', in_bed, '-g', 'simMouse_chr6', '-o', out_bed)
+    with open(out_bed) as fh:
+        for line in fh:
+            line = line.rstrip()
+            if not line: continue
+            cols = line.split('\t')
+            assert len(cols) == n_cols, (
+                f"BED{n_cols} in should give BED{n_cols} out, got {len(cols)}: {line}")
+            assert cols[3] == 'g1'
+            if n_cols >= 5: assert cols[4] == '42'
+
+
+def test_lift_bed_strand_dot_omits_strand_column(tmp_path):
+    """BED6 input with strand '.' (unstranded) should produce BED5-shaped
+    output -- no strand col, since '.' isn't a definite orientation."""
+    in_bed  = str(tmp_path / 'in.bed')
+    out_bed = str(tmp_path / 'out.bed')
+    with open(in_bed, 'w') as f:
+        f.write(f'{REF_SEQ_FULL}\t10000\t11000\tg1\t0\t.\n')
+    run(TAFFY, 'lift', '-i', UNI_MAF, '-b', in_bed, '-g', 'simMouse_chr6', '-o', out_bed)
+    recs = _read_bed(out_bed)
+    assert len(recs) > 0
+    for r in recs:
+        assert 'strand' not in r, f"input '.' should omit strand col, got {r}"
+
+
