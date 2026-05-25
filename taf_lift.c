@@ -8,6 +8,10 @@
  *  Released under the MIT license, see LICENSE.txt
  */
 
+/* mkdtemp() is in stdlib.h under _POSIX_C_SOURCE>=200809L; set the macro
+ * before any system headers are pulled in by the project headers below. */
+#define _POSIX_C_SOURCE 200809L
+
 #include "taf.h"
 #include "tui.h"
 #include "sonLib.h"
@@ -16,6 +20,7 @@
 #include <errno.h>
 #include <signal.h>
 #include <unistd.h>
+#include <stdlib.h>
 
 static void usage(void) {
     fprintf(stderr, "taffy lift [options]\n");
@@ -24,6 +29,7 @@ static void usage(void) {
     fprintf(stderr, "-w --wig       [FILE_NAME] : REQUIRED Input .wig in ancestor row-0 coords (chrom = full genome.sequence)\n");
     fprintf(stderr, "-g --genome    [STRING]    : REQUIRED Target genome name (e.g. hg38)\n");
     fprintf(stderr, "-o --outputFile [FILE_NAME] : Output wig (default stdout)\n");
+    fprintf(stderr, "-m --memCap    [SIZE]      : Max in-memory output buffer before spilling to disk; suffix K/M/G allowed (default 4G).  Env TAFFY_LIFT_BUDGET_MB also honored (CLI wins).\n");
     fprintf(stderr, "-l --logLevel  : Set log level\n");
     fprintf(stderr, "-h --help      : Print this help\n");
 }
@@ -41,7 +47,7 @@ static int liftrec_cmp(const void *a, const void *b) {
 }
 
 /////////////////////////////////////////////////////////////////////////////
-// External sort: when the in-memory buffer of LiftRec hits SPILL_BUDGET, we
+// External sort: when the in-memory buffer of LiftRec hits the budget, we
 // qsort it and write the sorted records to a fresh spill file, then reset
 // the buffer.  At end-of-input, the residual is flushed the same way; the
 // final wig output is produced by a k-way heap-merge of all spills.  If
@@ -50,23 +56,46 @@ static int liftrec_cmp(const void *a, const void *b) {
 // LiftRec.seq_idx is a process-global index into the `seqs` stList, so
 // records remain consistently ordered across spills.
 //
-// SPILL_BUDGET picked so 60+ spills are unusual at vertebrate scale: 256 MB
-// per spill (~11M records) gives ~6 spills for a 70M-record fish-of-tetra
-// lift, ~250 spills for a 2.5B-record full-gene-set hg38 lift -- both well
-// within "open file" limits and merge-heap costs.
-// Override at runtime with TAFFY_LIFT_BUDGET_MB.
+// Budget precedence: --memCap CLI > TAFFY_LIFT_BUDGET_MB env > default.
+// Default of 4 GB handles most single-chrom and full-gene-set lifts in
+// memory; the spill path only kicks in for whole-genome dense lifts (e.g.
+// chr1 step=1 hg38 -> ape ~5 GB, full canonical gene set ~30 GB).
 /////////////////////////////////////////////////////////////////////////////
-#define LIFT_SPILL_BUDGET_DEFAULT_MB 256
+#define LIFT_SPILL_BUDGET_DEFAULT_BYTES (4LL * 1024 * 1024 * 1024)
 
-static int64_t lift_spill_budget_bytes(void) {
+// Parse "12345", "256M", "4G", "1024K" -> bytes; -1 on parse error.  Empty
+// or whitespace-only input is also an error (callers treat -1 as "absent
+// CLI override" and fall back to env/default; if --memCap was passed
+// explicitly with garbage we still error out before we get here).
+static int64_t lift_parse_size(const char *s) {
+    if (s == NULL || *s == 0) return -1;
+    char *end = NULL;
+    long long v = strtoll(s, &end, 10);
+    if (end == s || v < 0) return -1;
+    int64_t mult = 1;
+    if (*end != 0) {
+        if (*(end + 1) != 0) return -1;
+        switch (*end) {
+            case 'k': case 'K': mult = 1024LL; break;
+            case 'm': case 'M': mult = 1024LL * 1024; break;
+            case 'g': case 'G': mult = 1024LL * 1024 * 1024; break;
+            default: return -1;
+        }
+    }
+    return (int64_t)v * mult;
+}
+
+// Resolve the budget: CLI override (parsed at argv-time, passed in here as
+// >0 or -1 for "not set") wins over the env var, wins over the default.
+static int64_t lift_spill_budget_bytes(int64_t cli_override_bytes) {
+    if (cli_override_bytes > 0) return cli_override_bytes;
     const char *env = getenv("TAFFY_LIFT_BUDGET_MB");
-    int64_t mb = LIFT_SPILL_BUDGET_DEFAULT_MB;
     if (env != NULL && *env != 0) {
         char *end = NULL;
         long v = strtol(env, &end, 10);
-        if (end != env && v > 0) mb = (int64_t)v;
+        if (end != env && v > 0) return (int64_t)v * 1024LL * 1024LL;
     }
-    return mb * 1024LL * 1024LL;
+    return LIFT_SPILL_BUDGET_DEFAULT_BYTES;
 }
 
 // Tracked spill paths so we can rm() on normal exit AND on
@@ -292,6 +321,7 @@ int taf_lift_main(int argc, char *argv[]) {
     char *wig_file       = NULL;
     char *target_genome  = NULL;
     char *output_file    = NULL;
+    int64_t mem_cap_cli  = -1;     // -1 sentinel = "not set on CLI"
 
     while (1) {
         static struct option long_options[] = {
@@ -300,11 +330,12 @@ int taf_lift_main(int argc, char *argv[]) {
             { "wig",        required_argument, 0, 'w' },
             { "genome",     required_argument, 0, 'g' },
             { "outputFile", required_argument, 0, 'o' },
+            { "memCap",     required_argument, 0, 'm' },
             { "help",       no_argument,       0, 'h' },
             { 0, 0, 0, 0 }
         };
         int idx = 0;
-        int key = getopt_long(argc, argv, "l:i:w:g:o:h", long_options, &idx);
+        int key = getopt_long(argc, argv, "l:i:w:g:o:m:h", long_options, &idx);
         if (key == -1) break;
         switch (key) {
             case 'l': logLevelString = optarg; break;
@@ -312,6 +343,13 @@ int taf_lift_main(int argc, char *argv[]) {
             case 'w': wig_file       = optarg; break;
             case 'g': target_genome  = optarg; break;
             case 'o': output_file    = optarg; break;
+            case 'm':
+                mem_cap_cli = lift_parse_size(optarg);
+                if (mem_cap_cli <= 0) {
+                    fprintf(stderr, "ERROR: bad --memCap '%s' (expected e.g. 4G, 256M, 1024K, or a byte count)\n", optarg);
+                    return 1;
+                }
+                break;
             case 'h': usage(); return 0;
             default:  usage(); return 1;
         }
@@ -353,7 +391,7 @@ int taf_lift_main(int argc, char *argv[]) {
     LiftRec *out = NULL;
     int64_t out_n = 0, out_cap = 0;
     int64_t n_in = 0, n_lifted = 0, n_no_column = 0, n_no_genome = 0;
-    const int64_t spill_budget = lift_spill_budget_bytes();
+    const int64_t spill_budget = lift_spill_budget_bytes(mem_cap_cli);
     const int64_t spill_budget_n = spill_budget / (int64_t)sizeof(LiftRec);
 
     // Stream-parse the wig directly instead of going through wig_parse.
