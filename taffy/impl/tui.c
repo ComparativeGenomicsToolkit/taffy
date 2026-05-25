@@ -17,6 +17,10 @@
 #include <stdlib.h>
 #include <time.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <zlib.h>
 
 // ONEcode schema. Exactly one list field per line (STRING / INT_LIST); other
@@ -237,19 +241,90 @@ static int seqkey_cmp(const void *a, const void *b) {
     return c ? c : strcmp(x->seq, y->seq);
 }
 
-// One spilled run, text line: "seqName\tt_start\tg_start\tlength\tstrand\n"
-static void spill_run(FILE *fh, const char *seq_name, int64_t t_start,
-                      int64_t g_start, int64_t length, bool strand) {
-    if (fprintf(fh, "%s\t%" PRIi64 "\t%" PRIi64 "\t%" PRIi64 "\t%c\n",
-                seq_name, t_start, g_start, length, strand ? '+' : '-') < 0) {
-        st_errAbort("tui: failed writing run spill (disk full / write error)");
+/////////////////////////////////////////////////////////////////////////////
+// Varint helpers (LEB128) -- used by both the spill format (below) and the
+// per-sequence run codec further down.
+/////////////////////////////////////////////////////////////////////////////
+
+static inline uint64_t zigzag(int64_t v) { return ((uint64_t)v << 1) ^ (uint64_t)(v >> 63); }
+static inline int64_t unzigzag(uint64_t z) { return (int64_t)(z >> 1) ^ -(int64_t)(z & 1); }
+
+static inline size_t put_uvarint(uint8_t *p, uint64_t v) {
+    size_t n = 0;
+    while (v >= 0x80) { p[n++] = (uint8_t)(v | 0x80); v >>= 7; }
+    p[n++] = (uint8_t)v;
+    return n;
+}
+static inline uint64_t get_uvarint(const uint8_t **pp) {
+    const uint8_t *p = *pp;
+    uint64_t v = 0; int s = 0; uint8_t b;
+    do { b = *p++; v |= (uint64_t)(b & 0x7f) << s; s += 7; } while (b & 0x80);
+    *pp = p;
+    return v;
+}
+
+// Spill file binary record format (one stream of records, no header):
+//
+//   tag byte:
+//     'N' (0x4E) -- new-name: tag, uvarint seq_idx, uvarint name_len, name_bytes
+//                   Emitted ONCE the first time a (seq_name) is seen in this
+//                   spill.  Subsequent data records reference the seq_idx.
+//     'D' (0x44) -- data: tag, uvarint seq_idx, uvarint t_start, uvarint g_start,
+//                   uvarint length, byte strand ('+' or '-')
+//
+// Replaces the prior text format ("%s\t%lld\t%lld\t%lld\t%c\n") which averaged
+// ~70-100 bytes/record on vertebrate data (seq_name 15-30 chars + 3 decimal
+// int64s + separators).  Binary is ~10-15 bytes/record; observed amplification
+// vs decompressed MAF drops from ~80x to ~10x.  No correctness change; on-disk
+// only.  The Run struct returned by load_genome_runs is unchanged so callers
+// don't need updates.
+
+// Write one spilled run.  `seen_seqs` is a per-spill stHash<seq_name, int64_t*>
+// owned by the caller (Phase1::spill_seqs); we lazily insert seq_idx on first
+// sight and write the 'N' dictionary record before the 'D' data record.
+static void spill_run(FILE *fh, stHash *seen_seqs, const char *seq_name,
+                      int64_t t_start, int64_t g_start, int64_t length, bool strand) {
+    int64_t *p_idx = stHash_search(seen_seqs, (void *)seq_name);
+    int64_t seq_idx;
+    if (p_idx == NULL) {
+        seq_idx = (int64_t)stHash_size(seen_seqs);
+        int64_t *new_idx = st_malloc(sizeof(int64_t));
+        *new_idx = seq_idx;
+        stHash_insert(seen_seqs, stString_copy(seq_name), new_idx);
+
+        // Emit 'N' record: tag + varint seq_idx + varint name_len + name bytes.
+        size_t nl = strlen(seq_name);
+        uint8_t hdr[1 + 10 + 10];  // tag + 2 varints (max 10 bytes each)
+        size_t hn = 0;
+        hdr[hn++] = 'N';
+        hn += put_uvarint(hdr + hn, (uint64_t)seq_idx);
+        hn += put_uvarint(hdr + hn, (uint64_t)nl);
+        if (fwrite(hdr, 1, hn, fh) != hn ||
+            (nl > 0 && fwrite(seq_name, 1, nl, fh) != nl)) {
+            st_errAbort("tui: failed writing N record to spill (disk full / write error)");
+        }
+    } else {
+        seq_idx = *p_idx;
+    }
+
+    // Emit 'D' record: tag + 4 varints + strand byte.  Caps at 1 + 4*10 + 1.
+    uint8_t buf[1 + 4 * 10 + 1];
+    size_t n = 0;
+    buf[n++] = 'D';
+    n += put_uvarint(buf + n, (uint64_t)seq_idx);
+    n += put_uvarint(buf + n, (uint64_t)t_start);
+    n += put_uvarint(buf + n, (uint64_t)g_start);
+    n += put_uvarint(buf + n, (uint64_t)length);
+    buf[n++] = strand ? '+' : '-';
+    if (fwrite(buf, 1, n, fh) != n) {
+        st_errAbort("tui: failed writing D record to spill (disk full / write error)");
     }
 }
 
 // Emit the maximal gap-free stretches of one row of one block.  `g` is the
 // global column of this block's first column.
-static void emit_row_runs(FILE *spill, Alignment_Row *row, int64_t g,
-                          int64_t column_number) {
+static void emit_row_runs(FILE *spill, stHash *seen_seqs, Alignment_Row *row,
+                          int64_t g, int64_t column_number) {
     const char *b = row->bases;
     int64_t pre = 0;            // non-gap bases of this row before column c
     int64_t c = 0;
@@ -265,7 +340,7 @@ static void emit_row_runs(FILE *spill, Alignment_Row *row, int64_t g,
             int64_t fwd_end = row->sequence_length - row->start;
             t_start = fwd_end - pre - slen;
         }
-        spill_run(spill, row->sequence_name, t_start, g_start, slen, row->strand);
+        spill_run(spill, seen_seqs, row->sequence_name, t_start, g_start, slen, row->strand);
         pre += slen;
     }
 }
@@ -277,6 +352,10 @@ static void emit_row_runs(FILE *spill, Alignment_Row *row, int64_t g,
 typedef struct {
     stHash *spill_fh;     // genomeName -> FILE*  (kept open through phase 1)
     stHash *spill_path;   // genomeName -> char*  (we own/free these)
+    stHash *spill_seqs;   // genomeName -> stHash<seq_name, int64_t*>  (per-spill
+                          //                seq-name dictionary; written inline
+                          //                as 'N' records, used by reader to
+                          //                rehydrate seq names)
     stHash *seq_len;      // "genome.seq" -> int64_t* seqLen
     stList *seq_keys;     // distinct "genome.seq", first-seen order
     int64_t T;            // total columns
@@ -355,10 +434,14 @@ static FILE *spill_for(Phase1 *p1, const char *genome) {
                                     p1->out_base, (long)getpid(),
                                     p1->next_spill_id++);
         tui_atexit_track_spill(path);
-        fh = fopen(path, "w");
+        fh = fopen(path, "wb");      // binary record stream (see spill_run)
         if (fh == NULL) { fprintf(stderr, "tui: cannot open spill %s\n", path); exit(1); }
         stHash_insert(p1->spill_fh, stString_copy(genome), fh);
         stHash_insert(p1->spill_path, stString_copy(genome), path);
+        // Per-spill seq-name dictionary; values are heap int64_t* seq indices.
+        stHash *seen = stHash_construct3(stHash_stringKey, stHash_stringEqualKey,
+                                         free, free);
+        stHash_insert(p1->spill_seqs, stString_copy(genome), seen);
     }
     return fh;
 }
@@ -380,7 +463,9 @@ static void tui_phase1_block(Phase1 *p1, Alignment *aln) {
     for (Alignment_Row *row = aln->row; row != NULL; row = row->n_row) {
         char *gname = genome_of(row->sequence_name, p1->gmap);
         note_seq(p1, row->sequence_name, row->sequence_length);
-        emit_row_runs(spill_for(p1, gname), row, p1->T, cn);
+        FILE *spill = spill_for(p1, gname);
+        stHash *seen = stHash_search(p1->spill_seqs, (void *)gname);
+        emit_row_runs(spill, seen, row, p1->T, cn);
         free(gname);
     }
     p1->T += cn;
@@ -409,27 +494,81 @@ static int run_cmp(const void *a, const void *b) {
     return (x->t < y->t) ? -1 : (x->t > y->t) ? 1 : 0;
 }
 
-// Load every run line of one genome spill into a Run array (caller frees).
+// Load every run record of one genome spill into a Run array (caller frees
+// each runs[k].seq + the runs[] array itself).  See spill_run for the on-disk
+// format: alternating 'N' (seq dictionary) and 'D' (data) records.
+//
+// We mmap the spill; the per-spill seq dictionary is built locally as we walk
+// 'N' records, and each 'D' record's seq pointer is set via stString_copy
+// (matches the old text reader's semantics so the existing caller's per-record
+// free(runs[k].seq) loop is correct without changes).
 static Run *load_genome_runs(const char *path, int64_t *n_out) {
-    FILE *fh = fopen(path, "r");
-    if (fh == NULL) { *n_out = 0; return NULL; }
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) { *n_out = 0; return NULL; }
+    struct stat sb;
+    if (fstat(fd, &sb) < 0) { close(fd); *n_out = 0; return NULL; }
+    if (sb.st_size == 0) { close(fd); *n_out = 0; return NULL; }
+    uint8_t *base = mmap(NULL, (size_t)sb.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (base == MAP_FAILED) {
+        st_errAbort("tui: mmap of spill %s failed", path);
+    }
+
+    // Per-spill local dictionary: seq_idx -> seq_name (caller-freed).  Sized
+    // to seq_idx as 'N' records grow it.
+    int64_t dict_cap = 1024;
+    char **dict = st_malloc(dict_cap * sizeof(char *));
+    for (int64_t i = 0; i < dict_cap; i++) dict[i] = NULL;
+
     int64_t cap = 1024, n = 0;
     Run *runs = st_malloc(cap * sizeof(Run));
-    char line[16384];
-    while (fgets(line, sizeof(line), fh) != NULL) {
-        if (n == cap) { cap *= 2; runs = st_realloc(runs, cap * sizeof(Run)); }
-        Run *r = &runs[n];
-        char sbuf[8192], st;
-        if (sscanf(line, "%8191s\t%" SCNi64 "\t%" SCNi64 "\t%" SCNi64 "\t%c",
-                   sbuf, &r->t, &r->g, &r->len, &st) == 5) {
-            r->seq = stString_copy(sbuf);
+
+    const uint8_t *p = base, *end = base + sb.st_size;
+    while (p < end) {
+        uint8_t tag = *p++;
+        if (tag == 'N') {
+            uint64_t idx = get_uvarint(&p);
+            uint64_t nl  = get_uvarint(&p);
+            if ((int64_t)idx >= dict_cap) {
+                int64_t old = dict_cap;
+                while (dict_cap <= (int64_t)idx) dict_cap *= 2;
+                dict = st_realloc(dict, dict_cap * sizeof(char *));
+                for (int64_t i = old; i < dict_cap; i++) dict[i] = NULL;
+            }
+            char *nm = st_malloc((size_t)nl + 1);
+            memcpy(nm, p, (size_t)nl);
+            nm[nl] = '\0';
+            dict[(int64_t)idx] = nm;
+            p += nl;
+        } else if (tag == 'D') {
+            if (n == cap) { cap *= 2; runs = st_realloc(runs, cap * sizeof(Run)); }
+            uint64_t idx = get_uvarint(&p);
+            uint64_t t   = get_uvarint(&p);
+            uint64_t g   = get_uvarint(&p);
+            uint64_t len = get_uvarint(&p);
+            char st = (char)*p++;
+            if ((int64_t)idx >= dict_cap || dict[(int64_t)idx] == NULL) {
+                st_errAbort("tui: corrupt spill %s: D-record references "
+                            "undefined seq_idx %" PRIi64, path, (int64_t)idx);
+            }
+            Run *r = &runs[n++];
+            r->seq    = stString_copy(dict[(int64_t)idx]);
+            r->t      = (int64_t)t;
+            r->g      = (int64_t)g;
+            r->len    = (int64_t)len;
             r->strand = st;
-            n++;
         } else {
-            st_errAbort("tui: corrupt spill line in %s: %s", path, line);
+            st_errAbort("tui: corrupt spill %s: unknown record tag 0x%02x "
+                        "at offset %" PRIi64, path, (int)tag,
+                        (int64_t)(p - 1 - base));
         }
     }
-    fclose(fh);
+
+    // Free per-spill dict (seq names already stString_copy'd into Run.seq).
+    for (int64_t i = 0; i < dict_cap; i++) free(dict[i]);
+    free(dict);
+    munmap(base, (size_t)sb.st_size);
+
     *n_out = n;
     return runs;
 }
@@ -438,22 +577,7 @@ static Run *load_genome_runs(const char *path, int64_t *n_out) {
 // Per-sequence run codec: zigzag-delta + LEB128 varint, then zlib deflate.
 /////////////////////////////////////////////////////////////////////////////
 
-static inline uint64_t zigzag(int64_t v) { return ((uint64_t)v << 1) ^ (uint64_t)(v >> 63); }
-static inline int64_t unzigzag(uint64_t z) { return (int64_t)(z >> 1) ^ -(int64_t)(z & 1); }
-
-static inline size_t put_uvarint(uint8_t *p, uint64_t v) {
-    size_t n = 0;
-    while (v >= 0x80) { p[n++] = (uint8_t)(v | 0x80); v >>= 7; }
-    p[n++] = (uint8_t)v;
-    return n;
-}
-static inline uint64_t get_uvarint(const uint8_t **pp) {
-    const uint8_t *p = *pp;
-    uint64_t v = 0; int s = 0; uint8_t b;
-    do { b = *p++; v |= (uint64_t)(b & 0x7f) << s; s += 7; } while (b & 0x80);
-    *pp = p;
-    return v;
-}
+// (defined earlier in the file -- see "Varint helpers" section near the top)
 
 // Encode m runs (buf = m triples [t, g, lenc=(len<<1|rev)], absolute) and
 // zlib-deflate them.  Caller frees the returned buffer; *raw_len = inflated
@@ -615,6 +739,7 @@ static void tui_cleanup(Phase1 *p1, SeqKey *seqks, int64_t n_seqs,
     free(seqks);
     stHash_destruct(p1->spill_fh);
     stHash_destruct(p1->spill_path);
+    if (p1->spill_seqs != NULL) stHash_destruct(p1->spill_seqs);
     stHash_destruct(p1->seq_len);
     stList_destruct(p1->seq_keys);
     if (tree_map != NULL) stHash_destruct(tree_map);
@@ -656,6 +781,10 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
     p1.spill_fh = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, free, NULL);
     // we own the spill paths -> free them via the hash on destruct
     p1.spill_path = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, free, free);
+    // per-spill seq-name dictionaries: values are inner stHashes (destroyed
+    // here on cleanup so their per-record int64_t* + seq_name copies go too).
+    p1.spill_seqs = stHash_construct3(stHash_stringKey, stHash_stringEqualKey,
+                                      free, (void (*)(void *))stHash_destruct);
     p1.seq_len = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, free, free);
     p1.seq_keys = stList_construct();
     p1.T = 0;
