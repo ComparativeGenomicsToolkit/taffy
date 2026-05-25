@@ -547,8 +547,13 @@ static int bed_lift_main_impl(Tui *tui, TuiGenomeLift *gl,
         return 1;
     }
 
-    OpenBedInterval open[BED_MAX_OPEN];
-    int used_this_col[BED_MAX_OPEN];
+    // Open-interval tracker.  BED_MAX_OPEN is the starting stack size --
+    // enough for typical paralog density (a handful) but real apes/primate
+    // chr22 paralog hotspots produce 40+ matches at a single column, so we
+    // grow heap-backed as needed.  Cached across input BED lines.
+    OpenBedInterval *open = NULL;
+    int *used_this_col = NULL;
+    int open_cap = 0;
     char *line = NULL;
     size_t cap = 0;
     int64_t lineno = 0, n_in = 0, n_out = 0, n_unmapped = 0;
@@ -599,30 +604,55 @@ static int bed_lift_main_impl(Tui *tui, TuiGenomeLift *gl,
             continue;
         }
 
-        for (int s = 0; s < BED_MAX_OPEN; s++) open[s].active = 0;
+        // Lazily (re)allocate open / used_this_col to the initial cap on
+        // the first BED line; later columns grow it on demand.
+        if (open_cap == 0) {
+            open_cap = BED_MAX_OPEN;
+            open = st_malloc((size_t)open_cap * sizeof(OpenBedInterval));
+            used_this_col = st_malloc((size_t)open_cap * sizeof(int));
+        }
+        for (int s = 0; s < open_cap; s++) open[s].active = 0;
 
         for (int64_t k = 0; k < n_iv; k++) {
             int64_t c_lo = iv[k].start;
             int64_t c_hi = iv[k].end;
             // Per-column lift; group consecutive same-(seq,strand) hits.
             // After each column we close opens that weren't extended.
+            TuiGenomeMatch *m = NULL;
+            int m_cap = 0;
             for (int64_t c = c_lo; c < c_hi; c++) {
-                TuiGenomeMatch m[BED_MAX_OPEN];
-                int nm = tui_genome_lift_column(gl, c, m, BED_MAX_OPEN);
+                if (m_cap == 0) {
+                    m_cap = BED_MAX_OPEN;
+                    m = st_malloc((size_t)m_cap * sizeof(TuiGenomeMatch));
+                }
+                int nm = tui_genome_lift_column(gl, c, m, m_cap);
                 if (nm == 0) {
                     // No target hit at this column -- close all opens.
-                    close_opens(fh, open, BED_MAX_OPEN, NULL,
+                    close_opens(fh, open, open_cap, NULL,
                                 input_strand_sign, name, score, emit_strand,
                                 &n_out);
                     continue;
                 }
-                // `nm` is the actual match count.  tui_genome_lift_column
-                // caps writes into m[] at BED_MAX_OPEN; matches beyond that
-                // (return value > cap) silently drop here.  In practice the
-                // chunk-collect backend rarely produces >32 paralogs at one
-                // column; this is defensive against pathological data.
-                int nm_capped = (nm > BED_MAX_OPEN) ? BED_MAX_OPEN : nm;
-                memset(used_this_col, 0, sizeof(used_this_col));
+                if (nm > m_cap) {
+                    // More paralogs than buf holds (apes-density chr22
+                    // paralog hotspots can have 40+ at one column).
+                    // Grow + re-query so we see them all.
+                    m_cap = nm;
+                    m = st_realloc(m, (size_t)m_cap * sizeof(TuiGenomeMatch));
+                    tui_genome_lift_column(gl, c, m, m_cap);
+                }
+                // Ensure open[]/used[] are large enough for nm distinct
+                // simultaneous opens (worst case: every match opens its own
+                // new slot).  This grows on demand and is cached across
+                // BED lines.
+                if (nm > open_cap) {
+                    int new_cap = open_cap;
+                    while (new_cap < nm) new_cap *= 2;
+                    open = st_realloc(open, (size_t)new_cap * sizeof(OpenBedInterval));
+                    used_this_col = st_realloc(used_this_col, (size_t)new_cap * sizeof(int));
+                    for (int s = open_cap; s < new_cap; s++) open[s].active = 0;
+                    open_cap = new_cap;
+                }
                 // For each match, find an extending open or open a new one.
                 // Extension semantics differ by strand:
                 //   '+' (m.strand=1): target pos advances; next expected =
@@ -634,18 +664,16 @@ static int bed_lift_main_impl(Tui *tui, TuiGenomeLift *gl,
                 //                     downward.
                 //
                 // tui_genome_lift_column returns matches in an order
-                // determined by chunk/run layout, not column content
-                // (backward scan over chunks sorted by g_min, then within
-                // each chunk a backward scan over runs sorted by g_start --
-                // see chunk_collect in tui.c).  A given paralog pair (A,B)
+                // determined by chunk/run layout, not column content (see
+                // chunk_collect in tui.c).  A given paralog pair (A,B)
                 // shows up in the same relative order at every column they
                 // co-occur, so an open's slot remains stable across the
-                // paralog's whole run length without the "find a matching
-                // slot" loop ever picking the wrong open.
-                for (int i = 0; i < nm_capped; i++) {
+                // paralog's whole run.
+                memset(used_this_col, 0, (size_t)open_cap * sizeof(int));
+                for (int i = 0; i < nm; i++) {
                     int m_strand = (m[i].strand ? 1 : 0);
                     int slot = -1;
-                    for (int s = 0; s < BED_MAX_OPEN; s++) {
+                    for (int s = 0; s < open_cap; s++) {
                         if (!open[s].active || used_this_col[s]) continue;
                         if (open[s].seq != m[i].seq) continue;
                         if (open[s].strand != m_strand) continue;
@@ -659,34 +687,16 @@ static int bed_lift_main_impl(Tui *tui, TuiGenomeLift *gl,
                         else          open[slot].start--;
                         used_this_col[slot] = 1;
                     } else {
-                        // Find an unused slot (inactive OR not used this column).
-                        for (int s = 0; s < BED_MAX_OPEN; s++) {
+                        // Find an inactive slot.  Since we grew open[] to
+                        // hold nm matches up front, an inactive slot
+                        // always exists here (we have >= nm slots and at
+                        // most i < nm have been claimed this column).
+                        for (int s = 0; s < open_cap; s++) {
                             if (!open[s].active) { slot = s; break; }
                         }
-                        if (slot < 0) {
-                            // All slots active and unmatched -- evict the
-                            // first not-used-this-column to make room.
-                            for (int s = 0; s < BED_MAX_OPEN; s++) {
-                                if (!used_this_col[s]) { slot = s; break; }
-                            }
-                        }
-                        if (slot < 0) {
-                            // BED_MAX_OPEN matches all used this round and
-                            // a 33rd paralog showed up -- drop it (rare).
-                            continue;
-                        }
-                        if (open[slot].active) {
-                            // Evicting an active slot to make room: close it.
-                            // (close_opens skips inactive; passing a one-slot
-                            // mask would emit only this one.)  We use a
-                            // single-element mask trick: mark every OTHER
-                            // slot as used so close_opens only emits ours.
-                            int evict_mask[BED_MAX_OPEN];
-                            for (int t = 0; t < BED_MAX_OPEN; t++) evict_mask[t] = (t != slot);
-                            close_opens(fh, open, BED_MAX_OPEN, evict_mask,
-                                        input_strand_sign, name, score,
-                                        emit_strand, &n_out);
-                        }
+                        // Safety: slot should always be >= 0 here given
+                        // the growth above; if not, drop this match.
+                        if (slot < 0) continue;
                         open[slot] = (OpenBedInterval){
                             .seq = m[i].seq,
                             .start = m[i].pos,
@@ -698,16 +708,18 @@ static int bed_lift_main_impl(Tui *tui, TuiGenomeLift *gl,
                     }
                 }
                 // Close opens that weren't extended this column.
-                close_opens(fh, open, BED_MAX_OPEN, used_this_col,
+                close_opens(fh, open, open_cap, used_this_col,
                             input_strand_sign, name, score, emit_strand, &n_out);
             }
             // End of this column-interval -- close all opens (universal-col
             // gap means we can't carry the run through).
-            close_opens(fh, open, BED_MAX_OPEN, NULL,
+            close_opens(fh, open, open_cap, NULL,
                         input_strand_sign, name, score, emit_strand, &n_out);
+            free(m);
         }
         free(iv);
     }
+    free(open); free(used_this_col);
     free(line);
     fclose(bf);
     if (output_file) fclose(fh);
