@@ -124,17 +124,37 @@ def _leaf_cols(blocks):
 
 
 def _read_wig(path):
-    """Parse a variableStep wig into a list of (chrom, 0-based pos)."""
+    """Parse a wig (mixed variableStep + fixedStep) into a list of
+    (chrom, 0-based pos).  taffy lift emits either format depending on
+    whether consecutive same-seq target positions group into a long run."""
     pts = []
-    cur = None
+    mode = None       # 'var' | 'fixed'
+    chrom = None
+    fs_pos = 0        # next 0-based position for the current fixedStep block
+    fs_step = 1
     with open(path) as f:
         for line in f:
             line = line.strip()
             if line.startswith('variableStep'):
-                cur = line.split('chrom=')[1]
-            elif line and cur and line[0].isdigit():
-                tok = line.split()
-                pts.append((cur, int(tok[0]) - 1))
+                mode = 'var'
+                chrom = line.split('chrom=', 1)[1].split()[0]
+                continue
+            if line.startswith('fixedStep'):
+                mode = 'fixed'
+                fs_step = 1
+                for tok in line.split()[1:]:
+                    if '=' not in tok: continue
+                    k, v = tok.split('=', 1)
+                    if   k == 'chrom': chrom = v
+                    elif k == 'start': fs_pos = int(v) - 1  # 1-based -> 0-based
+                    elif k == 'step':  fs_step = int(v)
+                continue
+            if not line or chrom is None: continue
+            if mode == 'var' and line[0].isdigit():
+                pts.append((chrom, int(line.split()[0]) - 1))
+            elif mode == 'fixed':
+                pts.append((chrom, fs_pos))
+                fs_pos += fs_step
     return pts
 
 

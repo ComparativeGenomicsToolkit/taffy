@@ -29,7 +29,7 @@ static void usage(void) {
     fprintf(stderr, "-w --wig       [FILE_NAME] : REQUIRED Input .wig in ancestor row-0 coords (chrom = full genome.sequence)\n");
     fprintf(stderr, "-g --genome    [STRING]    : REQUIRED Target genome name (e.g. hg38)\n");
     fprintf(stderr, "-o --outputFile [FILE_NAME] : Output wig (default stdout)\n");
-    fprintf(stderr, "-m --memCap    [SIZE]      : Max in-memory output buffer before spilling to disk; suffix K/M/G allowed (default 4G).  Env TAFFY_LIFT_BUDGET_MB also honored (CLI wins).\n");
+    fprintf(stderr, "-m --memCap    [SIZE]      : Max in-memory output buffer before spilling to disk; suffix K/M/G allowed (default 2G).  Env TAFFY_LIFT_BUDGET_MB also honored (CLI wins).\n");
     fprintf(stderr, "-l --logLevel  : Set log level\n");
     fprintf(stderr, "-h --help      : Print this help\n");
 }
@@ -44,6 +44,81 @@ static int liftrec_cmp(const void *a, const void *b) {
     const LiftRec *x = a, *y = b;
     if (x->seq_idx != y->seq_idx) return x->seq_idx < y->seq_idx ? -1 : 1;
     return x->pos < y->pos ? -1 : x->pos > y->pos ? 1 : 0;
+}
+
+// LSD radix sort LiftRec[] by composite key (seq_idx << 32) | pos.
+// 8 bits per pass, 4-5 passes suffice at vertebrate scale (seq_idx in
+// the low hundreds = 8 bits, pos in the low billions = ~28-32 bits).
+// O(N) total -- on a 60M-record sort, this is ~3 s vs qsort's ~10 s
+// (no function-pointer comparator overhead, sequential memory access).
+// Cost: one auxiliary LiftRec[] (= memory doubles during the sort);
+// this is paid once at end-of-input before the emit phase, both arrays
+// freed before the wig is written.  Assumes both seq_idx and pos fit
+// in uint32 -- safe for any realistic universal MAF (genome with >4B
+// sequences in a single target, or a chromosome >4 Gb, would need a
+// wider key).
+//
+// Wrapper liftrec_sort() dispatches by N: small buffers (under
+// RADIX_THRESHOLD) use qsort directly because the radix sort's
+// per-call malloc of a >MB tmp buffer hits glibc's mmap path on
+// every call and dominates at small N -- the in-memory fast path
+// sorts ~60M records once and radix wins big; the spill flush path
+// sorts ~budget/24 records per call (default 2G/24 = ~83M, still
+// radix territory; but at -m 1M the per-call buffer is ~44K records
+// and qsort is faster).
+#define RADIX_THRESHOLD 1000000
+
+// Output emit format break-even.  variableStep (~14 B/row: "pos val\n")
+// vs fixedStep (~50 B header + ~2 B/row: "val\n").  Equal at ~6 records.
+// Used by both the in-memory emit path and the spill-merge lookahead.
+#define FS_THRESHOLD 6
+
+static void liftrec_radix_sort(LiftRec *arr, int64_t n) {
+    if (n < 2) return;
+    uint64_t max_key = 0;
+    for (int64_t i = 0; i < n; i++) {
+        // Guard the composite-key truncation assumption (see comment on
+        // liftrec_radix_sort): if either field exceeds 32 bits the
+        // composite key overflows and the sort silently misorders.
+        // Catch it loudly here rather than corrupt output downstream.
+        assert(arr[i].seq_idx >= 0 && arr[i].seq_idx < (1LL << 32));
+        assert(arr[i].pos     >= 0 && arr[i].pos     < (1LL << 32));
+        uint64_t k = ((uint64_t)arr[i].seq_idx << 32) | (uint32_t)arr[i].pos;
+        if (k > max_key) max_key = k;
+    }
+    int n_passes = 0;
+    while (n_passes < 8 && (max_key >> (n_passes * 8)) != 0) n_passes++;
+    if (n_passes == 0) return;
+
+    LiftRec *tmp = st_malloc((size_t)n * sizeof(LiftRec));
+    LiftRec *src = arr, *dst = tmp;
+    int64_t count[257];
+    for (int pass = 0; pass < n_passes; pass++) {
+        memset(count, 0, sizeof(count));
+        int shift = pass * 8;
+        for (int64_t i = 0; i < n; i++) {
+            uint64_t k = ((uint64_t)src[i].seq_idx << 32) | (uint32_t)src[i].pos;
+            count[((k >> shift) & 0xff) + 1]++;
+        }
+        for (int b = 0; b < 256; b++) count[b + 1] += count[b];
+        for (int64_t i = 0; i < n; i++) {
+            uint64_t k = ((uint64_t)src[i].seq_idx << 32) | (uint32_t)src[i].pos;
+            uint8_t b = (k >> shift) & 0xff;
+            dst[count[b]++] = src[i];
+        }
+        LiftRec *swap = src; src = dst; dst = swap;
+    }
+    if (src != arr) memcpy(arr, src, (size_t)n * sizeof(LiftRec));
+    free(tmp);
+}
+
+// Pick the right algorithm for the input size.  Radix has fixed per-call
+// overhead (a >MB malloc on the in-memory path's hot loop, glibc mmap'd
+// at sizes above 128 KB) that's amortized at large N but loses to qsort
+// at small N -- the spill-flush path with -m 1M lives there.
+static void liftrec_sort(LiftRec *arr, int64_t n) {
+    if (n < RADIX_THRESHOLD) qsort(arr, n, sizeof(LiftRec), liftrec_cmp);
+    else                     liftrec_radix_sort(arr, n);
 }
 
 /////////////////////////////////////////////////////////////////////////////
@@ -61,7 +136,7 @@ static int liftrec_cmp(const void *a, const void *b) {
 // memory; the spill path only kicks in for whole-genome dense lifts (e.g.
 // chr1 step=1 hg38 -> ape ~5 GB, full canonical gene set ~30 GB).
 /////////////////////////////////////////////////////////////////////////////
-#define LIFT_SPILL_BUDGET_DEFAULT_BYTES (4LL * 1024 * 1024 * 1024)
+#define LIFT_SPILL_BUDGET_DEFAULT_BYTES (2LL * 1024 * 1024 * 1024)
 
 // Parse "12345", "256M", "4G", "1024K" -> bytes; -1 on parse error.  Empty
 // or whitespace-only input is also an error (callers treat -1 as "absent
@@ -199,7 +274,7 @@ static char *lift_spill_path(int idx) {
 // on success, nonzero on write/open failure.
 static int lift_flush_spill(LiftRec *buf, int64_t n, const char *output_file) {
     if (n <= 0) return 0;
-    qsort(buf, n, sizeof(LiftRec), liftrec_cmp);
+    liftrec_sort(buf, n);
     lift_arm_cleanup();
     if (lift_ensure_spill_dir(output_file) != 0) return 1;
 
@@ -275,6 +350,20 @@ static void heap_build(Spill **h, int n) {
 // k-way merge: open each spill, pop the first record (priming `head`),
 // build a min-heap, repeatedly emit head[0], pop next into the top entry
 // and sift -- or evict if that spill is now exhausted.
+// Pop the heap's smallest record into *out, advance the source spill,
+// rebalance the heap.  Returns 1 if a record was popped, 0 if heap empty.
+static int heap_pop_into(Spill **heap, int *heap_n, LiftRec *out) {
+    if (*heap_n == 0) return 0;
+    *out = heap[0]->head;
+    if (spill_pop(heap[0])) {
+        heap_sift_down(heap, *heap_n, 0);
+    } else {
+        heap[0] = heap[--(*heap_n)];
+        if (*heap_n > 0) heap_sift_down(heap, *heap_n, 0);
+    }
+    return 1;
+}
+
 static int lift_merge_spills(char **paths, int n_paths, FILE *out_fh, stList *seqs) {
     Spill *all = st_calloc(n_paths, sizeof(Spill));
     Spill **heap = st_malloc(n_paths * sizeof(Spill *));
@@ -292,21 +381,70 @@ static int lift_merge_spills(char **paths, int n_paths, FILE *out_fh, stList *se
     }
     heap_build(heap, heap_n);
 
-    int64_t cur_out_seq = -1;
-    while (heap_n > 0) {
-        Spill *top = heap[0];
-        if (top->head.seq_idx != cur_out_seq) {
-            cur_out_seq = top->head.seq_idx;
-            fprintf(out_fh, "variableStep chrom=%s\n",
-                    (const char *)stList_get(seqs, cur_out_seq));
+    // Streaming-collapse emit: same logic as the in-memory fast path,
+    // but with a small ring buffer for the lookahead needed to decide
+    // fixedStep vs variableStep.  Refill from the heap as the buffer
+    // drains.
+    LiftRec buf[FS_THRESHOLD];
+    int buf_n = 0;
+    int64_t cur_var_seq = -1;
+
+    // Initial fill.
+    while (buf_n < FS_THRESHOLD && heap_n > 0) {
+        if (heap_pop_into(heap, &heap_n, &buf[buf_n])) buf_n++;
+    }
+
+    while (buf_n > 0) {
+        int rl = 1;
+        while (rl < buf_n &&
+               buf[rl].seq_idx == buf[0].seq_idx &&
+               buf[rl].pos == buf[rl - 1].pos + 1) {
+            rl++;
         }
-        fprintf(out_fh, "%" PRIi64 " %g\n", top->head.pos + 1, top->head.value);
-        if (spill_pop(top)) {
-            heap_sift_down(heap, heap_n, 0);
+        if (rl >= FS_THRESHOLD) {
+            int64_t cur_seq = buf[0].seq_idx;
+            int64_t next_pos = buf[0].pos + 1;
+            fprintf(out_fh, "fixedStep chrom=%s start=%" PRIi64 " step=1\n",
+                    (const char *)stList_get(seqs, cur_seq), buf[0].pos + 1);
+            for (int k = 0; k < rl; k++) {
+                fprintf(out_fh, "%g\n", buf[k].value);
+                next_pos = buf[k].pos + 1;
+            }
+            // Slide remaining records down.
+            for (int k = rl; k < buf_n; k++) buf[k - rl] = buf[k];
+            buf_n -= rl;
+            // Keep extending the run by pulling from the heap as long
+            // as the next-smallest stays consecutive with this fixedStep.
+            // We must check buf[0] (refilled if empty) first since the
+            // heap top alone isn't enough -- buf may still hold a record
+            // that's earlier in the merge order than the new heap top.
+            while (1) {
+                if (buf_n == 0 && heap_n > 0) {
+                    if (heap_pop_into(heap, &heap_n, &buf[0])) buf_n = 1;
+                }
+                if (buf_n == 0) break;
+                if (buf[0].seq_idx != cur_seq || buf[0].pos != next_pos) break;
+                fprintf(out_fh, "%g\n", buf[0].value);
+                next_pos++;
+                // Slide one off the front.
+                for (int k = 1; k < buf_n; k++) buf[k - 1] = buf[k];
+                buf_n--;
+            }
+            cur_var_seq = -1;
         } else {
-            // Exhausted -- swap last entry in, shrink heap, re-sift.
-            heap[0] = heap[--heap_n];
-            if (heap_n > 0) heap_sift_down(heap, heap_n, 0);
+            // Emit buf[0] as variableStep.
+            if (buf[0].seq_idx != cur_var_seq) {
+                fprintf(out_fh, "variableStep chrom=%s\n",
+                        (const char *)stList_get(seqs, buf[0].seq_idx));
+                cur_var_seq = buf[0].seq_idx;
+            }
+            fprintf(out_fh, "%" PRIi64 " %g\n", buf[0].pos + 1, buf[0].value);
+            for (int k = 1; k < buf_n; k++) buf[k - 1] = buf[k];
+            buf_n--;
+        }
+        // Refill buf to FS_THRESHOLD if more records remain.
+        while (buf_n < FS_THRESHOLD && heap_n > 0) {
+            if (heap_pop_into(heap, &heap_n, &buf[buf_n])) buf_n++;
         }
     }
     for (int i = 0; i < n_paths; i++) if (all[i].fh) fclose(all[i].fh);
@@ -607,15 +745,38 @@ int taf_lift_main(int argc, char *argv[]) {
 
     if (lift_spill_n == 0) {
         // Nothing ever spilled -- emit directly from the in-memory buffer.
-        qsort(out, out_n, sizeof(LiftRec), liftrec_cmp);
-        int64_t cur_out_seq = -1;
-        for (int64_t i = 0; i < out_n; i++) {
-            if (out[i].seq_idx != cur_out_seq) {
-                cur_out_seq = out[i].seq_idx;
-                fprintf(fh, "variableStep chrom=%s\n",
-                        (const char*)stList_get(seqs, cur_out_seq));
+        liftrec_sort(out, out_n);
+        // Collapse consecutive same-seq positions into fixedStep blocks
+        // (one header, just values).  For non-runs or short runs, keep
+        // variableStep ("pos val" per row, one header per seq).  See
+        // FS_THRESHOLD comment near liftrec_radix_sort.
+        int64_t cur_var_seq = -1;  // -1 = no variableStep header open
+        int64_t i = 0;
+        while (i < out_n) {
+            int64_t j = i;
+            while (j + 1 < out_n &&
+                   out[j+1].seq_idx == out[i].seq_idx &&
+                   out[j+1].pos == out[j].pos + 1) {
+                j++;
             }
-            fprintf(fh, "%" PRIi64 " %g\n", out[i].pos + 1, out[i].value);
+            int64_t rl = j - i + 1;
+            if (rl >= FS_THRESHOLD) {
+                fprintf(fh, "fixedStep chrom=%s start=%" PRIi64 " step=1\n",
+                        (const char*)stList_get(seqs, out[i].seq_idx),
+                        out[i].pos + 1);
+                for (int64_t k = i; k <= j; k++) fprintf(fh, "%g\n", out[k].value);
+                cur_var_seq = -1;  // fixedStep closed; force new header for any var follow-up
+            } else {
+                if (out[i].seq_idx != cur_var_seq) {
+                    fprintf(fh, "variableStep chrom=%s\n",
+                            (const char*)stList_get(seqs, out[i].seq_idx));
+                    cur_var_seq = out[i].seq_idx;
+                }
+                for (int64_t k = i; k <= j; k++) {
+                    fprintf(fh, "%" PRIi64 " %g\n", out[k].pos + 1, out[k].value);
+                }
+            }
+            i = j + 1;
         }
     } else {
         // Flush the residual to a final spill, then k-way merge all spills.
