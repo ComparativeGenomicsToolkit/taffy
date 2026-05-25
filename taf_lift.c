@@ -13,6 +13,9 @@
 #include "sonLib.h"
 #include <getopt.h>
 #include <time.h>
+#include <errno.h>
+#include <signal.h>
+#include <unistd.h>
 
 static void usage(void) {
     fprintf(stderr, "taffy lift [options]\n");
@@ -35,6 +38,251 @@ static int liftrec_cmp(const void *a, const void *b) {
     const LiftRec *x = a, *y = b;
     if (x->seq_idx != y->seq_idx) return x->seq_idx < y->seq_idx ? -1 : 1;
     return x->pos < y->pos ? -1 : x->pos > y->pos ? 1 : 0;
+}
+
+/////////////////////////////////////////////////////////////////////////////
+// External sort: when the in-memory buffer of LiftRec hits SPILL_BUDGET, we
+// qsort it and write the sorted records to a fresh spill file, then reset
+// the buffer.  At end-of-input, the residual is flushed the same way; the
+// final wig output is produced by a k-way heap-merge of all spills.  If
+// nothing ever spilled (small lift) we fall back to the in-memory emit.
+//
+// LiftRec.seq_idx is a process-global index into the `seqs` stList, so
+// records remain consistently ordered across spills.
+//
+// SPILL_BUDGET picked so 60+ spills are unusual at vertebrate scale: 256 MB
+// per spill (~11M records) gives ~6 spills for a 70M-record fish-of-tetra
+// lift, ~250 spills for a 2.5B-record full-gene-set hg38 lift -- both well
+// within "open file" limits and merge-heap costs.
+// Override at runtime with TAFFY_LIFT_BUDGET_MB.
+/////////////////////////////////////////////////////////////////////////////
+#define LIFT_SPILL_BUDGET_DEFAULT_MB 256
+
+static int64_t lift_spill_budget_bytes(void) {
+    const char *env = getenv("TAFFY_LIFT_BUDGET_MB");
+    int64_t mb = LIFT_SPILL_BUDGET_DEFAULT_MB;
+    if (env != NULL && *env != 0) {
+        char *end = NULL;
+        long v = strtol(env, &end, 10);
+        if (end != env && v > 0) mb = (int64_t)v;
+    }
+    return mb * 1024LL * 1024LL;
+}
+
+// Tracked spill paths so we can rm() on normal exit AND on
+// atexit/signal aborts (mirrors the tui.c cleanup pattern).  All spills
+// live inside a single per-process mkdtemp'd directory (lift_spill_dir)
+// to avoid TOCTOU symlink attacks on /tmp and adjacent-to-output name
+// collisions across concurrent invocations.
+static char **lift_spill_paths   = NULL;
+static int    lift_spill_n       = 0;
+static int    lift_spill_cap     = 0;
+static int    lift_atexit_armed  = 0;
+static char  *lift_spill_dir     = NULL;  // owned; rmdir'd on cleanup
+
+// Normal-path cleanup: unlink each spill file, rmdir the spill directory,
+// free the path strings, clear the tracker.  Calls free() / remove() /
+// rmdir() which are NOT async-signal-safe -- only invoke on normal exit.
+static void lift_remove_spills(void) {
+    for (int i = 0; i < lift_spill_n; i++) {
+        if (lift_spill_paths[i] != NULL) {
+            (void) remove(lift_spill_paths[i]);
+            free(lift_spill_paths[i]);
+            lift_spill_paths[i] = NULL;
+        }
+    }
+    free(lift_spill_paths);
+    lift_spill_paths = NULL;
+    lift_spill_n = lift_spill_cap = 0;
+    if (lift_spill_dir != NULL) {
+        (void) rmdir(lift_spill_dir);
+        free(lift_spill_dir);
+        lift_spill_dir = NULL;
+    }
+}
+
+static void lift_atexit_handler(void) {
+    if (lift_atexit_armed) lift_remove_spills();
+}
+
+// Signal-path cleanup: ONLY async-signal-safe primitives.  unlink() and
+// rmdir() are on POSIX's safe list, free()/remove() are NOT (free can
+// deadlock if the signal arrived mid-malloc; remove() isn't async-safe).
+// We don't free the path strings -- the _exit() below takes the process
+// down before any leak matters.  _exit(128+sig) gives the standard
+// "killed by signal" exit code and skips both atexit handlers and stdio
+// flushing (also unsafe in a signal context).
+static void lift_signal_handler(int sig) {
+    for (int i = 0; i < lift_spill_n; i++) {
+        if (lift_spill_paths[i] != NULL) {
+            (void) unlink(lift_spill_paths[i]);
+        }
+    }
+    if (lift_spill_dir != NULL) {
+        (void) rmdir(lift_spill_dir);
+    }
+    _exit(128 + sig);
+}
+
+static void lift_arm_cleanup(void) {
+    if (lift_atexit_armed) return;
+    lift_atexit_armed = 1;
+    atexit(lift_atexit_handler);
+    signal(SIGINT,  lift_signal_handler);
+    signal(SIGTERM, lift_signal_handler);
+    signal(SIGHUP,  lift_signal_handler);
+}
+
+// Create the per-process spill directory on first call.  Uses mkdtemp so
+// the directory name is unique (avoids races with other taffy instances
+// AND can't be pre-created by a hostile actor on shared systems --
+// mkdtemp creates with mode 0700 and follows no symlinks).  Returns 0 on
+// success, nonzero on mkdtemp failure.
+static int lift_ensure_spill_dir(const char *output_file) {
+    if (lift_spill_dir != NULL) return 0;
+    const char *tmpdir = getenv("TMPDIR");
+    if (tmpdir == NULL) tmpdir = "/tmp";
+    char *tmpl = st_malloc(strlen(output_file ? output_file : tmpdir) + 32);
+    if (output_file) {
+        sprintf(tmpl, "%s.spills.XXXXXX", output_file);
+    } else {
+        sprintf(tmpl, "%s/taffy_lift.XXXXXX", tmpdir);
+    }
+    if (mkdtemp(tmpl) == NULL) {
+        fprintf(stderr, "ERROR: failed to create spill directory %s: %s\n",
+                tmpl, strerror(errno));
+        free(tmpl);
+        return 1;
+    }
+    lift_spill_dir = tmpl;
+    return 0;
+}
+
+// Compose <lift_spill_dir>/spill.NNNNN.  Caller owns the returned string.
+static char *lift_spill_path(int idx) {
+    char *p = st_malloc(strlen(lift_spill_dir) + 32);
+    sprintf(p, "%s/spill.%05d", lift_spill_dir, idx);
+    return p;
+}
+
+// qsort the in-memory buffer, write all records to a new spill file (binary
+// LiftRec back to back), record its path in the cleanup list.  Returns 0
+// on success, nonzero on write/open failure.
+static int lift_flush_spill(LiftRec *buf, int64_t n, const char *output_file) {
+    if (n <= 0) return 0;
+    qsort(buf, n, sizeof(LiftRec), liftrec_cmp);
+    lift_arm_cleanup();
+    if (lift_ensure_spill_dir(output_file) != 0) return 1;
+
+    if (lift_spill_n == lift_spill_cap) {
+        lift_spill_cap = lift_spill_cap ? lift_spill_cap * 2 : 16;
+        lift_spill_paths = st_realloc(lift_spill_paths, lift_spill_cap * sizeof(char *));
+    }
+    char *path = lift_spill_path(lift_spill_n);
+    FILE *fh = fopen(path, "wb");
+    if (fh == NULL) {
+        fprintf(stderr, "ERROR: failed to open spill file %s: %s\n", path, strerror(errno));
+        free(path);
+        return 1;
+    }
+    size_t w = fwrite(buf, sizeof(LiftRec), (size_t)n, fh);
+    int rc = fclose(fh);
+    if (w != (size_t)n || rc != 0) {
+        fprintf(stderr, "ERROR: short write or close failure on spill %s\n", path);
+        (void) remove(path);
+        free(path);
+        return 1;
+    }
+    lift_spill_paths[lift_spill_n++] = path;
+    return 0;
+}
+
+// Per-spill read cursor for the k-way merge.  Always exposes `head` as the
+// next-to-emit record while not eof; spill_pop advances (refilling the
+// read buffer as needed) and returns 0 on exhaustion.  The merge heap is
+// keyed on `head`, never on buf indices, so it stays valid through
+// advances without the heap key going stale.
+#define SPILL_READ_BATCH 4096
+typedef struct {
+    FILE   *fh;
+    LiftRec buf[SPILL_READ_BATCH];
+    int     buf_n;
+    int     buf_i;
+    int     eof;
+    LiftRec head;
+} Spill;
+
+static int spill_pop(Spill *s) {
+    if (s->buf_i >= s->buf_n) {
+        if (s->eof) return 0;
+        size_t got = fread(s->buf, sizeof(LiftRec), SPILL_READ_BATCH, s->fh);
+        s->buf_n = (int)got;
+        s->buf_i = 0;
+        if (got == 0) { s->eof = 1; return 0; }
+    }
+    s->head = s->buf[s->buf_i++];
+    return 1;
+}
+
+static int heap_cmp(const Spill *a, const Spill *b) {
+    return liftrec_cmp(&a->head, &b->head);
+}
+
+static void heap_sift_down(Spill **h, int n, int i) {
+    while (1) {
+        int l = 2*i + 1, r = 2*i + 2, best = i;
+        if (l < n && heap_cmp(h[l], h[best]) < 0) best = l;
+        if (r < n && heap_cmp(h[r], h[best]) < 0) best = r;
+        if (best == i) break;
+        Spill *tmp = h[i]; h[i] = h[best]; h[best] = tmp;
+        i = best;
+    }
+}
+
+static void heap_build(Spill **h, int n) {
+    for (int i = n/2 - 1; i >= 0; i--) heap_sift_down(h, n, i);
+}
+
+// k-way merge: open each spill, pop the first record (priming `head`),
+// build a min-heap, repeatedly emit head[0], pop next into the top entry
+// and sift -- or evict if that spill is now exhausted.
+static int lift_merge_spills(char **paths, int n_paths, FILE *out_fh, stList *seqs) {
+    Spill *all = st_calloc(n_paths, sizeof(Spill));
+    Spill **heap = st_malloc(n_paths * sizeof(Spill *));
+    int heap_n = 0;
+    for (int i = 0; i < n_paths; i++) {
+        all[i].fh = fopen(paths[i], "rb");
+        if (all[i].fh == NULL) {
+            fprintf(stderr, "ERROR: failed to open spill %s for merge: %s\n",
+                    paths[i], strerror(errno));
+            for (int j = 0; j < i; j++) if (all[j].fh) fclose(all[j].fh);
+            free(all); free(heap);
+            return 1;
+        }
+        if (spill_pop(&all[i])) heap[heap_n++] = &all[i];
+    }
+    heap_build(heap, heap_n);
+
+    int64_t cur_out_seq = -1;
+    while (heap_n > 0) {
+        Spill *top = heap[0];
+        if (top->head.seq_idx != cur_out_seq) {
+            cur_out_seq = top->head.seq_idx;
+            fprintf(out_fh, "variableStep chrom=%s\n",
+                    (const char *)stList_get(seqs, cur_out_seq));
+        }
+        fprintf(out_fh, "%" PRIi64 " %g\n", top->head.pos + 1, top->head.value);
+        if (spill_pop(top)) {
+            heap_sift_down(heap, heap_n, 0);
+        } else {
+            // Exhausted -- swap last entry in, shrink heap, re-sift.
+            heap[0] = heap[--heap_n];
+            if (heap_n > 0) heap_sift_down(heap, heap_n, 0);
+        }
+    }
+    for (int i = 0; i < n_paths; i++) if (all[i].fh) fclose(all[i].fh);
+    free(all); free(heap);
+    return 0;
 }
 
 int taf_lift_main(int argc, char *argv[]) {
@@ -105,6 +353,8 @@ int taf_lift_main(int argc, char *argv[]) {
     LiftRec *out = NULL;
     int64_t out_n = 0, out_cap = 0;
     int64_t n_in = 0, n_lifted = 0, n_no_column = 0, n_no_genome = 0;
+    const int64_t spill_budget = lift_spill_budget_bytes();
+    const int64_t spill_budget_n = spill_budget / (int64_t)sizeof(LiftRec);
 
     // Stream-parse the wig directly instead of going through wig_parse.
     // wig_parse builds an stHash<seq, stHash<coord -> double*>> which (a) costs
@@ -264,7 +514,15 @@ int taf_lift_main(int argc, char *argv[]) {
                 seq_idx = (intptr_t)v - 1;
             }
             if (out_n == out_cap) {
-                out_cap = out_cap ? out_cap * 2 : 1024;
+                // Double until we hit the spill budget, then stop growing --
+                // the post-append spill-flush below will reset out_n and we
+                // never need cap > spill_budget_n.  (The previous version had
+                // a "safety re-add" branch that could push cap above the
+                // budget for one realloc on tiny budgets; not needed since
+                // initial cap is 1024 <= any sensible budget.)
+                int64_t new_cap = out_cap ? out_cap * 2 : 1024;
+                if (new_cap > spill_budget_n) new_cap = spill_budget_n;
+                out_cap = new_cap;
                 out = st_realloc(out, out_cap * sizeof(LiftRec));
             }
             out[out_n].seq_idx = seq_idx;
@@ -272,6 +530,18 @@ int taf_lift_main(int argc, char *argv[]) {
             out[out_n].value   = value;
             out_n++;
             n_lifted++;
+            // External-sort spill: cap memory at spill_budget_n records.
+            if (out_n >= spill_budget_n) {
+                if (lift_flush_spill(out, out_n, output_file) != 0) {
+                    free(heap_m);
+                    free(out); free(cur_seq); free(cur_runs); free(wig_chrom);
+                    LI_destruct(wli); fclose(wf);
+                    stList_destruct(seqs); stHash_destruct(seqtab);
+                    tui_genome_lift_destruct(gl); tui_destruct(tui); free(tui_p);
+                    return 1;
+                }
+                out_n = 0;
+            }
         }
         free(heap_m);
     }
@@ -280,12 +550,9 @@ int taf_lift_main(int argc, char *argv[]) {
     free(wig_chrom);
 
     st_logInfo("Lifted %" PRIi64 "/%" PRIi64 " records in %" PRIi64 " s "
-               "(no-column=%" PRIi64 ", no-genome=%" PRIi64 ")\n",
+               "(no-column=%" PRIi64 ", no-genome=%" PRIi64 ", spills=%d)\n",
                n_lifted, n_in, (int64_t)(time(NULL) - t0),
-               n_no_column, n_no_genome);
-
-    // Sort by (seq_idx, pos) so we can emit variableStep blocks.
-    qsort(out, out_n, sizeof(LiftRec), liftrec_cmp);
+               n_no_column, n_no_genome, lift_spill_n);
 
     FILE *fh = output_file ? fopen(output_file, "w") : stdout;
     if (fh == NULL) {
@@ -299,14 +566,42 @@ int taf_lift_main(int argc, char *argv[]) {
         free(tui_p);
         return 1;
     }
-    int64_t cur_out_seq = -1;
-    for (int64_t i = 0; i < out_n; i++) {
-        if (out[i].seq_idx != cur_out_seq) {
-            cur_out_seq = out[i].seq_idx;
-            fprintf(fh, "variableStep chrom=%s\n", (const char*)stList_get(seqs, cur_out_seq));
+
+    if (lift_spill_n == 0) {
+        // Nothing ever spilled -- emit directly from the in-memory buffer.
+        qsort(out, out_n, sizeof(LiftRec), liftrec_cmp);
+        int64_t cur_out_seq = -1;
+        for (int64_t i = 0; i < out_n; i++) {
+            if (out[i].seq_idx != cur_out_seq) {
+                cur_out_seq = out[i].seq_idx;
+                fprintf(fh, "variableStep chrom=%s\n",
+                        (const char*)stList_get(seqs, cur_out_seq));
+            }
+            fprintf(fh, "%" PRIi64 " %g\n", out[i].pos + 1, out[i].value);
         }
-        // wig is 1-based by spec; our internal coord is 0-based.
-        fprintf(fh, "%" PRIi64 " %g\n", out[i].pos + 1, out[i].value);
+    } else {
+        // Flush the residual to a final spill, then k-way merge all spills.
+        if (out_n > 0 && lift_flush_spill(out, out_n, output_file) != 0) {
+            if (output_file) fclose(fh);
+            free(out); free(cur_seq); free(cur_runs);
+            stList_destruct(seqs); stHash_destruct(seqtab);
+            tui_genome_lift_destruct(gl); tui_destruct(tui); free(tui_p);
+            return 1;
+        }
+        out_n = 0;
+        time_t t_merge = time(NULL);
+        int rc = lift_merge_spills(lift_spill_paths, lift_spill_n, fh, seqs);
+        st_logInfo("Merged %d spill(s) in %" PRIi64 " s\n",
+                   lift_spill_n, (int64_t)(time(NULL) - t_merge));
+        if (rc != 0) {
+            if (output_file) fclose(fh);
+            free(out); free(cur_seq); free(cur_runs);
+            stList_destruct(seqs); stHash_destruct(seqtab);
+            tui_genome_lift_destruct(gl); tui_destruct(tui); free(tui_p);
+            lift_remove_spills();
+            return 1;
+        }
+        lift_remove_spills();
     }
     if (output_file) fclose(fh);
 
