@@ -641,18 +641,11 @@ static int bed_lift_main_impl(Tui *tui, TuiGenomeLift *gl,
                     m = st_realloc(m, (size_t)m_cap * sizeof(TuiGenomeMatch));
                     tui_genome_lift_column(gl, c, m, m_cap);
                 }
-                // Ensure open[]/used[] are large enough for nm distinct
-                // simultaneous opens (worst case: every match opens its own
-                // new slot).  This grows on demand and is cached across
-                // BED lines.
-                if (nm > open_cap) {
-                    int new_cap = open_cap;
-                    while (new_cap < nm) new_cap *= 2;
-                    open = st_realloc(open, (size_t)new_cap * sizeof(OpenBedInterval));
-                    used_this_col = st_realloc(used_this_col, (size_t)new_cap * sizeof(int));
-                    for (int s = open_cap; s < new_cap; s++) open[s].active = 0;
-                    open_cap = new_cap;
-                }
+                // open[]/used[] slot pool.  Worst case at this column is
+                // (active opens NOT extended) + (new matches needing slots),
+                // both bounded by `prior_active + nm`.  We can't cheaply count
+                // active opens here, so just ensure the pool grows on demand
+                // in the inactive-slot search below when needed.
                 // For each match, find an extending open or open a new one.
                 // Extension semantics differ by strand:
                 //   '+' (m.strand=1): target pos advances; next expected =
@@ -687,16 +680,24 @@ static int bed_lift_main_impl(Tui *tui, TuiGenomeLift *gl,
                         else          open[slot].start--;
                         used_this_col[slot] = 1;
                     } else {
-                        // Find an inactive slot.  Since we grew open[] to
-                        // hold nm matches up front, an inactive slot
-                        // always exists here (we have >= nm slots and at
-                        // most i < nm have been claimed this column).
+                        // Find an inactive slot; grow the pool if none exists
+                        // (prior column's opens may all still be active and
+                        // not yet extended-and-marked this column, e.g. when
+                        // every paralog starts a fresh run at this column).
                         for (int s = 0; s < open_cap; s++) {
                             if (!open[s].active) { slot = s; break; }
                         }
-                        // Safety: slot should always be >= 0 here given
-                        // the growth above; if not, drop this match.
-                        if (slot < 0) continue;
+                        if (slot < 0) {
+                            int new_cap = open_cap * 2;
+                            open = st_realloc(open, (size_t)new_cap * sizeof(OpenBedInterval));
+                            used_this_col = st_realloc(used_this_col, (size_t)new_cap * sizeof(int));
+                            for (int s = open_cap; s < new_cap; s++) {
+                                open[s].active = 0;
+                                used_this_col[s] = 0;
+                            }
+                            slot = open_cap;
+                            open_cap = new_cap;
+                        }
                         open[slot] = (OpenBedInterval){
                             .seq = m[i].seq,
                             .start = m[i].pos,
