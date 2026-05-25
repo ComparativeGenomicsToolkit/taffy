@@ -502,6 +502,24 @@ static int run_cmp(const void *a, const void *b) {
     return (x->t < y->t) ? -1 : (x->t > y->t) ? 1 : 0;
 }
 
+// Compare two (t, g, lenc) triples by the g field (the universal column).
+// Used by the writer to reorder a sequence's runs from t-sorted (the
+// merge-loop's natural order) to g-sorted (so per-chunk g ranges are
+// tight and the reader can filter chunks effectively).
+static int triple_cmp_by_g(const void *a, const void *b) {
+    const int64_t *x = a, *y = b;
+    return (x[1] < y[1]) ? -1 : (x[1] > y[1]) ? 1 : 0;
+}
+
+// Compare two (t, g, lenc) triples by the t field.  Used by
+// tui_load_seq_runs / tui_query to restore the t-sorted view callers
+// (source-coord lookups in taffy lift) expect, after concatenating
+// per-chunk g-sorted blobs.
+static int triple_cmp_by_t(const void *a, const void *b) {
+    const int64_t *x = a, *y = b;
+    return (x[0] < y[0]) ? -1 : (x[0] > y[0]) ? 1 : 0;
+}
+
 // Load every run record of one genome spill into a Run array (caller frees
 // each runs[k].seq + the runs[] array itself).  See spill_run for the on-disk
 // format: alternating 'N' (seq dictionary) and 'D' (data) records.
@@ -1027,23 +1045,38 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
             // R decode -- ONElib's oneObject(C) accumulator after a
             // cross-type oneGoto returns the wrong value in this version,
             // so we carry the ordinal explicitly.
+            // Sort this seq's runs by g_start (universal column) before
+            // chunking.  The column-keyed query in tui_genome_lift_column
+            // uses the chunks' (g_min, g_max) as a coarse filter -- if
+            // chunks are formed from t-sorted runs (the natural order
+            // produced by the merge loop above), each chunk's g range
+            // covers most of the universal column space for any seq with
+            // paralog hits or fragmented synteny.  Sorting by g first
+            // gives tight per-chunk g ranges, so the reader's backward
+            // scan only touches the few chunks whose g range actually
+            // includes the queried column.  Trade-off: t-deltas in the
+            // delta+varint encoding become non-monotonic (slightly
+            // larger compressed size); the reader sorts the concat'd
+            // runs back to t-order in tui_load_seq_runs for callers
+            // (taffy lift's source-coord lookup) that need that view.
+            qsort(buf, m, 3 * sizeof(int64_t), triple_cmp_by_g);
+
             int64_t s_ord = i + 1;  // 1-based S ordinal of THIS sequence
             int64_t chunk_pos = 0;
             while (chunk_pos < m) {
                 int64_t cm = m - chunk_pos;
                 if (cm > TUI_CHUNK_RUNS) cm = TUI_CHUNK_RUNS;
                 int64_t *cb = &buf[3 * chunk_pos];
-                // Compute (g_min, g_max) over the chunk's runs in UNIVERSAL
-                // COLUMN coords (cb[3*k+1] == g).  cb[3*k+0] is genome-forward
-                // t, which is NOT what the lift-by-column query keys on --
-                // mixing them up makes every chunk's range appear in the
-                // wrong coordinate space and the reader misses matches.
+                // With runs sorted by g_start, the chunk's g_min is the
+                // first run's g and g_max is just the largest (g+len) in
+                // the chunk (the last run's g+len IF length is monotone
+                // too -- but in general we still scan to find the max).
                 int64_t g_min = cb[1];
                 int64_t g_max = cb[1] + (cb[2] >> 1);
                 for (int64_t k = 1; k < cm; k++) {
                     int64_t g  = cb[3*k+1];
                     int64_t le = (cb[3*k+2] >> 1);
-                    if (g < g_min) g_min = g;
+                    if (g < g_min) g_min = g;  // monotone now, but cheap
                     if (g + le > g_max) g_max = g + le;
                 }
                 ++c_ord_emit;
@@ -1312,7 +1345,14 @@ int64_t *tui_load_seq_runs(Tui *tui, const char *seq_name, int64_t *n_out) {
     }
     oneFileClose(of);
     if (total == 0) { free(runs); return NULL; }
-    *n_out = total / 3;
+    int64_t n = total / 3;
+    // Writer pre-sorts each chunk's runs by g_start for the column-keyed
+    // target index.  Source-side callers (taffy lift's per-record coord
+    // lookup) binary-search by t_start instead, so restore the t-sorted
+    // view here.  O(n log n) once per source seq -- much smaller than the
+    // O(N) loop we feed the result into.
+    if (n > 1) qsort(runs, n, 3 * sizeof(int64_t), triple_cmp_by_t);
+    *n_out = n;
     return runs;
 }
 
@@ -1522,9 +1562,11 @@ void tui_genome_lift_destruct(TuiGenomeLift *gl) {
 }
 
 // Lazy-decode one chunk: oneGoto its C, read past C into the paired R, decode
-// the run triples, build GLRun array (sorted by g_start), build per-chunk
-// max_end_prefix.  No-op if already decoded.  Caller must serialize calls
-// on the same gl (the OneFile handle is not thread-safe).
+// the run triples, build GLRun array, build per-chunk max_end_prefix.
+// No-op if already decoded.  The writer pre-sorts each chunk's runs by
+// g_start, so the decoded triples come out g-sorted; no reader-side sort
+// needed.  Caller must serialize calls on the same gl (the OneFile handle
+// is not thread-safe).
 static void chunk_decode(TGLChunk *ch, OneFile *of) {
     if (ch->runs != NULL) return;
     if (!oneGoto(of, 'C', ch->c_ord)) return;
@@ -1547,9 +1589,15 @@ static void chunk_decode(TGLChunk *ch, OneFile *of) {
         rs[i].length  = lenc >> 1;
         rs[i].strand  = (int)(1 - (lenc & 1));
         rs[i].seq_idx = ch->seq_idx;
+        // Sanity: the writer pre-sorts each chunk's runs by g_start.  If
+        // this assert fires we're either reading an old .tui (built by
+        // the t-sorted writer) or the format invariant got broken some
+        // other way -- chunk_collect's binary search + max_end_prefix
+        // both require g_start to be non-decreasing, so a violation
+        // would silently miss matches downstream.
+        assert(i == 0 || g >= rs[i - 1].g_start);
     }
     free(tmp);
-    qsort(rs, m, sizeof(GLRun), glrun_cmp);
     int64_t *mep = st_malloc((size_t)m * sizeof(int64_t));
     int64_t running = rs[0].g_start + rs[0].length;
     mep[0] = running;
