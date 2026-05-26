@@ -9,6 +9,8 @@ on top of the C library and is therefore quite fast.
 
 See the [Taf format page](https://github.com/ComparativeGenomicsToolkit/taffy/blob/main/docs/taf_format.md) for a specification of the taf format and example.
 
+The [universal column coordinate index (`.tui`) format](https://github.com/ComparativeGenomicsToolkit/taffy/blob/main/docs/tui_format.md) is a separate sidecar index built by `taffy index -u` over a `cactus-hal2maf --universal` MAF/TAF; it powers `taffy view -U` (universal-coord region queries) and `taffy lift` (any-genome → leaf-genome coordinate lift).
+
 ## Installation
 
 See [C/CLI Install](https://github.com/ComparativeGenomicsToolkit/taffy/blob/main/docs/c_cli_lib_install.md) for how to build and install this source for using the C library and CLI utilities.
