@@ -89,15 +89,20 @@ typedef struct _Tui Tui;
  * Open a .tui and read its directory (sequence names, lengths, T) into RAM.
  * Returns NULL if the file can't be opened / isn't a tui container.
  */
+/*
+ * Thread-safety: a `Tui` is immutable after `tui_load` returns (it holds only
+ * the .tui path and a small in-memory X index).  Each query call re-opens the
+ * file privately, so multiple threads can concurrently issue `tui_query`,
+ * `tui_load_seq_runs`, and `tui_genome_lift_load` on the SAME `Tui`.  The
+ * `TuiGenomeLift` returned by `tui_genome_lift_load`, however, is NOT
+ * thread-safe -- see that function's docs.
+ */
 Tui *tui_load(const char *tui_path);
 
 void tui_destruct(Tui *tui);
 
 /* Total number of universal columns T (the global column count). */
 int64_t tui_total_columns(const Tui *tui);
-
-/* 1 if the full "genome.sequence" name is present in the index, else 0. */
-int tui_has_sequence(const Tui *tui, const char *seq_name);
 
 /*
  * Map the forward-coordinate interval [start, end) of sequence `seq_name` to
@@ -194,11 +199,6 @@ int tui_genome_lift_column(const TuiGenomeLift *gl, int64_t column,
 /* Number of column chunks indexed for this genome (set at load time;
  * does NOT grow with lazy decodes).  Use for the startup diagnostic. */
 int64_t tui_genome_lift_n_chunks(const TuiGenomeLift *gl);
-
-/* Cumulative count of runs currently decoded into memory.  Starts at 0
- * (lazy load) and grows monotonically as queries hit new chunks.  Useful
- * for end-of-run diagnostics, NOT for sizing at load time. */
-int64_t tui_genome_lift_n_runs(const TuiGenomeLift *gl);
 
 /////////////////////////////////////////////////////////////////////////////
 // Universal-column block extractor (replaces the .tai for the -U path).

@@ -101,28 +101,48 @@ char *tui_path(const char *maf_path) {
 static stList *atexit_spill_paths = NULL;  // owned strdup'd path strings
 static char *atexit_tui_path = NULL;        // owned strdup'd .tui output path
 
+// Normal-exit atexit handler: walks the spill list, unlinks each file,
+// frees memory.  Runs in process context so stList_destruct (which calls
+// free) is safe.  Called explicitly on st_errAbort and other graceful
+// failure paths, and registered via atexit() as a backstop.
 static void tui_atexit_cleanup(void) {
     if (atexit_spill_paths != NULL) {
         int64_t n = stList_length(atexit_spill_paths);
         for (int64_t i = 0; i < n; i++) {
-            (void) remove((char *) stList_get(atexit_spill_paths, i));
+            (void) unlink((char *) stList_get(atexit_spill_paths, i));
         }
         stList_destruct(atexit_spill_paths);
         atexit_spill_paths = NULL;
     }
     if (atexit_tui_path != NULL) {
-        (void) remove(atexit_tui_path);
+        (void) unlink(atexit_tui_path);
         free(atexit_tui_path);
         atexit_tui_path = NULL;
     }
 }
 
+// Signal-path cleanup: ONLY async-signal-safe primitives.  unlink() and
+// _exit() are on POSIX's safe list; free() and remove() are NOT (free()
+// can deadlock if the signal arrived mid-malloc; remove() isn't on the
+// async-safe list on every platform).  We READ but never MUTATE the
+// stList -- stList_get is array-indexed access with no allocation in
+// the hot path, so it's safe enough in practice.  We don't free path
+// strings here; the _exit() below takes the process down before any
+// leak matters.  _exit(128+sig) gives the standard "killed by signal"
+// exit code and skips atexit handlers and stdio flushing (also unsafe
+// in a signal context).  Mirrors the taf_lift.c lift_signal_handler
+// pattern.
 static void tui_signal_handler(int sig) {
-    tui_atexit_cleanup();
-    // restore default disposition and re-raise so the parent sees the right
-    // exit (don't swallow SIGINT into exit-code-0)
-    signal(sig, SIG_DFL);
-    raise(sig);
+    if (atexit_spill_paths != NULL) {
+        int64_t n = stList_length(atexit_spill_paths);
+        for (int64_t i = 0; i < n; i++) {
+            (void) unlink((char *) stList_get(atexit_spill_paths, i));
+        }
+    }
+    if (atexit_tui_path != NULL) {
+        (void) unlink(atexit_tui_path);
+    }
+    _exit(128 + sig);
 }
 
 // Add `path` to the cleanup-on-abort list.  On first call, registers the
@@ -576,6 +596,13 @@ static void tui_phase1_block(Phase1 *p1, Alignment *aln) {
 
 /////////////////////////////////////////////////////////////////////////////
 // Phase 2: per-genome in-RAM sort by (seq, t_start), write ONEcode container
+//
+// Memory: bounded PER GENOME by that genome's spill size -- not absolutely.
+// At vertebrate scale the biggest leaf (a Mus chr1 / sleep mr-style spill)
+// can carry ~30M runs at ~40 B/Run = ~1.2 GB peak.  Acceptable on a build
+// host with the kind of RAM budget --universal already demands (the writer
+// holds Phase 1 spill FHs and Phase 2 sort arenas together, never both at
+// the same scale).
 /////////////////////////////////////////////////////////////////////////////
 
 typedef struct { char *seq; int64_t t, g, len; char strand; } Run;
@@ -1374,14 +1401,6 @@ static int64_t tui_find_d(OneFile *of, int64_t n_d,
     return -1;
 }
 
-int tui_has_sequence(const Tui *tui, const char *seq_name) {
-    OneFile *of = oneFileOpenRead(tui->path, NULL, "tui", 1);
-    if (of == NULL) return 0;
-    int64_t ord = tui_find_d(of, tui->n_d, seq_name, NULL);
-    oneFileClose(of);
-    return ord >= 0 ? 1 : 0;
-}
-
 static int tui_iv_cmp(const void *a, const void *b) {
     const TuiInterval *x = a, *y = b;
     return (x->start < y->start) ? -1 : (x->start > y->start) ? 1 : 0;
@@ -1498,7 +1517,12 @@ int64_t *tui_load_seq_runs(Tui *tui, const char *seq_name, int64_t *n_out) {
         oneFileClose(of);
         return NULL;
     }
-    // Walk (C, R)+ chunk pairs and concat decoded triples into one flat array.
+    // Walk (C, R)+ chunk pairs and concat decoded triples into one flat
+    // array.  NB: tui_query has a per-chunk t-range skip (see C-record
+    // fields 4/5 + the c_has_t_range gate), this function deliberately
+    // does NOT skip -- its contract is "return ALL runs of the seq" so
+    // batch callers can binary-search the result by t_start in RAM.
+    // Skipping by t-range would defeat that contract.
     int64_t *runs = NULL;
     int64_t total = 0, cap = 0;
     while ((c = oneReadLine(of)) == 'C') {
@@ -1623,7 +1647,7 @@ TuiGenomeLift *tui_genome_lift_load(Tui *tui, const char *genome_name) {
     // Pass 1: collect (S-ord, name, seqlen) for all matching d-lines.
     // d-lines are name-sorted so a prefix match is a contiguous range; stop
     // at the first non-match.
-    typedef struct { int64_t ord; char *name; int64_t seqlen; } DEnt;
+    typedef struct { int64_t ord; char *name; } DEnt;
     int64_t cap = 16, n = 0;
     DEnt *ents = st_malloc(cap * sizeof(DEnt));
     char buf[8192];
@@ -1636,11 +1660,12 @@ TuiGenomeLift *tui_genome_lift_load(Tui *tui, const char *genome_name) {
         buf[bn] = 0;
         if (strncmp(buf, prefix, plen) != 0) break;
         if (n == cap) { cap *= 2; ents = st_realloc(ents, cap * sizeof(DEnt)); }
-        ents[n].ord    = oneInt(of, 1);
-        ents[n].seqlen = oneInt(of, 2);
+        ents[n].ord = oneInt(of, 1);
+        // d-line field 2 (seqlen) is unused by this lookup path; we only
+        // need the S-ordinal + sequence name to walk the chunk metadata.
         // Store just the sequence part (skip the "<genome>." prefix) so the
         // returned wig records carry the bare contig name.
-        ents[n].name   = stString_copy(buf + plen);
+        ents[n].name = stString_copy(buf + plen);
         n++;
     }
     free(prefix);
@@ -1848,16 +1873,6 @@ int tui_genome_lift_column(const TuiGenomeLift *gl, int64_t column,
 
 int64_t tui_genome_lift_n_chunks(const TuiGenomeLift *gl) {
     return gl == NULL ? 0 : gl->n_chunks;
-}
-
-// Cumulative count of runs currently decoded into memory.  Starts at 0
-// (lazy load) and grows monotonically as queries hit new chunks.  Useful
-// for end-of-run diagnostics; for a static "size at load" use n_chunks.
-int64_t tui_genome_lift_n_runs(const TuiGenomeLift *gl) {
-    if (gl == NULL) return 0;
-    int64_t s = 0;
-    for (int64_t i = 0; i < gl->n_chunks; i++) s += gl->chunks[i].n_runs;
-    return s;
 }
 
 /////////////////////////////////////////////////////////////////////////////

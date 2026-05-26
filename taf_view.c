@@ -371,7 +371,12 @@ int taf_view_main(int argc, char *argv[]) {
         // Build the universal-column intervals for the extractor.
         // tcol:x-y bypasses Index B; everything else uses tui_query.
         TuiInterval *uiv = NULL;       // malloc'd iff !tcol_input
-        TuiInterval tcol_iv;           // stack-resident iff tcol_input
+        // tcol_iv stays uninitialized on the n_uiv==0 path -- tui_extract_
+        // iterator early-returns before reading any iv[i] when n_uiv==0, so
+        // the garbage value is unreachable today.  Init defensively so a
+        // future change to the extractor that peeks before the n-check
+        // doesn't quietly read uninitialized stack.
+        TuiInterval tcol_iv = {0, 0};
         int64_t n_uiv = 0;
         if (tcol_input) {
             int64_t a = region_start, b = region_start + region_length;
