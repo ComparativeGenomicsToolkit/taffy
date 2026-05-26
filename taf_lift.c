@@ -489,13 +489,26 @@ typedef struct {
 // flush.  Bucket key: (seq, output-strand) when emit_strand is true; (seq)
 // alone when false.  In the latter case different alignment strands abut
 // freely on the target, which is how halLiftover collapses BED3/4/5 output.
+// `touched` is a monotonically-increasing serial assigned on each insert /
+// extend; the LRU eviction picks the slot with the smallest `touched`.
 typedef struct {
     const char *seq;     // borrowed from gl->seq_names; pointer-stable
     int64_t     start;
     int64_t     end;
+    int64_t     touched;      // serial for LRU eviction
     char        out_strand;   // '+' / '-' if emit_strand, else 0
     int         active;
 } PendingBed;
+
+// Cap on the pending-merge buffer.  At apes / rodent / fish paralog density
+// the simultaneously-touchable bucket count is ~30-50; 256 leaves comfortable
+// headroom while bounding RAM for pathological single-BED-line whole-chrom
+// inputs (a 49 Mb mexican-tetra chrom blew past 720 MB RSS with an unbounded
+// pool before this cap was added).  When the pool is full, the LRU slot is
+// flushed to disk and reused -- the merge-window shrinks but correctness is
+// preserved (an LRU slot that goes idle was about to be flushed at end-of-
+// line anyway).
+#define PENDING_MAX 256
 
 // Flush one pending row to disk.  Caller clears `pe->active` after.
 static void emit_pending(FILE *fh, PendingBed *pe, const char *name,
@@ -513,48 +526,73 @@ static void emit_pending(FILE *fh, PendingBed *pe, const char *name,
     if (n_out_p) (*n_out_p)++;
 }
 
-// Try to extend a pending row with a new (seq, start, end, out_strand) tile,
-// or replace it after flushing if the tile doesn't abut the same bucket.
-// `pending[]` is sized at >= n_open so the inactive-slot search always
-// succeeds (one bucket per concurrent paralog stream).
-// Try to merge a new tile into pending[], else allocate a fresh slot
-// (growing pending[] in-place if necessary).  Returns the (possibly
-// reallocated) pending pointer; caller updates *p_cap.
+// Try to merge a new tile into pending[]; if no abutting slot exists,
+// allocate a fresh slot (growing pending[] in-place up to PENDING_MAX);
+// if pending[] is at the cap, evict the LRU slot to disk and reuse it.
+// Returns the (possibly reallocated) pending pointer; caller updates
+// *p_cap.
 //
-// Two passes:
+// Three passes:
 //   1. find an *abutting* slot (same seq + matching strand, end == start)
-//      and extend it.  Multiple disjoint paralogs of the same target seq
-//      are kept in separate slots -- identified by abut, not by seq alone.
-//   2. if no abutting slot exists, allocate a fresh one; double the array
-//      when no inactive slot is free.
+//      and extend it -- this is the merge fast-path; bumps the slot's
+//      `touched` serial so it survives the next eviction.
+//   2. if no abutting slot exists and pending[] has an inactive slot or
+//      capacity to grow (cap < PENDING_MAX), allocate a fresh one.
+//   3. if pending[] is at PENDING_MAX and all slots are active, find the
+//      slot with the smallest `touched` (the LRU), flush it to disk, and
+//      reuse the slot.  Linear scan; PENDING_MAX is bounded.
 //
-// Slots only flush at end-of-bed-line (`flush_pending`).  Memory cap is
-// the BED line's total unmerged row count (typically a few thousand at
-// vertebrate paralog density × 1-Mb intervals -- sub-megabyte).
-static PendingBed *pending_push(PendingBed *pending, int *p_cap,
+// Slots otherwise flush at end-of-bed-line via `flush_pending`.  Memory
+// is bounded by PENDING_MAX × sizeof(PendingBed) ≈ 16 KB; correctness is
+// preserved (an LRU slot that goes idle was about to be flushed at
+// end-of-line anyway -- its content writes out the same).
+static PendingBed *pending_push(FILE *fh, PendingBed *pending, int *p_cap,
+                                int64_t *p_touch,
                                 const char *seq, int64_t start, int64_t end,
-                                char out_strand, int emit_strand) {
+                                char out_strand, int emit_strand,
+                                const char *name, const char *score,
+                                int64_t *n_out_p) {
+    int64_t now = ++(*p_touch);
+    // 1. extend-on-abut
     for (int i = 0; i < *p_cap; i++) {
         if (!pending[i].active) continue;
         if (pending[i].seq != seq) continue;
         if (emit_strand && pending[i].out_strand != out_strand) continue;
         if (pending[i].end == start) {                // abuts -> extend
             pending[i].end = end;
+            pending[i].touched = now;
             return pending;
         }
     }
+    // 2a. inactive slot in existing buffer
     int slot = -1;
     for (int i = 0; i < *p_cap; i++) {
         if (!pending[i].active) { slot = i; break; }
     }
-    if (slot < 0) {
+    // 2b. grow up to the cap (doubling)
+    if (slot < 0 && *p_cap < PENDING_MAX) {
         int new_cap = (*p_cap) * 2;
+        if (new_cap > PENDING_MAX) new_cap = PENDING_MAX;
         pending = st_realloc(pending, (size_t)new_cap * sizeof(PendingBed));
         for (int i = *p_cap; i < new_cap; i++) pending[i].active = 0;
         slot = *p_cap;
         *p_cap = new_cap;
     }
+    // 3. at the cap and all slots full -> evict LRU
+    if (slot < 0) {
+        int victim = 0;
+        int64_t min_touch = pending[0].touched;
+        for (int i = 1; i < *p_cap; i++) {
+            if (pending[i].touched < min_touch) {
+                min_touch = pending[i].touched;
+                victim = i;
+            }
+        }
+        emit_pending(fh, &pending[victim], name, score, n_out_p);
+        slot = victim;
+    }
     pending[slot] = (PendingBed){ .seq = seq, .start = start, .end = end,
+                                  .touched = now,
                                   .out_strand = out_strand, .active = 1 };
     return pending;
 }
@@ -567,10 +605,12 @@ static PendingBed *pending_push(PendingBed *pending, int *p_cap,
 // `input_strand_sign` (+1 / -1) and the open's alignment strand;
 // `emit_strand` controls whether the strand column appears at all (set
 // false for BED3/4/5 in -> no strand out, or input strand '.').
-static void close_opens(OpenBedInterval *open, int n_open,
+static void close_opens(FILE *fh, OpenBedInterval *open, int n_open,
                         const int *used_this_col, int input_strand_sign,
                         int emit_strand,
-                        PendingBed **p_pending, int *p_cap) {
+                        PendingBed **p_pending, int *p_cap, int64_t *p_touch,
+                        const char *name, const char *score,
+                        int64_t *n_out_p) {
     for (int s = 0; s < n_open; s++) {
         if (!open[s].active) continue;
         if (used_this_col && used_this_col[s]) continue;
@@ -579,9 +619,10 @@ static void close_opens(OpenBedInterval *open, int n_open,
             int sign = (open[s].strand ? +1 : -1) * input_strand_sign;
             out_strand = (sign >= 0) ? '+' : '-';
         }
-        *p_pending = pending_push(*p_pending, p_cap, open[s].seq,
-                                  open[s].start, open[s].end,
-                                  out_strand, emit_strand);
+        *p_pending = pending_push(fh, *p_pending, p_cap, p_touch,
+                                  open[s].seq, open[s].start, open[s].end,
+                                  out_strand, emit_strand,
+                                  name, score, n_out_p);
         open[s].active = 0;
     }
 }
@@ -620,6 +661,7 @@ static int bed_lift_main_impl(Tui *tui, TuiGenomeLift *gl,
     PendingBed *pending = NULL;
     int open_cap = 0;
     int pending_cap = 0;
+    int64_t pending_touch = 0;          // monotone serial for LRU eviction
     char *line = NULL;
     size_t cap = 0;
     int64_t lineno = 0, n_in = 0, n_out = 0, n_unmapped = 0;
@@ -708,9 +750,10 @@ static int bed_lift_main_impl(Tui *tui, TuiGenomeLift *gl,
                 int nm = tui_genome_lift_column(gl, c, m, m_cap);
                 if (nm == 0) {
                     // No target hit at this column -- close all opens.
-                    close_opens(open, open_cap, NULL,
+                    close_opens(fh, open, open_cap, NULL,
                                 input_strand_sign, emit_strand,
-                                &pending, &pending_cap);
+                                &pending, &pending_cap, &pending_touch,
+                                name, score, &n_out);
                     continue;
                 }
                 if (nm > m_cap) {
@@ -789,9 +832,10 @@ static int bed_lift_main_impl(Tui *tui, TuiGenomeLift *gl,
                     }
                 }
                 // Close opens that weren't extended this column.
-                close_opens(open, open_cap, used_this_col,
+                close_opens(fh, open, open_cap, used_this_col,
                             input_strand_sign, emit_strand,
-                            &pending, &pending_cap);
+                            &pending, &pending_cap, &pending_touch,
+                            name, score, &n_out);
             }
             // No close_opens at iv[k]/iv[k+1] boundary: opens carry over so
             // that target intervals which happen to remain contiguous across
@@ -810,10 +854,16 @@ static int bed_lift_main_impl(Tui *tui, TuiGenomeLift *gl,
         }
         // End of this BED input line -- close any still-open intervals,
         // then drain the pending-merge buffer to disk.
-        close_opens(open, open_cap, NULL,
+        close_opens(fh, open, open_cap, NULL,
                     input_strand_sign, emit_strand,
-                    &pending, &pending_cap);
+                    &pending, &pending_cap, &pending_touch,
+                    name, score, &n_out);
         flush_pending(fh, pending, pending_cap, name, score, &n_out);
+        // Reset the touch counter between BED input lines so we don't drift
+        // toward int64 overflow on million-line inputs (mod-arithmetic LRU
+        // would also work but reset is simpler -- per-line scope is fine
+        // since flush_pending also clears active=0 on every slot).
+        pending_touch = 0;
         free(m);
         free(iv);
     }
