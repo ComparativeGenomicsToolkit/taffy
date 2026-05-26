@@ -485,39 +485,92 @@ typedef struct {
     int         active;
 } OpenBedInterval;
 
-// Emit one BED line.  out_strand is '+' or '-'; pass 0 to omit the strand
-// column entirely (used when input BED had no strand column).  Cols 3+
-// (name, score, ...) are passed through verbatim from `extra` (may be NULL
-// or empty).  Caller computes target strand from (input_strand XOR match
-// strand) BEFORE this call.
-static void emit_bed_line(FILE *fh, const char *seq, int64_t start,
-                          int64_t end, const char *name, const char *score,
-                          char out_strand) {
-    fprintf(fh, "%s\t%" PRIi64 "\t%" PRIi64, seq, start, end);
+// Pending output line that may still merge with the next close_opens()
+// flush.  Bucket key: (seq, output-strand) when emit_strand is true; (seq)
+// alone when false.  In the latter case different alignment strands abut
+// freely on the target, which is how halLiftover collapses BED3/4/5 output.
+typedef struct {
+    const char *seq;     // borrowed from gl->seq_names; pointer-stable
+    int64_t     start;
+    int64_t     end;
+    char        out_strand;   // '+' / '-' if emit_strand, else 0
+    int         active;
+} PendingBed;
+
+// Flush one pending row to disk.  Caller clears `pe->active` after.
+static void emit_pending(FILE *fh, PendingBed *pe, const char *name,
+                         const char *score, int64_t *n_out_p) {
+    if (!pe->active) return;
+    fprintf(fh, "%s\t%" PRIi64 "\t%" PRIi64, pe->seq, pe->start, pe->end);
     if (name) {
         fprintf(fh, "\t%s", name);
         if (score) {
             fprintf(fh, "\t%s", score);
-            if (out_strand) {
-                fprintf(fh, "\t%c", out_strand);
-            }
+            if (pe->out_strand) fprintf(fh, "\t%c", pe->out_strand);
         }
     }
     fputc('\n', fh);
+    if (n_out_p) (*n_out_p)++;
 }
 
-// Close open BED intervals matching the predicate, emit one BED line per
-// closed interval, and bump *n_out_p (NULL OK).  `used_this_col` is a
-// per-call mask: if NULL, every active open is closed; if non-NULL, only
-// active opens NOT in the mask are closed (i.e. those that didn't get
-// extended this column).  Output strand for each closed interval is the
-// XOR of `input_strand_sign` (+1 / -1) and the open's alignment strand;
+// Try to extend a pending row with a new (seq, start, end, out_strand) tile,
+// or replace it after flushing if the tile doesn't abut the same bucket.
+// `pending[]` is sized at >= n_open so the inactive-slot search always
+// succeeds (one bucket per concurrent paralog stream).
+// Try to merge a new tile into pending[], else allocate a fresh slot
+// (growing pending[] in-place if necessary).  Returns the (possibly
+// reallocated) pending pointer; caller updates *p_cap.
+//
+// Two passes:
+//   1. find an *abutting* slot (same seq + matching strand, end == start)
+//      and extend it.  Multiple disjoint paralogs of the same target seq
+//      are kept in separate slots -- identified by abut, not by seq alone.
+//   2. if no abutting slot exists, allocate a fresh one; double the array
+//      when no inactive slot is free.
+//
+// Slots only flush at end-of-bed-line (`flush_pending`).  Memory cap is
+// the BED line's total unmerged row count (typically a few thousand at
+// vertebrate paralog density × 1-Mb intervals -- sub-megabyte).
+static PendingBed *pending_push(PendingBed *pending, int *p_cap,
+                                const char *seq, int64_t start, int64_t end,
+                                char out_strand, int emit_strand) {
+    for (int i = 0; i < *p_cap; i++) {
+        if (!pending[i].active) continue;
+        if (pending[i].seq != seq) continue;
+        if (emit_strand && pending[i].out_strand != out_strand) continue;
+        if (pending[i].end == start) {                // abuts -> extend
+            pending[i].end = end;
+            return pending;
+        }
+    }
+    int slot = -1;
+    for (int i = 0; i < *p_cap; i++) {
+        if (!pending[i].active) { slot = i; break; }
+    }
+    if (slot < 0) {
+        int new_cap = (*p_cap) * 2;
+        pending = st_realloc(pending, (size_t)new_cap * sizeof(PendingBed));
+        for (int i = *p_cap; i < new_cap; i++) pending[i].active = 0;
+        slot = *p_cap;
+        *p_cap = new_cap;
+    }
+    pending[slot] = (PendingBed){ .seq = seq, .start = start, .end = end,
+                                  .out_strand = out_strand, .active = 1 };
+    return pending;
+}
+
+// Close open BED intervals matching the predicate; rows feed `pending[]`
+// for adjacent-merge before they hit disk.  `used_this_col` is a per-call
+// mask: if NULL, every active open is closed; if non-NULL, only active
+// opens NOT in the mask are closed (i.e. those that didn't get extended
+// this column).  Output strand for each closed interval is the XOR of
+// `input_strand_sign` (+1 / -1) and the open's alignment strand;
 // `emit_strand` controls whether the strand column appears at all (set
 // false for BED3/4/5 in -> no strand out, or input strand '.').
-static void close_opens(FILE *fh, OpenBedInterval *open, int n_open,
+static void close_opens(OpenBedInterval *open, int n_open,
                         const int *used_this_col, int input_strand_sign,
-                        const char *name, const char *score, int emit_strand,
-                        int64_t *n_out_p) {
+                        int emit_strand,
+                        PendingBed **p_pending, int *p_cap) {
     for (int s = 0; s < n_open; s++) {
         if (!open[s].active) continue;
         if (used_this_col && used_this_col[s]) continue;
@@ -526,10 +579,21 @@ static void close_opens(FILE *fh, OpenBedInterval *open, int n_open,
             int sign = (open[s].strand ? +1 : -1) * input_strand_sign;
             out_strand = (sign >= 0) ? '+' : '-';
         }
-        emit_bed_line(fh, open[s].seq, open[s].start, open[s].end,
-                      name, score, out_strand);
+        *p_pending = pending_push(*p_pending, p_cap, open[s].seq,
+                                  open[s].start, open[s].end,
+                                  out_strand, emit_strand);
         open[s].active = 0;
-        if (n_out_p) (*n_out_p)++;
+    }
+}
+
+// Drain all pending rows to disk (end-of-bed-line, or any point where the
+// caller has no more tiles to add).  Leaves `pending[]` empty.
+static void flush_pending(FILE *fh, PendingBed *pending, int n_pending,
+                          const char *name, const char *score,
+                          int64_t *n_out_p) {
+    for (int i = 0; i < n_pending; i++) {
+        emit_pending(fh, &pending[i], name, score, n_out_p);
+        pending[i].active = 0;
     }
 }
 
@@ -553,7 +617,9 @@ static int bed_lift_main_impl(Tui *tui, TuiGenomeLift *gl,
     // grow heap-backed as needed.  Cached across input BED lines.
     OpenBedInterval *open = NULL;
     int *used_this_col = NULL;
+    PendingBed *pending = NULL;
     int open_cap = 0;
+    int pending_cap = 0;
     char *line = NULL;
     size_t cap = 0;
     int64_t lineno = 0, n_in = 0, n_out = 0, n_unmapped = 0;
@@ -604,22 +670,36 @@ static int bed_lift_main_impl(Tui *tui, TuiGenomeLift *gl,
             continue;
         }
 
-        // Lazily (re)allocate open / used_this_col to the initial cap on
-        // the first BED line; later columns grow it on demand.
+        // Lazily (re)allocate open / used_this_col / pending to the
+        // initial cap on the first BED line; later columns grow open[]
+        // (and pending[] in lock-step for new buckets) on demand.
+        // pending[] holds rows that have been closed but might still merge
+        // with an abutting close later in the same BED line; its capacity
+        // tracks the worst-case unmerged row count per line (not just the
+        // simultaneously-open count, which is much smaller), so it grows
+        // independently of open_cap.
         if (open_cap == 0) {
             open_cap = BED_MAX_OPEN;
             open = st_malloc((size_t)open_cap * sizeof(OpenBedInterval));
             used_this_col = st_malloc((size_t)open_cap * sizeof(int));
         }
+        if (pending_cap == 0) {
+            pending_cap = BED_MAX_OPEN;
+            pending = st_calloc((size_t)pending_cap, sizeof(PendingBed));
+        }
         for (int s = 0; s < open_cap; s++) open[s].active = 0;
+        for (int s = 0; s < pending_cap; s++) pending[s].active = 0;
 
+        // Match buffer is reused ACROSS iv[k]s -- holding it inside the iv
+        // loop forced a free()+malloc() per column-interval AND threw away
+        // any growth, hurting nothing here but cleaner this way.
+        TuiGenomeMatch *m = NULL;
+        int m_cap = 0;
         for (int64_t k = 0; k < n_iv; k++) {
             int64_t c_lo = iv[k].start;
             int64_t c_hi = iv[k].end;
             // Per-column lift; group consecutive same-(seq,strand) hits.
             // After each column we close opens that weren't extended.
-            TuiGenomeMatch *m = NULL;
-            int m_cap = 0;
             for (int64_t c = c_lo; c < c_hi; c++) {
                 if (m_cap == 0) {
                     m_cap = BED_MAX_OPEN;
@@ -628,9 +708,9 @@ static int bed_lift_main_impl(Tui *tui, TuiGenomeLift *gl,
                 int nm = tui_genome_lift_column(gl, c, m, m_cap);
                 if (nm == 0) {
                     // No target hit at this column -- close all opens.
-                    close_opens(fh, open, open_cap, NULL,
-                                input_strand_sign, name, score, emit_strand,
-                                &n_out);
+                    close_opens(open, open_cap, NULL,
+                                input_strand_sign, emit_strand,
+                                &pending, &pending_cap);
                     continue;
                 }
                 if (nm > m_cap) {
@@ -709,18 +789,35 @@ static int bed_lift_main_impl(Tui *tui, TuiGenomeLift *gl,
                     }
                 }
                 // Close opens that weren't extended this column.
-                close_opens(fh, open, open_cap, used_this_col,
-                            input_strand_sign, name, score, emit_strand, &n_out);
+                close_opens(open, open_cap, used_this_col,
+                            input_strand_sign, emit_strand,
+                            &pending, &pending_cap);
             }
-            // End of this column-interval -- close all opens (universal-col
-            // gap means we can't carry the run through).
-            close_opens(fh, open, open_cap, NULL,
-                        input_strand_sign, name, score, emit_strand, &n_out);
-            free(m);
+            // No close_opens at iv[k]/iv[k+1] boundary: opens carry over so
+            // that target intervals which happen to remain contiguous across
+            // a source-side column gap (the source has a run break here but
+            // the target's own run spans the gap with a matching coordinate
+            // step) merge into one output BED line instead of two.  The
+            // next column's extend-vs-close check handles correctness:
+            // extension fires only when end==m.pos for '+' (resp. start==
+            // m.pos+1 for '-'), so if the target's coord doesn't actually
+            // line up after the gap, the open closes at the first column of
+            // iv[k+1] and a fresh one opens in its place -- same output as
+            // before, just deferred by one column.  In practice (rodents +
+            // fish vs apes) this cuts output BED line count ~100-200x by
+            // collapsing the per-source-block fragmentation that the
+            // universal-column run topology introduced.
         }
+        // End of this BED input line -- close any still-open intervals,
+        // then drain the pending-merge buffer to disk.
+        close_opens(open, open_cap, NULL,
+                    input_strand_sign, emit_strand,
+                    &pending, &pending_cap);
+        flush_pending(fh, pending, pending_cap, name, score, &n_out);
+        free(m);
         free(iv);
     }
-    free(open); free(used_this_col);
+    free(open); free(used_this_col); free(pending);
     free(line);
     fclose(bf);
     if (output_file) fclose(fh);
