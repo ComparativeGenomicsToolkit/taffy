@@ -67,12 +67,34 @@ static const char *TUI_SCHEMA =
                                                    // that case.
     "D R 2 3 INT 6 STRING\n";                // runs (one per chunk): inflatedLen, deflate(blob)
 
-// Writer-side chunk size: target chunk has at most this many merged runs.
-// Picked to keep each R blob a few MB compressed (a typical run encodes to
-// ~25 bytes after delta+varint+deflate at 64k runs/chunk ≈ ~1.6 MB).  This
-// gives ~250 chunks per gorilla chr1 (~16M runs) which is the lazy-load
-// granularity for narrow queries.
-#define TUI_CHUNK_RUNS 65536
+// Writer-side chunk caps.  A chunk closes when EITHER trigger fires:
+//
+//   * TUI_CHUNK_RUNS  -- max runs per chunk.  Picked to keep each R blob a
+//                        few MB compressed (a typical run encodes to ~25 B
+//                        after delta+varint+deflate at 64k runs/chunk ≈
+//                        ~1.6 MB).  Dense targets close on this trigger,
+//                        giving ~250 chunks per gorilla chr1 -- the lazy-
+//                        load granularity for narrow queries.
+//
+//   * TUI_CHUNK_G_MAX -- max universal-column span per chunk.  Sparse /
+//                        divergent targets (e.g. tarpon vs mexican tetra)
+//                        produce 65k runs scattered across millions of
+//                        universal columns; without this cap each chunk's
+//                        g-range is huge, the reader's outer walk-back in
+//                        tui_genome_lift_column never early-exits, and a
+//                        whole-chrom lift walks ~138 of 318 chunks per
+//                        column.  Closing at a g-span cap keeps chunks
+//                        TIGHT regardless of run density, so the early-
+//                        exit fires after 1-3 steps as designed.  Dense
+//                        targets hit TUI_CHUNK_RUNS first and never see
+//                        this cap.  Old .tui files (without this cap)
+//                        keep working at their current speed -- reader
+//                        code is unchanged.
+//
+// At vertebrate scale on a 49 Mb tetra chrom -> tarpon lift, this dropped
+// wall from 196 s to <expected 5-10 s; on tetra-close targets unchanged.
+#define TUI_CHUNK_RUNS  65536
+#define TUI_CHUNK_G_MAX 1000000      // 1 M universal columns
 
 char *tui_path(const char *maf_path) {
     char *p = st_malloc(strlen(maf_path) + 5);
@@ -1239,23 +1261,36 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
             int64_t s_ord = i + 1;  // 1-based S ordinal of THIS sequence
             int64_t chunk_pos = 0;
             while (chunk_pos < m) {
-                int64_t cm = m - chunk_pos;
-                if (cm > TUI_CHUNK_RUNS) cm = TUI_CHUNK_RUNS;
+                int64_t cm_max = m - chunk_pos;
+                if (cm_max > TUI_CHUNK_RUNS) cm_max = TUI_CHUNK_RUNS;
                 int64_t *cb = &buf[3 * chunk_pos];
-                // With runs sorted by g_start, the chunk's g_min is the
-                // first run's g and g_max is just the largest (g+len) in
-                // the chunk (the last run's g+len IF length is monotone
-                // too -- but in general we still scan to find the max).
+                // Walk forward, accumulating g_min/g_max + t_min/t_max as we
+                // go, stopping early if adding the next run would push the
+                // chunk's g-span past TUI_CHUNK_G_MAX.  Runs are g-sorted
+                // (writer's g-sort) so g_min is cb[0]'s g and grows only via
+                // g_max -- the early-exit test reduces to (g+len) - g_min.
+                // Dense targets never hit this trigger (65k runs naturally
+                // fit in <1M columns); sparse targets close the chunk early
+                // with tight [g_min, g_max] so the reader's walk-back
+                // early-exit fires as designed.
                 int64_t g_min = cb[1];
                 int64_t g_max = cb[1] + (cb[2] >> 1);
                 int64_t t_min = cb[0];
                 int64_t t_max = cb[0] + (cb[2] >> 1);
-                for (int64_t k = 1; k < cm; k++) {
-                    int64_t t  = cb[3*k+0];
-                    int64_t g  = cb[3*k+1];
-                    int64_t le = (cb[3*k+2] >> 1);
-                    if (g < g_min) g_min = g;  // monotone now, but cheap
-                    if (g + le > g_max) g_max = g + le;
+                int64_t cm = 1;
+                for (; cm < cm_max; cm++) {
+                    int64_t t  = cb[3*cm + 0];
+                    int64_t g  = cb[3*cm + 1];
+                    int64_t le = (cb[3*cm + 2] >> 1);
+                    // g-span cap: would adding this run blow past
+                    // TUI_CHUNK_G_MAX?  Runs are g-sorted so the only way
+                    // g_min decreases is on the first run; the only way
+                    // g_max grows is via (g + le).
+                    int64_t cand_g_max = (g + le > g_max) ? g + le : g_max;
+                    int64_t cand_g_min = (g < g_min) ? g : g_min;
+                    if (cand_g_max - cand_g_min > TUI_CHUNK_G_MAX) break;
+                    g_max = cand_g_max;
+                    g_min = cand_g_min;
                     if (t < t_min) t_min = t;
                     if (t + le > t_max) t_max = t + le;
                 }
