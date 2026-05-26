@@ -569,3 +569,97 @@ def test_lift_bed_strand_dot_omits_strand_column(tmp_path):
         assert 'strand' not in r, f"input '.' should omit strand col, got {r}"
 
 
+# ---------------------------------------------------------------------------
+# .tai vs .tui: same MAF, two access paths, must agree on row-0 queries
+# ---------------------------------------------------------------------------
+#
+# A row-0 (genome.seq:start-end) query is answerable by EITHER index:
+#
+#   * .tai: locates blocks whose row-0 entry overlaps [start,end).
+#   * .tui: locates blocks whose per-genome run table for genome.seq covers
+#     the universal columns mapping to that range; row-0 sequences happen
+#     to map 1-1 to universal columns by construction.
+#
+# By the universal-MAF "exactly-once" invariant, both paths must enumerate
+# the same set of (row-0, column) tuples for the queried range.  Any
+# divergence indicates a bug in the .tui builder/encoder (missed columns,
+# off-by-one in run boundaries, etc.) -- catching the dual of bugs that
+# the existing test_view_consistency_tui_vs_tai catches one MAF over.
+#
+# Probes each row-0 ancestor in the fixture (Anc0 / Anc1 / Anc2 / mr) at a
+# few ranges of varying size, covering different parts of the file.
+# Queries on Anc0 (the universal subtree's topmost ancestor, == --refGenome
+# at build time): every block with Anc0 bases has Anc0 as row-0 -- the .tai
+# (indexes row-0) and .tui (indexes any base appearance) views must coincide.
+# Queries on lower ancestors (Anc1 / Anc2 / mr) diverge by design: those
+# ancestors can appear as base rows in blocks where Anc0 is row-0, in which
+# case the .tui returns more blocks than the .tai (which only sees them when
+# they ARE row-0).  That's a property of the universal-MAF data model, not
+# a bug; so limit the .tai-vs-.tui equivalence assertion to Anc0.
+TAI_VS_TUI_ROW0_REGIONS = [
+    pytest.param('Anc0.Anc0refChr0',  0,     1000,   id='Anc0-head-1k'),
+    pytest.param('Anc0.Anc0refChr0',  10000, 20000,  id='Anc0-mid-10k'),
+    pytest.param('Anc0.Anc0refChr0',  500000, 534136, id='Anc0-tail'),
+]
+
+@pytest.mark.parametrize("seq,start,end", TAI_VS_TUI_ROW0_REGIONS)
+def test_view_tai_vs_tui_row0_same_maf(seq, start, end, tmp_path):
+    """For row-0 queries on the universal MAF, taffy view via .tai (after
+    hiding .tui) and via .tui (auto-engaged when present) must yield the
+    same per-column (seq, fwd_pos, strand, base) sets.
+
+    Catches .tui-builder bugs where the per-(genome.seq) run table drops
+    or shifts columns relative to the underlying MAF data.  The existing
+    test_view_consistency_tui_vs_tai compares the universal MAF (.tui) to
+    a SEPARATELY-BUILT rooted MAF (.tai); this one compares the SAME MAF
+    accessed two ways, so a .tui regression that exactly preserved row-0
+    coverage but corrupted other fields would still be caught here as a
+    row-0 column-content mismatch."""
+    import shutil
+    # Stage a private copy so we can hide .tui without disturbing other tests.
+    maf = tmp_path / 'evolverMammals.uni.maf.gz'
+    shutil.copy(UNI_MAF, str(maf))
+    shutil.copy(UNI_MAF + '.tui', str(maf) + '.tui')
+    # Build .tai for the copy (the committed fixture only has .tui).
+    run(TAFFY, 'index', '-i', str(maf))
+    assert os.path.isfile(str(maf) + '.tai'), 'failed to build .tai for copy'
+
+    region = f'{seq}:{start}-{end}'
+
+    # .tai path: hide .tui, taffy view falls back to the .tai-driven flow.
+    hidden = str(maf) + '.tui.hide'
+    os.rename(str(maf) + '.tui', hidden)
+    try:
+        tai_out, _ = run(TAFFY, 'view', '-i', str(maf), '-r', region, '-m')
+    finally:
+        os.rename(hidden, str(maf) + '.tui')
+
+    # .tui path: .tui present, taffy view auto-engages universal mode.
+    # Default mode (`ancestor`, pass-through) keeps row content as-is so a
+    # direct column-set comparison against the .tai output is meaningful.
+    tui_out, _ = run(TAFFY, 'view', '-i', str(maf), '-r', region, '-m')
+
+    tai_blocks = parse_maf_columns(tai_out)
+    tui_blocks = parse_maf_columns(tui_out)
+
+    # Compare as a flat column-set: block ordering / partitioning may differ
+    # between the two index paths (the .tui flow can split or rejoin blocks
+    # at universal-column boundaries), but the union of (seq, pos, strand,
+    # base) tuples across all columns must match exactly.
+    tai_cols = set()
+    for b in tai_blocks:
+        for col in b:
+            tai_cols.update(col)
+    tui_cols = set()
+    for b in tui_blocks:
+        for col in b:
+            tui_cols.update(col)
+
+    only_tai = tai_cols - tui_cols
+    only_tui = tui_cols - tai_cols
+    assert tai_cols == tui_cols, (
+        f"\n.tai vs .tui mismatch on {region}\n"
+        f"  in .tai only ({len(only_tai)}): {sorted(only_tai)[:5]}\n"
+        f"  in .tui only ({len(only_tui)}): {sorted(only_tui)[:5]}")
+
+
