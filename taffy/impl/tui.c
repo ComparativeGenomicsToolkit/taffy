@@ -47,7 +47,24 @@ static const char *TUI_SCHEMA =
     "D X 3 3 INT 3 INT 6 STRING\n"           // univ-col index: inflatedLen, nRec, deflate(SoA)
     "O d 3 6 STRING 3 INT 3 INT\n"           // dir: seqName, S-ordinal, seqLen -- O so oneGoto works
     "O S 2 6 STRING 3 INT\n"                 // sequence object: seqName, seqLen
-    "O C 4 3 INT 3 INT 3 INT 3 INT\n"        // chunk header: g_min, g_max, parent S-ord (1-based), self c_ord (1-based)
+    "O C 6 3 INT 3 INT 3 INT 3 INT 3 INT 3 INT\n"  // chunk header:
+                                                   //   field 0 g_min, 1 g_max,
+                                                   //   2 parent S-ord (1-based),
+                                                   //   3 self c_ord  (1-based),
+                                                   //   4 t_min,  5 t_max
+                                                   // t_min/t_max are the per-source-seq
+                                                   // coordinate bounds covered by this
+                                                   // chunk's runs -- the reader uses
+                                                   // them to skip chunks that don't
+                                                   // overlap a source-side query
+                                                   // range, avoiding the zlib decode
+                                                   // of irrelevant R blobs.  Old .tui
+                                                   // files written before this field
+                                                   // existed only have 4 INTs on C;
+                                                   // the reader checks the schema's
+                                                   // field count at open and falls
+                                                   // back to "decode every chunk" in
+                                                   // that case.
     "D R 2 3 INT 6 STRING\n";                // runs (one per chunk): inflatedLen, deflate(blob)
 
 // Writer-side chunk size: target chunk has at most this many merged runs.
@@ -1204,17 +1221,24 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
                 // too -- but in general we still scan to find the max).
                 int64_t g_min = cb[1];
                 int64_t g_max = cb[1] + (cb[2] >> 1);
+                int64_t t_min = cb[0];
+                int64_t t_max = cb[0] + (cb[2] >> 1);
                 for (int64_t k = 1; k < cm; k++) {
+                    int64_t t  = cb[3*k+0];
                     int64_t g  = cb[3*k+1];
                     int64_t le = (cb[3*k+2] >> 1);
                     if (g < g_min) g_min = g;  // monotone now, but cheap
                     if (g + le > g_max) g_max = g + le;
+                    if (t < t_min) t_min = t;
+                    if (t + le > t_max) t_max = t + le;
                 }
                 ++c_ord_emit;
                 oneInt(of, 0) = g_min;
                 oneInt(of, 1) = g_max;
                 oneInt(of, 2) = s_ord;
                 oneInt(of, 3) = c_ord_emit;
+                oneInt(of, 4) = t_min;
+                oneInt(of, 5) = t_max;
                 oneWriteLine(of, 'C', 0, NULL);
                 int64_t raw_len = 0, def_len = 0;
                 uint8_t *def = encode_runs(cb, cm, &raw_len, &def_len);
@@ -1388,9 +1412,25 @@ TuiInterval *tui_query(Tui *tui, const char *seq_name,
         oneFileClose(of);
         return NULL;
     }
+    // Per-chunk t-range skip.  C records added t_min / t_max in field 4/5 to
+    // let the reader skip chunks whose source-coord range can't overlap
+    // [start, end) without paying the zlib decompress of the chunk's R blob
+    // (decode_runs+inflate is ~77% of taffy lift wall on rodents-scale .tui).
+    // Backward-compat: old .tui without the extra fields has nField == 4 on
+    // C; we treat that as "no skip info, decode every chunk" -- same wall
+    // as before this change.
+    int c_has_t_range = (of->info[(int)'C'] != NULL &&
+                         of->info[(int)'C']->nField >= 6);
     int64_t total = 0, cap = 0;
     while ((c = oneReadLine(of)) == 'C') {
+        int skip = 0;
+        if (c_has_t_range) {
+            int64_t t_min = oneInt(of, 4);
+            int64_t t_max = oneInt(of, 5);
+            if (t_max <= start || t_min >= end) skip = 1;
+        }
         if (oneReadLine(of) != 'R') break;
+        if (skip) continue;
         int64_t raw_len = oneInt(of, 0);
         int64_t def_len = oneLen(of);
         const uint8_t *def = (const uint8_t *)oneString(of);
