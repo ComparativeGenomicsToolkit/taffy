@@ -602,6 +602,68 @@ TAI_VS_TUI_ROW0_REGIONS = [
     pytest.param('Anc0.Anc0refChr0',  500000, 534136, id='Anc0-tail'),
 ]
 
+def test_tui_lru_spill_pool_eviction(tmp_path):
+    """Phase-1 spill FH LRU pool: with a small TAFFY_TUI_MAX_OPEN (forced
+    below the genome count of the fixture) the eviction code path runs
+    repeatedly, and the resulting .tui must be functionally identical to
+    a normally-built one.
+
+    Guards against the bug that broke the user's 1153-genome 577-way run:
+    phase 1 used to keep one FILE* per genome open through the whole pass,
+    blowing past Linux's default 1024 RLIMIT_NOFILE soft limit at the
+    1019-genome mark.  The fix bounds the pool and reopens evicted spills
+    in append mode; this test exercises that path with the 9-genome
+    evolverMammals fixture by forcing cap=4."""
+    import shutil
+    src_maf = os.path.join(tmp_path, 'em.uni.maf.gz')
+    shutil.copy(UNI_MAF, src_maf)
+
+    # Baseline: build .tui under the normal (large) cap.
+    base_tui = src_maf + '.baseline.tui'
+    run(TAFFY, 'index', '-u', '-i', src_maf)
+    shutil.move(src_maf + '.tui', base_tui)
+
+    # Force the LRU into play (cap=4 << 9 genomes guarantees eviction churn).
+    env = os.environ.copy()
+    env['TAFFY_TUI_MAX_OPEN'] = '4'
+    p = subprocess.run([TAFFY, 'index', '-u', '-l', 'INFO', '-i', src_maf],
+                       env=env, capture_output=True, text=True)
+    assert p.returncode == 0, f"index under LRU cap failed: {p.stderr}"
+    assert 'max_open=4' in p.stderr, (
+        f"expected log line confirming forced cap, got: {p.stderr!r}")
+    lru_tui = src_maf + '.tui'
+
+    # Both .tui's must let `taffy lift` return the same output on the same
+    # row-0 query.  (.tui isn't expected to be byte-equal -- chunk g_min/g_max
+    # may differ depending on which runs ended up in which append session --
+    # but the column->target mapping it encodes must be functionally
+    # equivalent.)
+    in_bed  = os.path.join(tmp_path, 'q.bed')
+    with open(in_bed, 'w') as f:
+        f.write('Anc0.Anc0refChr0\t0\t100000\tq\n')
+    out_base = os.path.join(tmp_path, 'o_baseline.bed')
+    out_lru  = os.path.join(tmp_path, 'o_lru.bed')
+
+    # baseline lift uses base_tui (rename it next to the maf, then back)
+    shutil.move(lru_tui, lru_tui + '.lru_saved')
+    shutil.move(base_tui, lru_tui)            # base now beside maf
+    run(TAFFY, 'lift', '-i', src_maf, '-b', in_bed, '-g', 'simHuman_chr6',
+        '-o', out_base)
+    shutil.move(lru_tui, base_tui)
+    shutil.move(lru_tui + '.lru_saved', lru_tui)
+    run(TAFFY, 'lift', '-i', src_maf, '-b', in_bed, '-g', 'simHuman_chr6',
+        '-o', out_lru)
+
+    with open(out_base) as f: base_rows = sorted(f.read().splitlines())
+    with open(out_lru)  as f: lru_rows  = sorted(f.read().splitlines())
+    assert base_rows == lru_rows, (
+        f"LRU-built .tui yields different lift output than baseline\n"
+        f"  baseline rows: {len(base_rows)}\n"
+        f"  LRU rows:      {len(lru_rows)}\n"
+        f"  first diff (base): {next(iter(set(base_rows) - set(lru_rows)), None)}\n"
+        f"  first diff (lru):  {next(iter(set(lru_rows) - set(base_rows)), None)}")
+
+
 @pytest.mark.parametrize("seq,start,end", TAI_VS_TUI_ROW0_REGIONS)
 def test_view_tai_vs_tui_row0_same_maf(seq, start, end, tmp_path):
     """For row-0 queries on the universal MAF, taffy view via .tai (after

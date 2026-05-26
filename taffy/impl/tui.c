@@ -10,6 +10,7 @@
 #include "tui.h"
 #include "sonLib.h"
 #include "ONElib.h"
+#include <errno.h>
 #include <stdint.h>
 #include <string.h>
 #include <assert.h>
@@ -19,6 +20,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <zlib.h>
@@ -357,9 +359,25 @@ static void emit_row_runs(FILE *spill, stHash *seen_seqs, Alignment_Row *row,
 // Phase 1: one streaming scan, spill runs per-genome (column order, O(1) RAM)
 /////////////////////////////////////////////////////////////////////////////
 
+// Per-genome spill state.  At vertebrate scale (1k+ genomes in the # hal
+// tree) we can't keep one FILE* per genome open for all of phase 1 -- Linux
+// soft RLIMIT_NOFILE defaults to 1024 and we'd hit EMFILE.  Instead phase 1
+// holds a bounded LRU pool of currently-open FILE*s (max_open below) and
+// re-opens evicted spills in append mode on next write.  Each genome's
+// SpillEnt is created on first sighting (next_spill_id++ assigns its file
+// name) and lives until phase-1 cleanup.
+typedef struct SpillEnt {
+    char  *path;          // we own; created once on first sighting of this genome
+    FILE  *fh;            // NULL when evicted from the open-FH pool; reopened on next write
+    struct SpillEnt *prev_lru, *next_lru;  // LRU list (MRU=head, LRU=tail)
+} SpillEnt;
+
 typedef struct {
-    stHash *spill_fh;     // genomeName -> FILE*  (kept open through phase 1)
-    stHash *spill_path;   // genomeName -> char*  (we own/free these)
+    stHash *spill_ents;   // genomeName -> SpillEnt*  (lifetime of phase 1)
+    SpillEnt *lru_head;   // MRU end (most recently opened/touched)
+    SpillEnt *lru_tail;   // LRU end (next eviction candidate)
+    int     n_open;       // count of SpillEnt with fh != NULL
+    int     max_open;     // cap; eviction starts when n_open == max_open
     stHash *spill_seqs;   // genomeName -> stHash<seq_name, int64_t*>  (per-spill
                           //                seq-name dictionary; written inline
                           //                as 'N' records, used by reader to
@@ -435,23 +453,83 @@ static void assert_row0_universal(const Alignment_Row *row0, int64_t cn) {
     }
 }
 
+// LRU helpers: unlink/insert at head.  Caller invariant: `e` is not on
+// the list when lru_push_head is called.
+static void lru_unlink(Phase1 *p1, SpillEnt *e) {
+    if (e->prev_lru) e->prev_lru->next_lru = e->next_lru;
+    else             p1->lru_head           = e->next_lru;
+    if (e->next_lru) e->next_lru->prev_lru = e->prev_lru;
+    else             p1->lru_tail           = e->prev_lru;
+    e->prev_lru = e->next_lru = NULL;
+}
+static void lru_push_head(Phase1 *p1, SpillEnt *e) {
+    e->prev_lru = NULL;
+    e->next_lru = p1->lru_head;
+    if (p1->lru_head) p1->lru_head->prev_lru = e;
+    p1->lru_head = e;
+    if (p1->lru_tail == NULL) p1->lru_tail = e;
+}
+
+// Evict the LRU spill (fclose its FH; ent stays in the hash so its path is
+// remembered for reopen).  Never evicts `pinned` (the ent we're about to
+// open / write to).  Returns 1 on success.
+//
+// Invariant: every ent in the LRU list has fh != NULL; spill_for only calls
+// this in the cold branch where pinned->fh == NULL, so pinned is by
+// construction not on the list and the `v == pinned` defense is dead code.
+// Keep it -- correctness invariants drift, and the cost is one pointer
+// compare per eviction.
+static int spill_evict_one(Phase1 *p1, SpillEnt *pinned) {
+    SpillEnt *v = p1->lru_tail;
+    if (v == pinned) v = v->prev_lru;
+    if (v == NULL) return 0;
+    if (fclose(v->fh) != 0) {
+        st_errAbort("tui: spill close (LRU eviction) failed: %s -- %s",
+                    v->path, strerror(errno));
+    }
+    v->fh = NULL;
+    lru_unlink(p1, v);
+    p1->n_open--;
+    return 1;
+}
+
 static FILE *spill_for(Phase1 *p1, const char *genome) {
-    FILE *fh = stHash_search(p1->spill_fh, (void *)genome);
-    if (fh == NULL) {
-        char *path = stString_print("%s/%s.tuiSpill.%ld.%d", p1->tmp_dir,
-                                    p1->out_base, (long)getpid(),
-                                    p1->next_spill_id++);
-        tui_atexit_track_spill(path);
-        fh = fopen(path, "wb");      // binary record stream (see spill_run)
-        if (fh == NULL) { fprintf(stderr, "tui: cannot open spill %s\n", path); exit(1); }
-        stHash_insert(p1->spill_fh, stString_copy(genome), fh);
-        stHash_insert(p1->spill_path, stString_copy(genome), path);
+    SpillEnt *e = stHash_search(p1->spill_ents, (void *)genome);
+    if (e == NULL) {
+        // first sighting of this genome: allocate the ent and pick a path.
+        // File creation itself is deferred to the fopen below (still on this
+        // call, but conceptually separate so the EMFILE-eviction loop applies
+        // uniformly to first-open and reopen cases).
+        e = st_calloc(1, sizeof(SpillEnt));
+        e->path = stString_print("%s/%s.tuiSpill.%ld.%d", p1->tmp_dir,
+                                  p1->out_base, (long)getpid(),
+                                  p1->next_spill_id++);
+        tui_atexit_track_spill(e->path);
+        stHash_insert(p1->spill_ents, stString_copy(genome), e);
         // Per-spill seq-name dictionary; values are heap int64_t* seq indices.
         stHash *seen = stHash_construct3(stHash_stringKey, stHash_stringEqualKey,
                                          free, free);
         stHash_insert(p1->spill_seqs, stString_copy(genome), seen);
     }
-    return fh;
+    if (e->fh == NULL) {
+        // Cold ent: need to (re)open.  Make room in the FH pool first.
+        while (p1->n_open >= p1->max_open) {
+            if (!spill_evict_one(p1, e)) break;   // pool empty besides `e`
+        }
+        // "ab" creates on first open and appends on reopen (no truncation).
+        e->fh = fopen(e->path, "ab");
+        if (e->fh == NULL) {
+            st_errAbort("tui: cannot open spill %s -- %s (n_open=%d max_open=%d)",
+                        e->path, strerror(errno), p1->n_open, p1->max_open);
+        }
+        p1->n_open++;
+        lru_push_head(p1, e);
+    } else if (p1->lru_head != e) {
+        // Warm ent but not MRU: bump to head so it survives the next eviction.
+        lru_unlink(p1, e);
+        lru_push_head(p1, e);
+    }
+    return e->fh;
 }
 
 static void note_seq(Phase1 *p1, const char *seq_name, int64_t seq_len) {
@@ -753,18 +831,26 @@ static int64_t decode_idx(const uint8_t *def, int64_t def_len, int64_t raw_len,
 // lifetime is tied to one place regardless of which exit path is taken.
 static void tui_cleanup(Phase1 *p1, SeqKey *seqks, int64_t n_seqs,
                         char *eff_tmp, stHash *tree_map) {
-    stHashIterator *hit = stHash_getIterator(p1->spill_path);
-    char *gk;
-    while ((gk = stHash_getNext(hit)) != NULL) {
-        remove((char *)stHash_search(p1->spill_path, gk));
+    if (p1->spill_ents != NULL) {
+        stHashIterator *hit = stHash_getIterator(p1->spill_ents);
+        char *gk;
+        while ((gk = stHash_getNext(hit)) != NULL) {
+            SpillEnt *e = stHash_search(p1->spill_ents, gk);
+            if (e->fh != NULL) {
+                fclose(e->fh);
+                e->fh = NULL;
+            }
+            remove(e->path);
+            free(e->path);
+            free(e);
+        }
+        stHash_destructIterator(hit);
+        stHash_destruct(p1->spill_ents);
     }
-    stHash_destructIterator(hit);
     if (p1->idx_fh != NULL) fclose(p1->idx_fh);
     if (p1->idx_path != NULL) { remove(p1->idx_path); free(p1->idx_path); }
     for (int64_t i = 0; i < n_seqs; i++) free(seqks[i].genome);  // .seq owned by seq_len
     free(seqks);
-    stHash_destruct(p1->spill_fh);
-    stHash_destruct(p1->spill_path);
     if (p1->spill_seqs != NULL) stHash_destruct(p1->spill_seqs);
     stHash_destruct(p1->seq_len);
     stList_destruct(p1->seq_keys);
@@ -799,14 +885,50 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
     char *eff_tmp = (tmp_dir != NULL && tmp_dir[0] != '\0')
                         ? stString_copy(tmp_dir) : dir_of(out_path);
 
+    // Raise RLIMIT_NOFILE soft to hard.  Phase 1 cycles one FD per open spill
+    // (one per genome in the cap) plus a handful for stdin/out/err, the MAF
+    // stream, and the idx spill.  At vertebrate scale (1k+ genomes) the
+    // default Linux soft limit (1024) leaves no headroom; the user's 1153-
+    // genome 577-way run failed at spill #1019 with this exact pattern.
+    // Raising soft to hard is a no-op on systems already configured for
+    // hi-FD work and free headroom elsewhere.
+    struct rlimit rl = { .rlim_cur = 1024, .rlim_max = 1024 };  // safe defaults
+    int max_open_cap = 1024;            // safe-fallback cap if getrlimit fails
+    if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
+        rlim_t want = rl.rlim_max;
+        if (rl.rlim_cur < want) {
+            rl.rlim_cur = want;
+            (void) setrlimit(RLIMIT_NOFILE, &rl);   // best-effort; ignore EPERM
+            (void) getrlimit(RLIMIT_NOFILE, &rl);   // re-read what we actually got
+        }
+        // Reserve 32 FDs for stdin/out/err + idx + maf + libc misc; cap at a
+        // sane ceiling so we don't burn the whole process FD table on spills.
+        rlim_t avail = (rl.rlim_cur > 32) ? rl.rlim_cur - 32 : 0;
+        if (avail > 8192) avail = 8192;
+        if (avail < 8)    avail = 8;          // LRU below cap=8 thrashes badly
+        max_open_cap = (int) avail;
+    }
+    // Env-var override -- useful for tests (force the LRU into play on small
+    // fixtures) and for diagnosing thrash vs FD-pressure issues in the field.
+    const char *env_cap = getenv("TAFFY_TUI_MAX_OPEN");
+    if (env_cap != NULL && env_cap[0] != '\0') {
+        char *end = NULL;
+        long v = strtol(env_cap, &end, 10);
+        if (end != env_cap && v >= 4 && v <= 65536) max_open_cap = (int) v;
+    }
+
     Phase1 p1;
+    memset(&p1, 0, sizeof(p1));
     p1.tmp_dir = eff_tmp;
     p1.out_base = base_of(out_path);
     p1.next_spill_id = 0;
     p1.gmap = eff_map;
-    p1.spill_fh = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, free, NULL);
-    // we own the spill paths -> free them via the hash on destruct
-    p1.spill_path = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, free, free);
+    // spill_ents value freed inline by tui_cleanup (the SpillEnt struct +
+    // its path string are not standalone-freeable via a single callback).
+    p1.spill_ents = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, free, NULL);
+    p1.max_open = max_open_cap;
+    p1.n_open   = 0;
+    p1.lru_head = p1.lru_tail = NULL;
     // per-spill seq-name dictionaries: values are inner stHashes (destroyed
     // here on cleanup so their per-record int64_t* + seq_name copies go too).
     p1.spill_seqs = stHash_construct3(stHash_stringKey, stHash_stringEqualKey,
@@ -815,6 +937,8 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
     p1.seq_keys = stList_construct();
     p1.T = 0;
     p1.idx_fh = NULL; p1.idx_path = NULL; p1.idx_last_col = 0; p1.idx_n = 0;
+    st_logInfo("tui: phase-1 spill FH pool: max_open=%d (RLIMIT_NOFILE soft=%lu)\n",
+               p1.max_open, (unsigned long) rl.rlim_cur);
 
     // idx_anchor captures the block's anchor offset itself (LI_get_position =
     // start of the peeked block-first line; the exact tai_create_taf
@@ -854,17 +978,24 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
             "(disk full / write error) -- %s", p1.idx_path);
         p1.idx_fh = NULL;
     }
-    // close all spill FILE*s (paths kept for phase 2)
-    stHashIterator *hit = stHash_getIterator(p1.spill_fh);
+    // close any currently-open spill FILE*s (paths kept on each SpillEnt
+    // for phase 2).  Under the LRU pool only n_open ents are open at this
+    // point; previously-evicted ones already had their write buffers
+    // flushed at eviction-fclose time, so we only need to close survivors.
+    stHashIterator *hit = stHash_getIterator(p1.spill_ents);
     char *gk;
     while ((gk = stHash_getNext(hit)) != NULL) {
-        if (fclose(stHash_search(p1.spill_fh, gk)) != 0) {
-            st_errAbort("tui: spill close failed for genome '%s' "
-                        "(disk full / write error)", gk);
+        SpillEnt *e = stHash_search(p1.spill_ents, gk);
+        if (e->fh != NULL) {
+            if (fclose(e->fh) != 0) {
+                st_errAbort("tui: spill close failed for genome '%s' "
+                            "(disk full / write error) -- %s", gk, strerror(errno));
+            }
+            e->fh = NULL;
         }
     }
     stHash_destructIterator(hit);
-    int64_t n_genomes = (int64_t) stHash_size(p1.spill_path);
+    int64_t n_genomes = (int64_t) stHash_size(p1.spill_ents);
     st_logInfo("tui: phase 1 done in %" PRIi64 " seconds "
                "(T=%" PRIi64 " columns, %" PRIi64 " blocks, "
                "%" PRIi64 " genomes, %" PRIi64 " idx anchors)\n",
@@ -981,9 +1112,9 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
 
         int64_t nr = 0;
         Run *runs = NULL;
-        char *path = stHash_search(p1.spill_path, gname);
-        if (path != NULL) {
-            runs = load_genome_runs(path, &nr);
+        SpillEnt *ent = stHash_search(p1.spill_ents, gname);
+        if (ent != NULL) {
+            runs = load_genome_runs(ent->path, &nr);
             if (runs != NULL) qsort(runs, nr, sizeof(Run), run_cmp);
         }
         // walk this genome's seqs (contiguous block in seqks[]); runs[] are
