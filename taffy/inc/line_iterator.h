@@ -28,6 +28,14 @@ typedef struct _LI {
 
 LI *LI_construct(FILE *fh);
 
+/*
+ * Construct an LI directly from a local path or a URL, going through htslib's
+ * bgzf_open (which routes URLs through hFILE+libcurl). Use this when reading
+ * remote files via HTTP/HTTPS/S3/GCS; otherwise LI_construct(FILE*) is fine.
+ * Returns NULL on failure (with an error printed to stderr).
+ */
+LI *LI_construct_from_path(const char *path);
+
 void LI_destruct(LI *li);
 
 /*

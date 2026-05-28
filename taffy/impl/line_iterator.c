@@ -30,6 +30,42 @@ LI *LI_construct(FILE *fh) {
     return li;
 }
 
+#ifdef USE_HTSLIB
+LI *LI_construct_from_path(const char *path) {
+    BGZF *bgzf = bgzf_open(path, "r");
+    if (bgzf == NULL) {
+        fprintf(stderr, "Unable to open input %s (htslib bgzf_open failed)\n", path);
+        if (strstr(path, "://") != NULL) {
+            fprintf(stderr, "  URL inputs require htslib built with libcurl support.\n"
+                            "  If you built htslib yourself, rerun ./configure --enable-libcurl and rebuild.\n");
+        }
+        return NULL;
+    }
+    LI *li = st_calloc(1, sizeof(LI));
+    li->bgzf = bgzf;
+    if (bgzf_compression(li->bgzf) == 2) {
+        if (bgzf_index_build_init(li->bgzf) != 0) {
+            assert(false);
+        }
+    }
+    kstring_t ks = KS_INITIALIZE;
+    li->prev_pos = bgzf_tell(li->bgzf);
+    li->pos = li->prev_pos;
+    bgzf_getline(li->bgzf, '\n', &ks);
+    li->line = ks_release(&ks);
+    return li;
+}
+#else
+LI *LI_construct_from_path(const char *path) {
+    FILE *fh = fopen(path, "r");
+    if (fh == NULL) {
+        fprintf(stderr, "Unable to open input %s\n", path);
+        return NULL;
+    }
+    return LI_construct(fh);
+}
+#endif
+
 void LI_destruct(LI *li) {
 #ifdef USE_HTSLIB
     bgzf_close(li->bgzf);
