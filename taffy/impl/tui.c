@@ -924,8 +924,206 @@ static void tui_cleanup(Phase1 *p1, SeqKey *seqks, int64_t n_seqs,
     free(eff_tmp);
 }
 
+/////////////////////////////////////////////////////////////////////////////
+// Phase 2 worker / writer split.  The per-genome body (load spill -> sort
+// -> per-seq colinear merge -> chunk -> encode) is pure CPU once we have
+// the genome's spill path and per-seqks slen lookup; it has no shared
+// state.  The writer side (oneWriteLine S/C/R into the OneFile, plus the
+// file-position c_ord_emit counter that gets stamped into each C record)
+// must stay single-threaded.  We split the loop into:
+//
+//   phase2_genome_work(gi, ...) -> Phase2Genome*   [worker, parallel]
+//   phase2_genome_write(of, g, &c_ord_emit)        [writer, serial]
+//
+// so an OpenMP parallel-for-ordered can run N workers concurrently while
+// the ordered region serialises writes in seqks order (matching the
+// pre-committed d-record S-ordinals).
+/////////////////////////////////////////////////////////////////////////////
+
+typedef struct {
+    int64_t g_min, g_max;
+    int64_t t_min, t_max;
+    int64_t raw_len;
+    uint8_t *def;
+    int64_t def_len;
+    int64_t cm;              // # runs in chunk (for self-check + bookkeeping)
+} Phase2Chunk;
+
+typedef struct {
+    char  *seq_name;         // borrowed from seqks (do NOT free here)
+    int64_t slen;
+    int64_t seqks_idx;       // 0-based position in seqks (s_ord = seqks_idx + 1)
+    Phase2Chunk *chunks;     // length n_chunks
+    int64_t n_chunks;
+} Phase2Seq;
+
+typedef struct {
+    Phase2Seq *seqs;         // length n_seqs
+    int64_t n_seqs;
+    int64_t nr;              // total runs loaded from this genome's spill (for log)
+} Phase2Genome;
+
+// Per-genome scheduling metadata, computed once before the parallel loop.
+typedef struct {
+    int64_t seqks_start, seqks_end;  // half-open range in seqks[]
+    const char *gname;               // borrowed (seqks[seqks_start].genome)
+    const char *spill_path;          // NULL if this genome had no rows
+} P2GenomeRange;
+
+// Worker: build all encoded output for `gi`'s genome.  Pure CPU + the spill
+// file read.  No shared mutable state touched: spill_path + slen_by_idx +
+// the seqks[] window are all read-only.  Result is heap-allocated; the
+// writer consumes and frees it.
+static Phase2Genome *phase2_genome_work(const P2GenomeRange *gr,
+                                        const SeqKey *seqks,
+                                        const int64_t *slen_by_idx) {
+    int64_t nr = 0;
+    Run *runs = NULL;
+    if (gr->spill_path != NULL) {
+        runs = load_genome_runs(gr->spill_path, &nr);
+        if (runs != NULL) qsort(runs, nr, sizeof(Run), run_cmp);
+    }
+
+    Phase2Genome *g = st_calloc(1, sizeof(Phase2Genome));
+    g->n_seqs   = gr->seqks_end - gr->seqks_start;
+    g->seqs     = st_calloc(g->n_seqs ? g->n_seqs : 1, sizeof(Phase2Seq));
+    g->nr       = nr;
+
+    int64_t rc = 0;  // forward cursor into sorted runs[]
+    for (int64_t i = gr->seqks_start; i < gr->seqks_end; i++) {
+        char *sk = seqks[i].seq;
+        Phase2Seq *ps = &g->seqs[i - gr->seqks_start];
+        ps->seq_name = sk;
+        ps->slen      = slen_by_idx[i];
+        ps->seqks_idx = i;
+
+        // Find this seq's runs slice in sorted runs[].
+        while (rc < nr && strcmp(runs[rc].seq, sk) < 0) rc++;
+        int64_t a = rc;
+        int64_t bnd = a;
+        while (bnd < nr && strcmp(runs[bnd].seq, sk) == 0) bnd++;
+        int64_t cnt = bnd - a;
+        int64_t *buf = st_malloc((cnt ? 3 * cnt : 1) * sizeof(int64_t));
+
+        // Colinear merge.  Identical logic to the serial path; kept inline
+        // rather than factored so this file's only behaviour change is the
+        // worker/writer split.
+        int64_t m = 0;
+        for (int64_t k = a; k < bnd; k++) {
+            Run *r = &runs[k];
+            int64_t rt = r->t, rg = r->g, rl = r->len;
+            char rs = r->strand;
+            if (m > 0) {
+                int64_t *pp = &buf[3 * (m - 1)];
+                int64_t pt = pp[0], pg = pp[1], pl = pp[2] >> 1;
+                char ps2 = (pp[2] & 1) ? '-' : '+';
+                if (ps2 == rs && rt == pt + pl) {
+                    if (rs == '+' && rg == pg + pl) {
+                        pp[2] = (pl + rl) << 1;
+                        continue;
+                    }
+                    if (rs == '-' && rg == pg - rl) {
+                        pp[1] = rg;
+                        pp[2] = ((pl + rl) << 1) | 1;
+                        continue;
+                    }
+                }
+            }
+            buf[3*m+0] = rt;
+            buf[3*m+1] = rg;
+            buf[3*m+2] = (rl << 1) | (rs == '-' ? 1 : 0);
+            m++;
+        }
+        qsort(buf, m, 3 * sizeof(int64_t), triple_cmp_by_g);
+
+        // Chunk + encode.  Same chunk-boundary computation as the serial
+        // path; we just store the encoded blob + metadata instead of
+        // emitting C/R immediately.
+        Phase2Chunk *chunks = NULL;
+        int64_t n_chunks = 0, chunk_cap = 0;
+        int64_t chunk_pos = 0;
+        while (chunk_pos < m) {
+            int64_t cm_max = m - chunk_pos;
+            if (cm_max > TUI_CHUNK_RUNS) cm_max = TUI_CHUNK_RUNS;
+            int64_t *cb = &buf[3 * chunk_pos];
+            int64_t g_min = cb[1];
+            int64_t g_max = cb[1] + (cb[2] >> 1);
+            int64_t t_min = cb[0];
+            int64_t t_max = cb[0] + (cb[2] >> 1);
+            int64_t cm = 1;
+            for (; cm < cm_max; cm++) {
+                int64_t t  = cb[3*cm + 0];
+                int64_t gv = cb[3*cm + 1];
+                int64_t le = (cb[3*cm + 2] >> 1);
+                int64_t cand_g_max = (gv + le > g_max) ? gv + le : g_max;
+                int64_t cand_g_min = (gv < g_min) ? gv : g_min;
+                if (cand_g_max - cand_g_min > TUI_CHUNK_G_MAX) break;
+                g_max = cand_g_max;
+                g_min = cand_g_min;
+                if (t < t_min) t_min = t;
+                if (t + le > t_max) t_max = t + le;
+            }
+            if (n_chunks == chunk_cap) {
+                chunk_cap = chunk_cap ? chunk_cap * 2 : 4;
+                chunks = st_realloc(chunks, chunk_cap * sizeof(Phase2Chunk));
+            }
+            Phase2Chunk *c = &chunks[n_chunks++];
+            c->g_min = g_min; c->g_max = g_max;
+            c->t_min = t_min; c->t_max = t_max;
+            c->cm = cm;
+            c->def = encode_runs(cb, cm, &c->raw_len, &c->def_len);
+            // Per-chunk codec self-check (same as serial path).
+            int64_t *chk = st_malloc((cm ? 3 * cm : 1) * sizeof(int64_t));
+            int64_t dm = decode_runs(c->def, c->def_len, c->raw_len, chk, 3 * cm);
+            assert(dm == cm && memcmp(chk, cb, (size_t)(3 * cm) * sizeof(int64_t)) == 0);
+            free(chk);
+            chunk_pos += cm;
+        }
+        ps->chunks    = chunks;
+        ps->n_chunks  = n_chunks;
+        free(buf);
+        rc = bnd;
+    }
+
+    for (int64_t k = 0; k < nr; k++) free(runs[k].seq);
+    free(runs);
+    return g;
+}
+
+// Writer: drain one genome's worker result into the OneFile.  Single-
+// threaded by construction (the OpenMP `ordered` region in the loop).
+// c_ord_emit is the file-position C ordinal counter; we stamp it INTO each
+// C record (4th field) so the reader doesn't depend on ONElib's
+// oneObject(C) accumulator (off-by-one across cross-type oneGoto in this
+// lib version).
+static void phase2_genome_write(OneFile *of, Phase2Genome *g, int64_t *c_ord_emit) {
+    for (int64_t i = 0; i < g->n_seqs; i++) {
+        Phase2Seq *ps = &g->seqs[i];
+        oneInt(of, 1) = ps->slen;
+        oneWriteLine(of, 'S', strlen(ps->seq_name), (void *)ps->seq_name);
+        int64_t s_ord = ps->seqks_idx + 1;
+        for (int64_t k = 0; k < ps->n_chunks; k++) {
+            Phase2Chunk *c = &ps->chunks[k];
+            ++(*c_ord_emit);
+            oneInt(of, 0) = c->g_min;
+            oneInt(of, 1) = c->g_max;
+            oneInt(of, 2) = s_ord;
+            oneInt(of, 3) = *c_ord_emit;
+            oneInt(of, 4) = c->t_min;
+            oneInt(of, 5) = c->t_max;
+            oneWriteLine(of, 'C', 0, NULL);
+            oneInt(of, 0) = c->raw_len;
+            oneWriteLine(of, 'R', c->def_len, c->def);
+            free(c->def);
+        }
+        free(ps->chunks);
+    }
+    free(g->seqs);
+    free(g);
+}
+
 int tui_create(LI *li, const char *out_path, const char *tmp_dir,
-                stHash *genome_name_map) {
+                stHash *genome_name_map, int n_threads) {
     int input_format = check_input_format(LI_peek_at_next_line(li));  // 0=TAF 1=MAF
     if (input_format != 0 && input_format != 1) {
         fprintf(stderr, "tui: input must be MAF or TAF\n");
@@ -1162,171 +1360,80 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
     // per genome: g + S/R objects.  seqks is sorted by the TRUE resolved
     // genome, so one genome's sequences are ONE contiguous block by
     // construction (no first-dot-collision hazard, no re-resolve).
+    //
+    // Phase 2 is per-genome-independent CPU work; the actual writes into
+    // OneFile must stay serial (the c_ord_emit counter is the file-position
+    // C ordinal stamped INTO each C record, and ONElib isn't thread-safe).
+    // We split into worker (sort/merge/chunk/encode -> Phase2Genome buffer)
+    // and writer (oneWriteLine S/C/R) so the parallel loop below can use
+    // schedule(dynamic) + ordered: workers in parallel, writes in seqks
+    // order.  See the Phase2Genome / phase2_genome_work / phase2_genome_write
+    // block above tui_create for the data shapes.
     time_t t_phase2_start = time(NULL);
     st_logInfo("tui: starting phase 2 (per-genome sort + encode + write, "
                "%" PRIi64 " genomes)\n", n_genomes);
-    int64_t genome_idx = 0;
-    int64_t i = 0;
-    // File-order C ordinal counter, incremented as each C is emitted.
-    // Stored back in the C record itself (C's 4th field) so the reader
-    // doesn't have to rely on ONElib's oneObject() accumulator -- which is
-    // off-by-one after a cross-type oneGoto in this lib version.
-    int64_t c_ord_emit = 0;
-    while (i < n_seqs) {
-        char *gname = seqks[i].genome;  // groups spill files; not emitted
-        time_t t_g_start = time(NULL);
 
-        int64_t nr = 0;
-        Run *runs = NULL;
-        SpillEnt *ent = stHash_search(p1.spill_ents, gname);
-        if (ent != NULL) {
-            runs = load_genome_runs(ent->path, &nr);
-            if (runs != NULL) qsort(runs, nr, sizeof(Run), run_cmp);
+    // Per-genome scheduling metadata: seqks window + cached spill_path.
+    // Building this upfront (single thread) avoids stHash_search in workers
+    // (sonLib's hash isn't reentrant for concurrent reads).
+    P2GenomeRange *gr = st_malloc((n_genomes ? n_genomes : 1) * sizeof(P2GenomeRange));
+    {
+        int64_t gi = 0, j = 0;
+        while (j < n_seqs) {
+            char *gname = seqks[j].genome;
+            gr[gi].seqks_start = j;
+            gr[gi].gname       = gname;
+            SpillEnt *ent      = stHash_search(p1.spill_ents, gname);
+            gr[gi].spill_path  = (ent != NULL) ? ent->path : NULL;
+            while (j < n_seqs && strcmp(seqks[j].genome, gname) == 0) j++;
+            gr[gi].seqks_end = j;
+            gi++;
         }
-        // walk this genome's seqs (contiguous block in seqks[]); runs[] are
-        // seq-sorted consistently (strcmp), so advance a single forward cursor.
-        int64_t rc = 0;
-        while (i < n_seqs && strcmp(seqks[i].genome, gname) == 0) {
-            char *sk = seqks[i].seq;
-            int64_t slen = *(int64_t *)stHash_search(p1.seq_len, sk);
-            oneInt(of, 1) = slen;
-            oneWriteLine(of, 'S', strlen(sk), (void *)sk);
-            // R: runs of this seq (contiguous in sorted runs[]); same strcmp
-            // order as seqks[] so the forward cursor can't skip/misattribute
-            while (rc < nr && strcmp(runs[rc].seq, sk) < 0) rc++;  // forward only
-            int64_t a = rc;
-            int64_t bnd = a;
-            while (bnd < nr && strcmp(runs[bnd].seq, sk) == 0) bnd++;
-            int64_t cnt = bnd - a;
-            int64_t *buf = st_malloc((cnt ? 3 * cnt : 1) * sizeof(int64_t));
-            // Colinear merge: runs[a..bnd) are this seq's runs sorted by t
-            // ascending and partition its forward coords disjointly.  Two
-            // consecutive runs describe the same linear p->col map and so fold
-            // into one iff same strand, forward-adjacent (prev.t+prev.len ==
-            // cur.t), AND column-contiguous.  col(p): '+' = g+(p-t) (slope +1,
-            // so cur.g == prev.g+prev.len); '-' = g+(t+len-1-p) (slope -1, so
-            // cur.g == prev.g-cur.len, and the merged run keeps cur.g).  An
-            // in-row alignment gap leaves t adjacent but g discontinuous, so
-            // the column test correctly refuses to merge across it.
-            int64_t m = 0;  // merged-run count (triples written into buf)
-            for (int64_t k = a; k < bnd; k++) {
-                Run *r = &runs[k];
-                int64_t rt = r->t, rg = r->g, rl = r->len;
-                char rs = r->strand;
-                if (m > 0) {
-                    int64_t *pp = &buf[3 * (m - 1)];
-                    int64_t pt = pp[0], pg = pp[1], pl = pp[2] >> 1;
-                    char ps = (pp[2] & 1) ? '-' : '+';
-                    if (ps == rs && rt == pt + pl) {
-                        if (rs == '+' && rg == pg + pl) {
-                            pp[2] = (pl + rl) << 1;            // extend, '+'
-                            continue;
-                        }
-                        if (rs == '-' && rg == pg - rl) {
-                            pp[1] = rg;                        // merged g = cur.g
-                            pp[2] = ((pl + rl) << 1) | 1;      // extend, '-'
-                            continue;
-                        }
-                    }
-                }
-                buf[3*m+0] = rt;
-                buf[3*m+1] = rg;
-                buf[3*m+2] = (rl << 1) | (rs == '-' ? 1 : 0);
-                m++;
-            }
-            // Partition the merged-run array into chunks of <= TUI_CHUNK_RUNS
-            // triples, emit a C (g_min, g_max, parent_S_ord, self_c_ord)
-            // header + an R blob per chunk.  Empty sequences (m == 0) emit
-            // no chunks.  self_c_ord is the 1-based file-order C ordinal of
-            // THIS C; the reader uses it for oneGoto(C, c_ord) during lazy
-            // R decode -- ONElib's oneObject(C) accumulator after a
-            // cross-type oneGoto returns the wrong value in this version,
-            // so we carry the ordinal explicitly.
-            // Sort this seq's runs by g_start (universal column) before
-            // chunking.  The column-keyed query in tui_genome_lift_column
-            // uses the chunks' (g_min, g_max) as a coarse filter -- if
-            // chunks are formed from t-sorted runs (the natural order
-            // produced by the merge loop above), each chunk's g range
-            // covers most of the universal column space for any seq with
-            // paralog hits or fragmented synteny.  Sorting by g first
-            // gives tight per-chunk g ranges, so the reader's backward
-            // scan only touches the few chunks whose g range actually
-            // includes the queried column.  Trade-off: t-deltas in the
-            // delta+varint encoding become non-monotonic (slightly
-            // larger compressed size); the reader sorts the concat'd
-            // runs back to t-order in tui_load_seq_runs for callers
-            // (taffy lift's source-coord lookup) that need that view.
-            qsort(buf, m, 3 * sizeof(int64_t), triple_cmp_by_g);
-
-            int64_t s_ord = i + 1;  // 1-based S ordinal of THIS sequence
-            int64_t chunk_pos = 0;
-            while (chunk_pos < m) {
-                int64_t cm_max = m - chunk_pos;
-                if (cm_max > TUI_CHUNK_RUNS) cm_max = TUI_CHUNK_RUNS;
-                int64_t *cb = &buf[3 * chunk_pos];
-                // Walk forward, accumulating g_min/g_max + t_min/t_max as we
-                // go, stopping early if adding the next run would push the
-                // chunk's g-span past TUI_CHUNK_G_MAX.  Runs are g-sorted
-                // (writer's g-sort) so g_min is cb[0]'s g and grows only via
-                // g_max -- the early-exit test reduces to (g+len) - g_min.
-                // Dense targets never hit this trigger (65k runs naturally
-                // fit in <1M columns); sparse targets close the chunk early
-                // with tight [g_min, g_max] so the reader's walk-back
-                // early-exit fires as designed.
-                int64_t g_min = cb[1];
-                int64_t g_max = cb[1] + (cb[2] >> 1);
-                int64_t t_min = cb[0];
-                int64_t t_max = cb[0] + (cb[2] >> 1);
-                int64_t cm = 1;
-                for (; cm < cm_max; cm++) {
-                    int64_t t  = cb[3*cm + 0];
-                    int64_t g  = cb[3*cm + 1];
-                    int64_t le = (cb[3*cm + 2] >> 1);
-                    // g-span cap: would adding this run blow past
-                    // TUI_CHUNK_G_MAX?  Runs are g-sorted so the only way
-                    // g_min decreases is on the first run; the only way
-                    // g_max grows is via (g + le).
-                    int64_t cand_g_max = (g + le > g_max) ? g + le : g_max;
-                    int64_t cand_g_min = (g < g_min) ? g : g_min;
-                    if (cand_g_max - cand_g_min > TUI_CHUNK_G_MAX) break;
-                    g_max = cand_g_max;
-                    g_min = cand_g_min;
-                    if (t < t_min) t_min = t;
-                    if (t + le > t_max) t_max = t + le;
-                }
-                ++c_ord_emit;
-                oneInt(of, 0) = g_min;
-                oneInt(of, 1) = g_max;
-                oneInt(of, 2) = s_ord;
-                oneInt(of, 3) = c_ord_emit;
-                oneInt(of, 4) = t_min;
-                oneInt(of, 5) = t_max;
-                oneWriteLine(of, 'C', 0, NULL);
-                int64_t raw_len = 0, def_len = 0;
-                uint8_t *def = encode_runs(cb, cm, &raw_len, &def_len);
-                // Self-check the codec per-chunk (same validation as the
-                // pre-chunked path).
-                int64_t *chk = st_malloc((cm ? 3 * cm : 1) * sizeof(int64_t));
-                int64_t dm = decode_runs(def, def_len, raw_len, chk, 3 * cm);
-                assert(dm == cm && memcmp(chk, cb, (size_t)(3 * cm) * sizeof(int64_t)) == 0);
-                free(chk);
-                oneInt(of, 0) = raw_len;
-                oneWriteLine(of, 'R', def_len, def);
-                free(def);
-                chunk_pos += cm;
-            }
-            free(buf);
-            rc = bnd;   // advance cursor past this seq's runs
-            i++;
-        }
-        st_logInfo("tui: phase 2 genome %" PRIi64 "/%" PRIi64 " '%s' done in "
-                   "%" PRIi64 " seconds (%" PRIi64 " runs)\n",
-                   ++genome_idx, n_genomes, gname,
-                   (int64_t)(time(NULL) - t_g_start), nr);
-        for (int64_t k = 0; k < nr; k++) free(runs[k].seq);
-        free(runs);
-        // gname is seqks[i].genome -- owned by seqks, freed in tui_cleanup
+        assert(gi == n_genomes);
     }
+    // Flat per-seqks slen lookup -- workers read this directly instead of
+    // p1.seq_len's stHash.
+    int64_t *slen_by_idx = st_malloc((n_seqs ? n_seqs : 1) * sizeof(int64_t));
+    for (int64_t k = 0; k < n_seqs; k++) {
+        slen_by_idx[k] = *(int64_t *)stHash_search(p1.seq_len, seqks[k].seq);
+    }
+
+    // File-order C ordinal counter; assigned inside the writer.
+    int64_t c_ord_emit = 0;
+
+    // Parallel-for over genomes.  schedule(dynamic, 1) gives one genome
+    // per task -- well-matched to the heavy-tailed work (median 7s,
+    // p95 407s on 577-way; the rare giants would clog a static partition).
+    // ordered serialises the write region in iteration order = seqks order
+    // so the c_ord_emit counter and OneFile state stay un-contended and
+    // S record positions match the s_ord values already committed to the
+    // d directory above.  n_threads<=1 falls back to a serial loop (no
+    // OpenMP runtime cost).  In-flight memory is bounded by n_threads ×
+    // max per-genome encoded-result size: workers can finish out-of-order
+    // and stall at the ordered region holding their result until earlier
+    // iterations clear, so the cap is on the order of n_threads × ~few GB
+    // for the worst pathological run-counts.
+    int nt = (n_threads > 1) ? n_threads : 1;
+    #pragma omp parallel for schedule(dynamic, 1) num_threads(nt) ordered
+    for (int64_t gi = 0; gi < n_genomes; gi++) {
+        time_t t_g_start = time(NULL);
+        Phase2Genome *gres = phase2_genome_work(&gr[gi], seqks, slen_by_idx);
+        time_t t_g_done = time(NULL);
+        #pragma omp ordered
+        {
+            int64_t nr_saved = gres->nr;
+            phase2_genome_write(of, gres, &c_ord_emit);
+            st_logInfo("tui: phase 2 genome %" PRIi64 "/%" PRIi64 " '%s' "
+                       "worked in %" PRIi64 "s, written in %" PRIi64 "s "
+                       "(%" PRIi64 " runs)\n",
+                       gi + 1, n_genomes, gr[gi].gname,
+                       (int64_t)(t_g_done - t_g_start),
+                       (int64_t)(time(NULL) - t_g_done),
+                       nr_saved);
+        }
+    }
+    free(gr);
+    free(slen_by_idx);
     st_logInfo("tui: phase 2 done in %" PRIi64 " seconds\n",
                (int64_t)(time(NULL) - t_phase2_start));
 

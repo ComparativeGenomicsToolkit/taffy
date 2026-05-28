@@ -167,7 +167,7 @@ int taf_index_main(int argc, char *argv[]) {
         }
         char *tui_fn = tui_path(taf_fn);
         st_logInfo("Output index file : %s\n", tui_fn);
-        rv = tui_create(li, tui_fn, tmp_dir, genome_name_map);
+        rv = tui_create(li, tui_fn, tmp_dir, genome_name_map, bgzf_threads);
         free(tui_fn);
         if (genome_name_map != NULL) {
             stHash_destruct(genome_name_map);

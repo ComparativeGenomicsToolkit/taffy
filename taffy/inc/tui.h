@@ -73,8 +73,13 @@ char *tui_path(const char *maf_path);
  * source for the genome set is a fatal error.  Pass NULL for genome_name_map
  * to use the header tree (or when the input has no >1-dot names).
  */
+/*
+ * `n_threads` controls the phase-2 worker pool (per-genome sort + encode);
+ * phase 1 stays serial since it's the streaming MAF/TAF scan.  Values <= 1
+ * disable OpenMP and execute the loop sequentially.
+ */
 int tui_create(LI *li, const char *out_path, const char *tmp_dir,
-                stHash *genome_name_map);
+                stHash *genome_name_map, int n_threads);
 
 /////////////////////////////////////////////////////////////////////////////
 // Reader / query side (genome.seq:pos -> universal columns).
