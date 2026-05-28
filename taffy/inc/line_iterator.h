@@ -85,6 +85,13 @@ typedef struct _LW {
 #ifdef USE_HTSLIB
     BGZF *bgzf;
 #endif
+    // Coalescing byte buffer for the LW_put* family.  Pending bytes here
+    // MUST be flushed before any LW_write / bgzf_write / fprintf so output
+    // order is preserved.  Buffer grows as needed up to LW_BUF_TARGET; we
+    // flush to the underlying stream when at least that much is pending.
+    char  *buf;
+    size_t buf_pos;
+    size_t buf_cap;
 } LW;
 
 /*
@@ -95,6 +102,37 @@ LW *LW_construct(FILE *fh, bool use_compression);
 void LW_destruct(LW *lw, bool clean_up_file_handle);
 
 int LW_write(LW *lw, const char *string, ...);
+
+/*
+ * Byte-level emitters that bypass vsnprintf.  Bytes accumulate in an
+ * internal buffer and flush when full or at LW_flush / LW_write /
+ * LW_destruct.  Use these on hot emit paths (TAF column writer, etc.);
+ * LW_write remains correct for headers and other cold paths.
+ *
+ * `LW_puti64` writes a decimal int64 (no padding) using a hand-rolled
+ * two-digits-per-iteration table -- much cheaper than vsnprintf("%"PRIi64).
+ *
+ * `LW_putc` is inlined: the fast path is one branch + one store, and the
+ * full-buffer slow path tail-calls out to LW_putc_slow which flushes and
+ * appends.  Each emitted byte going through a function call shows up in
+ * callgrind on TAF writes, so the inline matters.
+ */
+void LW_putc_slow(LW *lw, char c);
+static inline void LW_putc(LW *lw, char c) {
+    if (lw->buf_pos < lw->buf_cap) {
+        lw->buf[lw->buf_pos++] = c;
+    } else {
+        LW_putc_slow(lw, c);
+    }
+}
+void LW_puts(LW *lw, const char *s);
+void LW_putn(LW *lw, const char *s, size_t n);
+/* Append `c` repeated `n` times.  Replaces a hot `for(n) LW_putc(c)` loop
+ * in the unencoded-bases path of the TAF column writer; one memset is
+ * dramatically cheaper than n function calls + branches. */
+void LW_putrep(LW *lw, char c, size_t n);
+void LW_puti64(LW *lw, int64_t v);
+void LW_flush(LW *lw);
 
 #endif /* STLINE_ITERATOR_H_ */
 
