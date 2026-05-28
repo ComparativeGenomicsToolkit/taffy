@@ -1219,7 +1219,7 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
     // The interval is short for quick smoke tests + still useful for the
     // 27-hour 577-way build (~30 messages/hour).
     time_t t_last_log = t_phase1_start;
-    const int64_t LOG_EVERY_SEC = 120;
+    const int64_t LOG_EVERY_SEC = 600;
     #define TUI_PHASE1_TICK() do {                                              \
         time_t now = time(NULL);                                                \
         if (now - t_last_log >= LOG_EVERY_SEC) {                                \
