@@ -6,6 +6,33 @@
 #include "htslib/kstring.h"
 #endif
 
+// Process-wide bgzf thread count, set once early in each command's main()
+// via LI_set_bgzf_threads().  Default of 1 means "no extra threads" and
+// preserves pre-existing behaviour.  Only consulted at LI/LW open time;
+// changes after a handle is opened do not affect that handle.
+static int bgzf_threads = 1;
+
+void LI_set_bgzf_threads(int n) {
+    bgzf_threads = (n > 0) ? n : 1;
+}
+
+#ifdef USE_HTSLIB
+// Enable bgzf_mt on `bgzf` if threads > 1 AND the stream is actual BGZF
+// (compression == 2).  Plain-gzip and uncompressed streams have no block
+// structure that bgzf_mt can parallelise, so we leave them alone.  Call
+// AFTER bgzf_index_build_init: the htslib docs note the index must be set
+// up before workers start touching the stream.
+static void maybe_enable_bgzf_threads(BGZF *bgzf, const char *what) {
+    if (bgzf_threads > 1 && bgzf_compression(bgzf) == 2) {
+        // n_sub_blks is unused per current htslib; pass 0.  Return code <0
+        // means htslib could not spawn the pool; we soldier on single-
+        // threaded rather than fail the whole command.
+        int rc = bgzf_mt(bgzf, bgzf_threads, 0);
+        st_logInfo("bgzf_mt(%s, threads=%d) -> %d\n", what, bgzf_threads, rc);
+    }
+}
+#endif
+
 LI *LI_construct(FILE *fh) {
     LI *li = st_calloc(1, sizeof(LI));
 #ifdef USE_HTSLIB
@@ -16,6 +43,7 @@ LI *LI_construct(FILE *fh) {
             assert(false);
         }
     }
+    maybe_enable_bgzf_threads(li->bgzf, "read");
     kstring_t ks = KS_INITIALIZE;
     li->prev_pos = bgzf_tell(li->bgzf);
     li->pos = li->prev_pos;
@@ -92,6 +120,7 @@ LW *LW_construct(FILE *fh, bool use_compression) {
         if (bgzf_index_build_init(lw->bgzf) != 0) {
             assert(false);
         }
+        maybe_enable_bgzf_threads(lw->bgzf, "write");
 #endif
     }
     return lw;

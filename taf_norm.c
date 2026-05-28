@@ -32,6 +32,7 @@ static void usage(void) {
     fprintf(stderr, "-d --filterGapCausingDupes : Reduce the number of MAF blocks by filtering out rows that induce gaps > maximumGapLength. Rows are only filtered out if they are duplications (contig of same name appears elsewhere in block, or contig with same prefix up to \".\" appears in the same block).\n");
     fprintf(stderr, "-s --repeatCoordinatesEveryNColumns : Repeat coordinates of each sequence at least every n columns. By default: %" PRIi64 "\n", repeat_coordinates_every_n_columns);
     fprintf(stderr, "-c --useCompression : Write the output using bgzip compression.\n");
+    fprintf(stderr, "-T --threads N : Use N threads for bgzf I/O (default 1, only effective on bgzipped streams)\n");
     fprintf(stderr, "-a --halFile : HAL file for extracting gap sequence (MAF must be created with hal2maf *without* --onlySequenceNames)\n");
     fprintf(stderr, "-b --seqFiles : Fasta files for extracting gap sequence. Do not specify both this option and --halFile\n");
     fprintf(stderr, "-h --help : Print this help message\n");
@@ -201,6 +202,7 @@ int taf_norm_main(int argc, char *argv[]) {
     bool filter_gap_causing_dupes = 0;
     stList *fasta_files = stList_construct();
     char *hal_file = NULL;
+    int bgzf_threads = 1;
 
     ///////////////////////////////////////////////////////////////////////////
     // Parse the inputs
@@ -221,10 +223,11 @@ int taf_norm_main(int argc, char *argv[]) {
                                                 { "useCompression", no_argument, 0, 'c' },
                                                 { "halFile", required_argument, 0, 'a' },
                                                 { "seqFiles", required_argument, 0, 'b' },
+                                                { "threads", required_argument, 0, 'T' },
                                                 { 0, 0, 0, 0 } };
 
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:o:hcm:n:dkQ:q:s:a:b:", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:o:hcm:n:dkQ:q:s:a:b:T:", long_options, &option_index);
         if (key == -1) {
             break;
         }
@@ -276,6 +279,9 @@ int taf_norm_main(int argc, char *argv[]) {
                     stList_append(fasta_files, argv[optind]);
                 }
                 break;
+            case 'T':
+                bgzf_threads = atoi(optarg);
+                break;
             default:
                 usage();
                 return 1;
@@ -287,6 +293,7 @@ int taf_norm_main(int argc, char *argv[]) {
     //////////////////////////////////////////////
 
     st_setLogLevelFromString(logLevelString);
+    LI_set_bgzf_threads(bgzf_threads);
     st_logInfo("Input file string : %s\n", inputFile);
     st_logInfo("Output file string : %s\n", outputFile);
     st_logInfo("Maximum block length to merge : %" PRIi64 "\n", maximum_block_length_to_merge);

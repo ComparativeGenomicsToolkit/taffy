@@ -26,6 +26,15 @@ typedef struct _LI {
 } LI;
 
 
+/*
+ * Set the number of threads bgzf I/O should use for both reads (LI) and
+ * writes (LW).  Must be called BEFORE LI_construct / LW_construct take
+ * effect on a given handle; later changes do not affect already-open
+ * handles.  Default is 1 (no bgzf threads).  Has no effect when built
+ * without USE_HTSLIB, or when the underlying stream is not BGZF.
+ */
+void LI_set_bgzf_threads(int n);
+
 LI *LI_construct(FILE *fh);
 
 void LI_destruct(LI *li);
