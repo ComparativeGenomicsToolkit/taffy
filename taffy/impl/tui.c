@@ -1213,6 +1213,28 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
                input_format == 0 ? "TAF" : "MAF");
     int64_t block_count = 0;
     Alignment *aln, *p_aln = NULL;
+    // Periodic in-phase log -- the only signal a user has during a multi-hour
+    // run.  Time-gated rather than block-gated so the cadence doesn't depend
+    // on block size (vertebrate-scale blocks vary by ~3 orders of magnitude).
+    // The interval is short for quick smoke tests + still useful for the
+    // 27-hour 577-way build (~30 messages/hour).
+    time_t t_last_log = t_phase1_start;
+    const int64_t LOG_EVERY_SEC = 120;
+    #define TUI_PHASE1_TICK() do {                                              \
+        time_t now = time(NULL);                                                \
+        if (now - t_last_log >= LOG_EVERY_SEC) {                                \
+            int64_t elapsed = (int64_t)(now - t_phase1_start);                  \
+            st_logInfo("tui: phase 1 progress: %" PRIi64 " blocks, "            \
+                       "%" PRIi64 " universal columns, "                        \
+                       "%" PRIi64 " genomes seen, %" PRIi64 "s elapsed "        \
+                       "(%.1f kblocks/s)\n",                                    \
+                       block_count, p1.T,                                       \
+                       (int64_t) stHash_size(p1.spill_ents),                    \
+                       elapsed,                                                 \
+                       elapsed > 0 ? (block_count / 1000.0) / elapsed : 0.0);   \
+            t_last_log = now;                                                   \
+        }                                                                       \
+    } while (0)
     if (input_format == 1) {
         while (1) {
             idx_anchor(&p1, li, 1, false);
@@ -1221,6 +1243,7 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
             tui_phase1_block(&p1, aln);
             alignment_destruct(aln, 1);
             block_count++;
+            TUI_PHASE1_TICK();
         }
     } else {
         while (1) {
@@ -1231,9 +1254,11 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
             if (p_aln != NULL) alignment_destruct(p_aln, 1);
             p_aln = aln;
             block_count++;
+            TUI_PHASE1_TICK();
         }
         if (p_aln != NULL) alignment_destruct(p_aln, 1);
     }
+    #undef TUI_PHASE1_TICK
     // fclose surfaces buffered short writes (e.g. disk full) -> fail loudly
     // here rather than emit a silently-truncated spill that Phase 2 would
     // later misread as "corrupt spill line".

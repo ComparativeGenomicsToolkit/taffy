@@ -1,9 +1,27 @@
+// posix_fadvise(2): Linux-only kernel hint that lets us mark the input
+// fd as sequential-access so the kernel issues larger read-aheads and
+// drops cold pages.  Non-Linux builds skip the hint (the surrounding
+// `#ifdef __linux__` guards the call site).  _POSIX_C_SOURCE must be set
+// BEFORE including any header so glibc exposes posix_fadvise +
+// POSIX_FADV_SEQUENTIAL from fcntl.h under -std=c99 (which would otherwise
+// hide them).
+#ifdef __linux__
+#define _POSIX_C_SOURCE 200809L
+#include <fcntl.h>
+#endif
+
 #include "line_iterator.h"
 #include "sonLib.h"
 
 #ifdef USE_HTSLIB
 #include "htslib/bgzf.h"
 #include "htslib/kstring.h"
+
+// BGZF block-cache size for read handles.  htslib defaults to a few
+// hundred KB; bumping to 4 MB lets indexed random-access patterns
+// (tui_query / tai_iterator-style seeks) keep more decompressed blocks
+// hot, and is harmless for sequential scans.  4 MB ~ 64 BGZF blocks.
+#define LI_BGZF_CACHE_BYTES (4 * 1024 * 1024)
 #endif
 
 // Process-wide bgzf thread count, set once early in each command's main()
@@ -35,9 +53,19 @@ static void maybe_enable_bgzf_threads(BGZF *bgzf, const char *what) {
 
 LI *LI_construct(FILE *fh) {
     LI *li = st_calloc(1, sizeof(LI));
+    int fd = fileno(fh);
+#ifdef __linux__
+    // Hint sequential access on the underlying fd.  Cheap (ignored if the
+    // fd is a pipe / non-seekable) and worth ~5-10% on cold reads of files
+    // that don't fit in page cache (e.g. tui phase-1 streaming a multi-TB
+    // universal MAF, where /proc/io showed read_bytes == rchar -- no
+    // cache benefit -- so any kernel read-ahead boost lands directly).
+    (void) posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
+#endif
 #ifdef USE_HTSLIB
-    li->bgzf = bgzf_dopen(fileno(fh), "r");
+    li->bgzf = bgzf_dopen(fd, "r");
     assert(li->bgzf != NULL);
+    bgzf_set_cache_size(li->bgzf, LI_BGZF_CACHE_BYTES);
     if (bgzf_compression(li->bgzf) == 2) {
         if (bgzf_index_build_init(li->bgzf) != 0) {
             assert(false);
