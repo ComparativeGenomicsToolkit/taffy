@@ -38,6 +38,7 @@ static void usage(void) {
     fprintf(stderr, "-d --omitCoordinates : When printing TAF, just print the columns omitting the coordinates. THIS IS FOR VISUALIZATION ONLY - DOES NOT PRODUCE A VALID TAF \n");
     fprintf(stderr, "-c --useCompression : Write the output using bgzip compression.\n");
     fprintf(stderr, "-n --nameMapFile : Apply the given two-column tab-separated name mapping to all assembly names in alignment\n");
+    fprintf(stderr, "-T --threads N : Use N threads for bgzf I/O (default 1, only effective on bgzipped streams)\n");
     fprintf(stderr, "-l --logLevel : Set the log level\n");
     fprintf(stderr, "-h --help : Print this help message\n");
 }
@@ -93,6 +94,7 @@ int taf_view_main(int argc, char *argv[]) {
     char *phylogeny_file = NULL;
     static bool color_bases = false;
     bool omit_coordinates = false;
+    int bgzf_threads = 1;
 
     ///////////////////////////////////////////////////////////////////////////
     // Parse the inputs
@@ -116,11 +118,12 @@ int taf_view_main(int argc, char *argv[]) {
                                                 { "region", required_argument, 0, 'r' },
                                                 { "useCompression", no_argument, 0, 'c' },
                                                 { "nameMapFile", required_argument, 0, 'n' },
+                                                { "threads", required_argument, 0, 'T' },
                                                 { "help", no_argument, 0, 'h' },
                                                 { 0, 0, 0, 0 } };
 
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:o:mPpCaucs:r:n:habxt:d", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:o:mPpCaucs:r:n:habxt:dT:", long_options, &option_index);
         if (key == -1) {
             break;
         }
@@ -178,6 +181,9 @@ int taf_view_main(int argc, char *argv[]) {
             case 'n':
                 nameMapFile = optarg;
                 break;
+            case 'T':
+                bgzf_threads = atoi(optarg);
+                break;
             case 'h':
                 usage();
                 return 0;
@@ -192,6 +198,7 @@ int taf_view_main(int argc, char *argv[]) {
     //////////////////////////////////////////////
 
     st_setLogLevelFromString(logLevelString);
+    LI_set_bgzf_threads(bgzf_threads);
     st_logInfo("Input file string : %s\n", inputFile);
     st_logInfo("Output file string : %s\n", outputFile);
     st_logInfo("Write compressed output : %s\n", use_compression ? "true" : "false");

@@ -26,7 +26,8 @@ static void usage(void) {
     fprintf(stderr, "-r --dontIgnoreFirstRow : Do consider the first (reference) row of each maf block - by default we "
                     "don't alter the sort of the reference row\n");
     fprintf(stderr, "-s --repeatCoordinatesEveryNColumns : Repeat TAF coordinates of each sequence at least every n columns. By default: %" PRIi64 "\n", repeat_coordinates_every_n_columns);
-    fprintf(stderr, "-c --useCompression : Write the output using bgzip compression.\n");    
+    fprintf(stderr, "-c --useCompression : Write the output using bgzip compression.\n");
+    fprintf(stderr, "-T --threads N : Use N threads for bgzf I/O (default 1, only effective on bgzipped streams)\n");
     fprintf(stderr, "-l --logLevel : Set the log level\n");
     fprintf(stderr, "-h --help : Print this help message\n");
 }
@@ -90,6 +91,7 @@ int taf_sort_main(int argc, char *argv[]) {
     char *dup_filter_file = NULL;
     bool ignore_first_row = 1;
     bool use_compression = 0;
+    int bgzf_threads = 1;
 
     ///////////////////////////////////////////////////////////////////////////
     // Parse the inputs
@@ -106,11 +108,12 @@ int taf_sort_main(int argc, char *argv[]) {
                                                {"dontIgnoreFirstRow", no_argument, 0, 'r'},
                                                {"repeatCoordinatesEveryNColumns", required_argument, 0, 's'},
                                                {"useCompression", no_argument, 0, 'c'},
+                                               {"threads", required_argument, 0, 'T'},
                                                {"help",       no_argument,       0, 'h'},
                                                {0, 0,                            0, 0}};
 
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:o:n:hrf:p:d:s:c", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:o:n:hrf:p:d:s:cT:", long_options, &option_index);
         if (key == -1) {
             break;
         }
@@ -145,7 +148,10 @@ int taf_sort_main(int argc, char *argv[]) {
                 break;
             case 'c':
                 use_compression = 1;
-                break;                                
+                break;
+            case 'T':
+                bgzf_threads = atoi(optarg);
+                break;
             case 'h':
                 usage();
                 return 0;
@@ -160,6 +166,7 @@ int taf_sort_main(int argc, char *argv[]) {
     //////////////////////////////////////////////
 
     st_setLogLevelFromString(logLevelString);
+    LI_set_bgzf_threads(bgzf_threads);
     st_logInfo("Input file string : %s\n", input_file);
     st_logInfo("Output file string : %s\n", output_file);
     st_logInfo("Sort file string : %s\n", sort_file);

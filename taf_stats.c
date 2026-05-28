@@ -18,6 +18,7 @@ static void usage(void) {
     fprintf(stderr, "-s --sequenceLengths : Print length of each *reference* sequence in the (indexed) alignment\n");
     fprintf(stderr, "-a --alignmentStats : Print stats about block number, aligned bases, etc.\n");
     fprintf(stderr, "-b --sequenceIntervals : Print the BED intervals of each *reference* sequence covered by the alignment\n");
+    fprintf(stderr, "-T --threads N : Use N threads for bgzf I/O (default 1, only effective on bgzipped streams)\n");
     fprintf(stderr, "-l --logLevel : Set the log level\n");
     fprintf(stderr, "-h --help : Print this help message\n");
 }
@@ -34,6 +35,7 @@ int taf_stats_main(int argc, char *argv[]) {
     bool seq_intervals = false;
     int stat_option_count = 0;
     bool alignment_stats = false;
+    int bgzf_threads = 1;
 
     ///////////////////////////////////////////////////////////////////////////
     // Parse the inputs
@@ -45,11 +47,12 @@ int taf_stats_main(int argc, char *argv[]) {
                                                 { "sequenceLengths", no_argument, 0, 's' },
                                                 { "alignmentStats", no_argument, 0, 'a' },
                                                 { "sequenceIntervals", no_argument, 0, 'b' },
+                                                { "threads", required_argument, 0, 'T' },
                                                 { "help", no_argument, 0, 'h' },
                                                 { 0, 0, 0, 0 } };
 
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:sbah", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:sbahT:", long_options, &option_index);
         if (key == -1) {
             break;
         }
@@ -73,6 +76,9 @@ int taf_stats_main(int argc, char *argv[]) {
                 seq_intervals = 1;
                 ++stat_option_count;
                 break;
+            case 'T':
+                bgzf_threads = atoi(optarg);
+                break;
             case 'h':
                 usage();
                 return 0;
@@ -81,12 +87,13 @@ int taf_stats_main(int argc, char *argv[]) {
                 return 1;
         }
     }
-    
+
     //////////////////////////////////////////////
     //Log the inputs
     //////////////////////////////////////////////
 
     st_setLogLevelFromString(logLevelString);
+    LI_set_bgzf_threads(bgzf_threads);
     st_logInfo("Input file string : %s\n", taf_fn);
 
     //////////////////////////////////////////////

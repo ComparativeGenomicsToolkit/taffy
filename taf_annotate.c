@@ -22,6 +22,7 @@ static void usage(void) {
     fprintf(stderr, "-s --repeatCoordinatesEveryNColumns : Repeat coordinates of each sequence at least every n columns. By default: %" PRIi64 "\n", repeat_coordinates_every_n_columns);
     fprintf(stderr, "-c --useCompression : Write the output using bgzip compression.\n");
     fprintf(stderr, "-r --refPrefix : Prefix to prepend to chrom names in annotation file to form the sequence name.\n");
+    fprintf(stderr, "-T --threads N : Use N threads for bgzf I/O (default 1, only effective on bgzipped streams)\n");
     fprintf(stderr, "-l --logLevel : Set the log level\n");
     fprintf(stderr, "-h --help : Print this help message\n");
 }
@@ -65,6 +66,7 @@ int taf_annotate_main(int argc, char *argv[]) {
     char *output_file = NULL;
     bool use_compression = 0;
     char *ref_prefix = "";
+    int bgzf_threads = 1;
 
     ///////////////////////////////////////////////////////////////////////////
     // Parse the inputs
@@ -79,11 +81,12 @@ int taf_annotate_main(int argc, char *argv[]) {
                                                 { "repeatCoordinatesEveryNColumns", required_argument, 0, 's' },
                                                 { "useCompression", no_argument, 0, 'c' },
                                                 { "refPrefix", required_argument, 0, 'r' },
+                                                { "threads", required_argument, 0, 'T' },
                                                 { "help", no_argument, 0, 'h' },
                                                 { 0, 0, 0, 0 } };
 
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:o:w:s:cr:ht:", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:o:w:s:cr:ht:T:", long_options, &option_index);
         if (key == -1) {
             break;
         }
@@ -113,6 +116,9 @@ int taf_annotate_main(int argc, char *argv[]) {
             case 'r':
                 ref_prefix = optarg;
                 break;
+            case 'T':
+                bgzf_threads = atoi(optarg);
+                break;
             case 'h':
                 usage();
                 return 0;
@@ -134,6 +140,7 @@ int taf_annotate_main(int argc, char *argv[]) {
     }
 
     st_setLogLevelFromString(logLevelString);
+    LI_set_bgzf_threads(bgzf_threads);
     st_logInfo("Input file string : %s\n", taf_file);
     st_logInfo("Output file string : %s\n", output_file);
     st_logInfo("Wig file string : %s\n", wig_file);
