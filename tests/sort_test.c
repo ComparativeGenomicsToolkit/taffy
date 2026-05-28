@@ -79,6 +79,25 @@ static void test_sort_filter_pad_and_dup_filter(CuTest *testCase) {
     }
 }
 
+// Verifies that taffy sort -i x.maf produces output identical to
+// taffy view -i x.maf | taffy sort. Per-tool dual-input regression
+// for the BlockReader migration.
+static void test_sort_maf_input(CuTest *testCase) {
+    char *example_file = "./tests/evolverMammals.maf.mini";
+    char *sort_file = "./tests/sort_file.txt";
+    char *piped_out = "./tests/sort.piped.taf";
+    char *direct_out = "./tests/sort.direct.taf";
+    int i = st_system("./bin/taffy view -i %s | ./bin/taffy sort -n %s --dontIgnoreFirstRow > %s",
+                      example_file, sort_file, piped_out);
+    CuAssertIntEquals(testCase, 0, i);
+    int j = st_system("./bin/taffy sort -i %s -n %s --dontIgnoreFirstRow -o %s",
+                      example_file, sort_file, direct_out);
+    CuAssertIntEquals(testCase, 0, j);
+    int diff_ret = st_system("diff %s %s", piped_out, direct_out);
+    CuAssertIntEquals(testCase, 0, diff_ret);
+    st_system("rm -f %s %s", piped_out, direct_out);
+}
+
 CuSuite* sort_test_suite(void) {
     CuSuite* suite = CuSuiteNew();
     SUITE_ADD_TEST(suite, test_sort);
@@ -86,5 +105,6 @@ CuSuite* sort_test_suite(void) {
     SUITE_ADD_TEST(suite, test_filter);
     SUITE_ADD_TEST(suite, test_filter_ignore_first_row);
     SUITE_ADD_TEST(suite, test_sort_filter_pad_and_dup_filter);
+    SUITE_ADD_TEST(suite, test_sort_maf_input);
     return suite;
 }

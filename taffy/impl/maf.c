@@ -4,9 +4,6 @@
 #include "taf.h"
 #include "sonLib.h"
 #include "line_iterator.h"
-#ifdef USE_HTSLIB
-#include "htslib/bgzf.h"
-#endif
 
 // Skip ' ' and '\t' (the only whitespace MAF uses inside a line).  LI strips
 // the trailing newline already so we don't need to worry about \r/\n here.
@@ -155,93 +152,37 @@ Tag *maf_read_header(LI *li) {
     return tag;
 }
 
-// Format an int64 into `buf` (no leading-zero handling, no NUL terminator).
-// Returns the number of bytes written.  Faster than snprintf because no
-// format-string parsing is involved.
-static inline int maf_i64_str(int64_t v, char *buf) {
-    if (v == 0) { *buf = '0'; return 1; }
-    int neg = v < 0;
-    uint64_t u = neg ? -(uint64_t)v : (uint64_t)v;
-    char tmp[24]; int n = 0;
-    do { tmp[n++] = '0' + (int)(u % 10); u /= 10; } while (u > 0);
-    int o = 0;
-    if (neg) buf[o++] = '-';
-    while (n > 0) buf[o++] = tmp[--n];
-    return o;
-}
-
-// Write `n` bytes to the LW, routing to bgzf or fh as the LW was opened with.
-// The bgzf branch matches LW_write's assert-on-short-write convention from
-// line_iterator.c.  fwrite's return is intentionally discarded -- LW_write
-// doesn't check it either, and any failure surfaces as a truncated output
-// file (md5sum-detectable) rather than a leaked error.
-//
-// n is size_t (not int) because column_number is int64_t in Alignment and we
-// were silently truncating very large columns through the (int) cast at the
-// call site.
-static inline void maf_lw_putn(LW *lw, const char *buf, size_t n) {
-#ifdef USE_HTSLIB
-    if (lw->bgzf) {
-        ssize_t r = bgzf_write(lw->bgzf, buf, n);
-        assert(r >= 0 && (size_t)r == n);
-        return;
-    }
-#endif
-    size_t r = fwrite(buf, 1, n, lw->fh);
-    (void)r;
-}
-
 void maf_write_block2(Alignment *alignment, LW *lw, bool color_bases) {
-    // Hot path: avoid vfprintf's format-string parsing on every row.  vfprintf
-    // walks "s\t%s\t%lld\t%lld\t%s\t%lld\t%s\n" once per row; at fish 50 Mb
-    // scale that was ~25% of CPU.  Build each row's preamble in a stack buffer
-    // with hand-rolled itoa + memcpy and emit it as a single write, then write
-    // the bases buffer (already a contiguous heap string) directly, then "\n".
-    //
-    // color_bases is a viewer-only path that mutates the base characters; keep
-    // it on the original LW_write/vfprintf code path -- it isn't perf-critical.
-    maf_lw_putn(lw, "a\n", 2);
-    int64_t cn = alignment->column_number;
+    // Hot path: avoid vfprintf's format-string parsing on every row.  At fish
+    // 50 Mb scale `vfprintf("s\t%s\t%lld\t%lld\t%s\t%lld\t%s\n", ...)` per row
+    // was ~25% of CPU.  We now write each field via the byte-level LW_put*
+    // API, which coalesces into 64 KB chunks before hitting bgzf_write -- so
+    // each row turns into a handful of memcpy/memset moves plus a hand-rolled
+    // itoa, with one bgzf_write per ~64 KB of output rather than per row.
+    LW_putn(lw, "a\n", 2);
     Alignment_Row *row = alignment->row;
     while(row != NULL) {
-        if (color_bases) {
-            char *cb = color_base_string(row->bases, cn);
-            LW_write(lw, "s\t%s\t%" PRIi64 "\t%" PRIi64 "\t%s\t%" PRIi64 "\t%s\n",
-                     row->sequence_name, row->start, row->length,
-                     row->strand ? "+" : "-", row->sequence_length, cb);
-            free(cb);
-            row = row->n_row;
-            continue;
+        char *bases = color_bases ? color_base_string(row->bases, alignment->column_number) : row->bases;
+        // "s\t%s\t%" PRIi64 "\t%" PRIi64 "\t%s\t%" PRIi64 "\t%s\n"
+        LW_putn(lw, "s\t", 2);
+        LW_puts(lw, row->sequence_name);
+        LW_putc(lw, '\t');
+        LW_puti64(lw, row->start);
+        LW_putc(lw, '\t');
+        LW_puti64(lw, row->length);
+        LW_putc(lw, '\t');
+        LW_putc(lw, row->strand ? '+' : '-');
+        LW_putc(lw, '\t');
+        LW_puti64(lw, row->sequence_length);
+        LW_putc(lw, '\t');
+        LW_puts(lw, bases);
+        LW_putc(lw, '\n');
+        if(color_bases) {
+            free(bases);
         }
-        // Compose the preamble: "s\t<name>\t<start>\t<length>\t<strand>\t<seqLen>\t"
-        // Worst-case bytes written: 2 ('s'\t) + name_n + 5 ('\t' × 5) + 1
-        // (strand char) + 3 × 20 (max int64 decimal width including sign) = 68
-        // + name_n.  Budget 80 + name_n against 1024 so any name shorter than
-        // 944 chars takes the fast path; longer names fall back to LW_write.
-        char pre[1024];
-        const char *name = row->sequence_name;
-        size_t name_n = strlen(name);
-        if (name_n + 80 >= sizeof(pre)) {
-            LW_write(lw, "s\t%s\t%" PRIi64 "\t%" PRIi64 "\t%s\t%" PRIi64 "\t%s\n",
-                     name, row->start, row->length,
-                     row->strand ? "+" : "-", row->sequence_length, row->bases);
-            row = row->n_row;
-            continue;
-        }
-        int k = 0;
-        pre[k++] = 's'; pre[k++] = '\t';
-        memcpy(pre + k, name, name_n); k += (int)name_n; pre[k++] = '\t';
-        k += maf_i64_str(row->start, pre + k); pre[k++] = '\t';
-        k += maf_i64_str(row->length, pre + k); pre[k++] = '\t';
-        pre[k++] = row->strand ? '+' : '-'; pre[k++] = '\t';
-        k += maf_i64_str(row->sequence_length, pre + k); pre[k++] = '\t';
-
-        maf_lw_putn(lw, pre, (size_t)k);
-        maf_lw_putn(lw, row->bases, (size_t)cn);
-        maf_lw_putn(lw, "\n", 1);
         row = row->n_row;
     }
-    maf_lw_putn(lw, "\n", 1);   // Add a blank line at the end of the block
+    LW_putc(lw, '\n'); // Add a blank line at the end of the block
 }
 
 void maf_write_block(Alignment *alignment, LW *lw) {

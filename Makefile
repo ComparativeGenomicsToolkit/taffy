@@ -37,8 +37,8 @@ stTafDependencies = ${sonLibDir}/sonLib.a ${sonLibDir}/cuTest.a ${LIBDIR}/libabp
 ${oneCodeDir}/ONElib.o : ${oneCodeDir}/ONElib.c ${oneCodeDir}/ONElib.h
 	${CC} ${CFLAGS} ${LDFLAGS} -fPIC -o ${oneCodeDir}/ONElib.o -c ${oneCodeDir}/ONElib.c
 
-${LIBDIR}/libstTaf.a : ${libTests} ${libHeaders} ${srcDir}/alignment_block.o ${srcDir}/line_iterator.o ${srcDir}/maf.o ${srcDir}/paf.o ${srcDir}/ond.o ${srcDir}/taf.o ${srcDir}/add_gap_bases.o ${srcDir}/merge_adjacent_alignments.o ${srcDir}/prefix_sort.o ${srcDir}/wiggle.o ${srcDir}/tai.o ${srcDir}/tui.o ${oneCodeDir}/ONElib.o ${libHeaders} ${stTafDependencies}
-	${AR} rc libstTaf.a ${srcDir}/alignment_block.o ${srcDir}/line_iterator.o ${srcDir}/maf.o ${srcDir}/paf.o ${srcDir}/ond.o ${srcDir}/taf.o ${srcDir}/add_gap_bases.o ${srcDir}/merge_adjacent_alignments.o ${srcDir}/prefix_sort.o ${srcDir}/wiggle.o ${srcDir}/tai.o ${srcDir}/tui.o ${oneCodeDir}/ONElib.o
+${LIBDIR}/libstTaf.a : ${libTests} ${libHeaders} ${srcDir}/alignment_block.o ${srcDir}/line_iterator.o ${srcDir}/maf.o ${srcDir}/paf.o ${srcDir}/ond.o ${srcDir}/taf.o ${srcDir}/add_gap_bases.o ${srcDir}/merge_adjacent_alignments.o ${srcDir}/prefix_sort.o ${srcDir}/wiggle.o ${srcDir}/tai.o ${srcDir}/tui.o ${srcDir}/block_reader.o ${srcDir}/remote_io.o ${oneCodeDir}/ONElib.o ${libHeaders} ${stTafDependencies}
+	${AR} rc libstTaf.a ${srcDir}/alignment_block.o ${srcDir}/line_iterator.o ${srcDir}/maf.o ${srcDir}/paf.o ${srcDir}/ond.o ${srcDir}/taf.o ${srcDir}/add_gap_bases.o ${srcDir}/merge_adjacent_alignments.o ${srcDir}/prefix_sort.o ${srcDir}/wiggle.o ${srcDir}/tai.o ${srcDir}/tui.o ${srcDir}/block_reader.o ${srcDir}/remote_io.o ${oneCodeDir}/ONElib.o
 	mv libstTaf.a ${LIBDIR}/
 
 ${srcDir}/alignment_block.o : ${srcDir}/alignment_block.c ${libHeaders}
@@ -74,8 +74,14 @@ ${srcDir}/tui.o : ${srcDir}/tui.c ${libHeaders} ${oneCodeDir}/ONElib.o
 ${srcDir}/prefix_sort.o : ${srcDir}/prefix_sort.c ${libHeaders}
 	${CC} ${CFLAGS} ${LDFLAGS} -o ${srcDir}/prefix_sort.o -c ${srcDir}/prefix_sort.c
 
+${srcDir}/block_reader.o : ${srcDir}/block_reader.c ${libHeaders}
+	${CC} ${CFLAGS} ${LDFLAGS} -o ${srcDir}/block_reader.o -c ${srcDir}/block_reader.c
+
 ${srcDir}/wiggle.o : ${srcDir}/wiggle.c ${libHeaders}
 	${CC} ${CFLAGS} ${LDFLAGS} -o ${srcDir}/wiggle.o -c ${srcDir}/wiggle.c
+
+${srcDir}/remote_io.o : ${srcDir}/remote_io.c ${libHeaders}
+	${CC} ${CFLAGS} ${LDFLAGS} -o ${srcDir}/remote_io.o -c ${srcDir}/remote_io.c
 
 ${BINDIR}/stTafTests : ${libTests} ${LIBDIR}/libstTaf.a ${stTafDependencies}
 	${CC} ${CFLAGS} ${LDFLAGS} -o ${BINDIR}/stTafTests ${libTests} ${LIBDIR}/libstTaf.a ${LDLIBS}

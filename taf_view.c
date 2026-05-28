@@ -7,6 +7,7 @@
 #include "taf.h"
 #include "tai.h"
 #include "tui.h"
+#include "remote_io.h"
 #include "sonLib.h"
 #include <getopt.h>
 #include <time.h>
@@ -40,6 +41,7 @@ static void usage(void) {
     fprintf(stderr, "-d --omitCoordinates : When printing TAF, just print the columns omitting the coordinates. THIS IS FOR VISUALIZATION ONLY - DOES NOT PRODUCE A VALID TAF \n");
     fprintf(stderr, "-c --useCompression : Write the output using bgzip compression.\n");
     fprintf(stderr, "-n --nameMapFile : Apply the given two-column tab-separated name mapping to all assembly names in alignment\n");
+    fprintf(stderr, "-T --threads N : Use N threads for bgzf I/O (default 1, only effective on bgzipped streams)\n");
     fprintf(stderr, "-l --logLevel : Set the log level\n");
     fprintf(stderr, "-h --help : Print this help message\n");
 }
@@ -102,6 +104,7 @@ int taf_view_main(int argc, char *argv[]) {
     char *phylogeny_file = NULL;
     static bool color_bases = false;
     bool omit_coordinates = false;
+    int bgzf_threads = 1;
 
     ///////////////////////////////////////////////////////////////////////////
     // Parse the inputs
@@ -126,11 +129,12 @@ int taf_view_main(int argc, char *argv[]) {
                                                 { "universal", required_argument, 0, 'U' },
                                                 { "useCompression", no_argument, 0, 'c' },
                                                 { "nameMapFile", required_argument, 0, 'n' },
+                                                { "threads", required_argument, 0, 'T' },
                                                 { "help", no_argument, 0, 'h' },
                                                 { 0, 0, 0, 0 } };
 
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:o:mPpCaucs:r:n:habxt:dU:", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:o:mPpCaucs:r:n:habxt:dU:T:", long_options, &option_index);
         if (key == -1) {
             break;
         }
@@ -197,6 +201,9 @@ int taf_view_main(int argc, char *argv[]) {
             case 'n':
                 nameMapFile = optarg;
                 break;
+            case 'T':
+                bgzf_threads = atoi(optarg);
+                break;
             case 'h':
                 usage();
                 return 0;
@@ -211,6 +218,7 @@ int taf_view_main(int argc, char *argv[]) {
     //////////////////////////////////////////////
 
     st_setLogLevelFromString(logLevelString);
+    LI_set_bgzf_threads(bgzf_threads);
     st_logInfo("Input file string : %s\n", inputFile);
     st_logInfo("Output file string : %s\n", outputFile);
     st_logInfo("Write compressed output : %s\n", use_compression ? "true" : "false");
@@ -233,9 +241,19 @@ int taf_view_main(int argc, char *argv[]) {
         return 1;
     }
 
-    FILE *input = inputFile == NULL ? stdin : fopen(inputFile, "r");
-    if (input == NULL) {
-        fprintf(stderr, "Unable to open input file: %s\n", inputFile);
+    /* For URL inputs (only meaningful with -r region queries) we'll skip the
+     * local fopen; LI is constructed via bgzf_open which goes through htslib's
+     * URL-aware backend. */
+    bool input_is_url = inputFile != NULL && is_url(inputFile);
+    FILE *input = NULL;
+    if (!input_is_url) {
+        input = inputFile == NULL ? stdin : fopen(inputFile, "r");
+        if (input == NULL) {
+            fprintf(stderr, "Unable to open input file: %s\n", inputFile);
+            return 1;
+        }
+    } else if (region == NULL) {
+        fprintf(stderr, "URL inputs are only supported with -r region queries\n");
         return 1;
     }
 
@@ -261,7 +279,10 @@ int taf_view_main(int argc, char *argv[]) {
     }
     
     LW *output = LW_construct(output_fh, use_compression);
-    LI *li = LI_construct(input);
+    LI *li = input_is_url ? LI_construct_from_path(inputFile) : LI_construct(input);
+    if (li == NULL) {
+        return 1;
+    }
 
     // sniff the format
     int input_format = check_input_format(LI_peek_at_next_line(li));
@@ -349,8 +370,10 @@ int taf_view_main(int argc, char *argv[]) {
       // present: .tui wins.  -U <mode> picks the OUTPUT shape (default
       // ancestor).  -U passed but no .tui -> error (don't silently downgrade).
       // (The -U-but-no-.tui case is already caught pre-header above.)
-      char *tui_fn = tui_path(inputFile);
-      bool tui_present = (access(tui_fn, F_OK) == 0);
+      // URL inputs skip the .tui path: there is no remote .tui resolver
+      // yet, and access(F_OK) on a URL would fail spuriously anyway.
+      char *tui_fn = input_is_url ? NULL : tui_path(inputFile);
+      bool tui_present = (tui_fn != NULL && access(tui_fn, F_OK) == 0);
       if (tui_present) {
         bool tcol_input = (strcmp(region_seq, "tcol") == 0);
         if (tcol_input && universal_mode == U_MODE_QUERY) {
@@ -442,8 +465,8 @@ int taf_view_main(int argc, char *argv[]) {
       } else {
         free(tui_fn);
 
-        char *tai_fn = tai_path(inputFile);
-        FILE *tai_fh = fopen(tai_fn, "r");
+        char *tai_fn = input_is_url ? tai_path_for(inputFile) : tai_path(inputFile);
+        FILE *tai_fh = open_tai_for_reading(tai_fn);
         if (tai_fh == NULL) {
             fprintf(stderr, "Index %s not found. Please run taffy index first\n", tai_fn);
             free(tai_fn);
@@ -561,7 +584,7 @@ int taf_view_main(int argc, char *argv[]) {
     //////////////////////////////////////////////
 
     LI_destruct(li);
-    if(inputFile != NULL) {
+    if (inputFile != NULL && !input_is_url) {
         fclose(input);
     }
     LW_destruct(output, outputFile != NULL);

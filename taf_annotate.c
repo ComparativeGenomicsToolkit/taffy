@@ -6,6 +6,7 @@
 
 #include "taf.h"
 #include "tai.h"
+#include "block_reader.h"
 #include "sonLib.h"
 #include <getopt.h>
 #include <time.h>
@@ -15,12 +16,13 @@ static int64_t repeat_coordinates_every_n_columns = 10000;
 static void usage(void) {
     fprintf(stderr, "taffy annotate [options]\n");
     fprintf(stderr, "Annotate the columns of a taf file using wiggle file\n");
-    fprintf(stderr, "-i --inputFile : Input TAF file. If not specified reads from stdin\n");
+    fprintf(stderr, "-i --inputFile : Input TAF or MAF file. If not specified reads from stdin. Output is always TAF (column tags have no MAF representation)\n");
     fprintf(stderr, "-w --wiggle [FILE_NAME] : REQUIRED The input wiggle file\n");
     fprintf(stderr, "-t --tagName [STRING] : REQUIRED: The name of the tag to annotate for the given wiggle\n");
     fprintf(stderr, "-s --repeatCoordinatesEveryNColumns : Repeat coordinates of each sequence at least every n columns. By default: %" PRIi64 "\n", repeat_coordinates_every_n_columns);
     fprintf(stderr, "-c --useCompression : Write the output using bgzip compression.\n");
     fprintf(stderr, "-r --refPrefix : Prefix to prepend to chrom names in annotation file to form the sequence name.\n");
+    fprintf(stderr, "-T --threads N : Use N threads for bgzf I/O (default 1, only effective on bgzipped streams)\n");
     fprintf(stderr, "-l --logLevel : Set the log level\n");
     fprintf(stderr, "-h --help : Print this help message\n");
 }
@@ -64,6 +66,7 @@ int taf_annotate_main(int argc, char *argv[]) {
     char *output_file = NULL;
     bool use_compression = 0;
     char *ref_prefix = "";
+    int bgzf_threads = 1;
 
     ///////////////////////////////////////////////////////////////////////////
     // Parse the inputs
@@ -78,11 +81,12 @@ int taf_annotate_main(int argc, char *argv[]) {
                                                 { "repeatCoordinatesEveryNColumns", required_argument, 0, 's' },
                                                 { "useCompression", no_argument, 0, 'c' },
                                                 { "refPrefix", required_argument, 0, 'r' },
+                                                { "threads", required_argument, 0, 'T' },
                                                 { "help", no_argument, 0, 'h' },
                                                 { 0, 0, 0, 0 } };
 
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:o:w:s:cr:ht:", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:o:w:s:cr:ht:T:", long_options, &option_index);
         if (key == -1) {
             break;
         }
@@ -112,6 +116,9 @@ int taf_annotate_main(int argc, char *argv[]) {
             case 'r':
                 ref_prefix = optarg;
                 break;
+            case 'T':
+                bgzf_threads = atoi(optarg);
+                break;
             case 'h':
                 usage();
                 return 0;
@@ -133,6 +140,7 @@ int taf_annotate_main(int argc, char *argv[]) {
     }
 
     st_setLogLevelFromString(logLevelString);
+    LI_set_bgzf_threads(bgzf_threads);
     st_logInfo("Input file string : %s\n", taf_file);
     st_logInfo("Output file string : %s\n", output_file);
     st_logInfo("Wig file string : %s\n", wig_file);
@@ -143,23 +151,23 @@ int taf_annotate_main(int argc, char *argv[]) {
     // Open the inputs and outputs and parse the labels to annotate
     //////////////////////////////////////////////
 
-    // load the input
+    // load the input (TAF or MAF -- BlockReader sniffs and dispatches)
     FILE *taf_fh = taf_file == NULL ? stdin : fopen(taf_file, "r");
     if (taf_fh == NULL) {
-        fprintf(stderr, "Unable to open input TAF file: %s\n", taf_file);
+        fprintf(stderr, "Unable to open input TAF/MAF file: %s\n", taf_file);
         return 1;
     }
     LI *li = LI_construct(taf_fh);
-
-    // Check is a taf file
-    if (check_input_format(LI_peek_at_next_line(li)) != 0) {
-        fprintf(stderr, "Input not supported: requires #taf header\n");
+    BlockReader *reader = block_reader_open(li);
+    if (reader == NULL) {
+        LI_destruct(li);
+        if (taf_file != NULL) fclose(taf_fh);
         return 1;
     }
-
-    // Check if run_length_encode_bases is set and read header
-    bool run_length_encode_bases = 0;
-    Tag *tag = taf_read_header_2(li, &run_length_encode_bases);
+    // Output is TAF regardless of input format. For MAF input we won't run-length encode the
+    // body (annotate has no flag to opt in); for TAF input we preserve the input's RLE setting.
+    bool run_length_encode_bases = block_reader_run_length_encoded(reader);
+    Tag *tag = block_reader_take_header(reader);
 
     // Load the wiggle file, making coordinates 0 based
     stHash *labels = wig_parse(wig_file, ref_prefix, 1);
@@ -183,7 +191,7 @@ int taf_annotate_main(int argc, char *argv[]) {
     Alignment *alignment = NULL;
     Alignment *p_alignment = NULL;
     // Keep reading blocks while available
-    while((alignment = taf_read_block(p_alignment, run_length_encode_bases, li)) != NULL) {
+    while ((alignment = block_reader_next(reader, p_alignment)) != NULL) {
         label_alignment(alignment, labels, tag_name); // Make any changes to the alignment for output
 
         // Write back the labelled taf
@@ -204,6 +212,7 @@ int taf_annotate_main(int argc, char *argv[]) {
     // Cleanup
     //////////////////////////////////////////////
 
+    block_reader_destruct(reader);
     LI_destruct(li);
     if(taf_file != NULL) {
         fclose(taf_fh);

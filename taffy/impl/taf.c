@@ -287,24 +287,44 @@ Tag *taf_read_header_2(LI *li, bool *run_length_encode_bases) {
 static void write_base(char base, int64_t base_count, LW *lw, bool run_length_encode_bases, bool color_bases) {
     if(base != '\0') {
         if(run_length_encode_bases) {
-            LW_write(lw, "%c %" PRIi64 " ", base, base_count);
+            // "%c %" PRIi64 " "
+            LW_putc(lw, base);
+            LW_putc(lw, ' ');
+            LW_puti64(lw, base_count);
+            LW_putc(lw, ' ');
+        }
+        else if (color_bases) {
+            for (int64_t i = 0; i < base_count; i++) {
+                char *colored_base_string = color_base_char(base);
+                LW_puts(lw, colored_base_string);
+                free(colored_base_string);
+            }
         }
         else {
-            for (int64_t i = 0; i < base_count; i++) {
-                if(color_bases) {
-                    char *colored_base_string = color_base_char(base);
-                    LW_write(lw, colored_base_string);
-                    free(colored_base_string);
-                }
-                else {
-                    LW_write(lw, "%c", base);
-                }
-            }
+            // Unencoded fast path: one memset of `base` repeated base_count
+            // times beats base_count separate LW_putc calls (each was a
+            // branch + store + load even after inlining; this is a single
+            // memcpy/memset cycle).
+            LW_putrep(lw, base, (size_t)base_count);
         }
     }
 }
 
 void write_column(Alignment_Row *row, int64_t column, LW *lw, bool run_length_encode_bases, bool color_bases) {
+    // Fast unencoded, non-coloured path -- no run tracking, just emit
+    // each row's base as a byte.  This is the steady-state TAF write at
+    // default settings.  Skipping the run-counting if/else per row was a
+    // measurable win in callgrind.
+    if (!run_length_encode_bases && !color_bases) {
+        while (row != NULL) {
+            LW_putc(lw, row->bases[column]);
+            row = row->n_row;
+        }
+        return;
+    }
+    // Run-length-encoded or coloured: walk rows accumulating runs of
+    // equal bases, then defer the actual emission to write_base which
+    // handles both encodings.
     char base = '\0';
     int64_t base_count = 0;
     while(row != NULL) {
@@ -321,12 +341,33 @@ void write_column(Alignment_Row *row, int64_t column, LW *lw, bool run_length_en
     write_base(base, base_count, lw, run_length_encode_bases, color_bases);
 }
 
+// " i/s %" PRIi64 " %s %" PRIi64 " %c %" PRIi64 ""
+// kind: 'i' (inserted) or 's' (substituted/re-anchored)
+static inline void write_row_anchor(LW *lw, char kind, int64_t i,
+                                    const char *seq_name, int64_t start,
+                                    char strand, int64_t seq_length) {
+    LW_putc(lw, ' ');
+    LW_putc(lw, kind);
+    LW_putc(lw, ' ');
+    LW_puti64(lw, i);
+    LW_putc(lw, ' ');
+    LW_puts(lw, seq_name);
+    LW_putc(lw, ' ');
+    LW_puti64(lw, start);
+    LW_putc(lw, ' ');
+    LW_putc(lw, strand);
+    LW_putc(lw, ' ');
+    LW_puti64(lw, seq_length);
+}
+
 void write_coordinates(Alignment_Row *p_row, Alignment_Row *row, int64_t repeat_coordinates_every_n_columns, LW *lw) {
     int64_t i = 0;
-    LW_write(lw, " ;");
+    LW_putn(lw, " ;", 2);
     while(p_row != NULL) { // Write any row deletions
         if(p_row->r_row == NULL) { // if the row is deleted
-            LW_write(lw, " d %" PRIi64 "", i);
+            // " d %" PRIi64
+            LW_putn(lw, " d ", 3);
+            LW_puti64(lw, i);
         }
         else { // Only update the index is the row is not deleted
             i++;
@@ -339,11 +380,11 @@ void write_coordinates(Alignment_Row *p_row, Alignment_Row *row, int64_t repeat_
     // reference contig, and somewhat evenly spaced along every reference contig.
     // this flag detects such cases (looking at row 0) and then triggers every other row to report
     // coordinates if it is set.
-    bool report_everything = false; 
+    bool report_everything = false;
     while(row != NULL) { // Now write the new rows
         if(row->l_row == NULL) { // if the row is inserted
-            LW_write(lw, " i %" PRIi64 " %s %" PRIi64 " %c %" PRIi64 "",
-                    i, row->sequence_name, row->start, row->strand ? '+' : '-', row->sequence_length);
+            write_row_anchor(lw, 'i', i, row->sequence_name, row->start,
+                             row->strand ? '+' : '-', row->sequence_length);
             row->bases_since_coordinates_reported = 0;
             if (i == 0) {
                 report_everything = true;
@@ -360,8 +401,8 @@ void write_coordinates(Alignment_Row *p_row, Alignment_Row *row, int64_t repeat_
                    row->bases_since_coordinates_reported > repeat_coordinates_every_n_columns)) { // Report the coordinates again
                     // so they are easy to find
                     row->bases_since_coordinates_reported = 0;
-                    LW_write(lw, " s %" PRIi64 " %s %" PRIi64 " %c %" PRIi64 "",
-                            i, row->sequence_name, row->start, row->strand ? '+' : '-', row->sequence_length);
+                    write_row_anchor(lw, 's', i, row->sequence_name, row->start,
+                                     row->strand ? '+' : '-', row->sequence_length);
                     if (i == 0) {
                         report_everything = true;
                     }
@@ -371,18 +412,26 @@ void write_coordinates(Alignment_Row *p_row, Alignment_Row *row, int64_t repeat_
                     if(gap_length > 0) { // if there is an indel
                         if(row->left_gap_sequence != NULL) {
                             assert(strlen(row->left_gap_sequence) == gap_length);
-                            LW_write(lw, " G %" PRIi64 " %s", i, row->left_gap_sequence);
+                            // " G %" PRIi64 " %s"
+                            LW_putn(lw, " G ", 3);
+                            LW_puti64(lw, i);
+                            LW_putc(lw, ' ');
+                            LW_puts(lw, row->left_gap_sequence);
                         }
                         else {
-                            LW_write(lw, " g %" PRIi64 " %" PRIi64 "", i, gap_length);
+                            // " g %" PRIi64 " %" PRIi64
+                            LW_putn(lw, " g ", 3);
+                            LW_puti64(lw, i);
+                            LW_putc(lw, ' ');
+                            LW_puti64(lw, gap_length);
                         }
                     }
                 }
             }
             else { // Substitute one row for another
                 row->bases_since_coordinates_reported = 0;
-                LW_write(lw, " s %" PRIi64 " %s %" PRIi64 " %c %" PRIi64 "",
-                        i, row->sequence_name, row->start, row->strand ? '+' : '-', row->sequence_length);
+                write_row_anchor(lw, 's', i, row->sequence_name, row->start,
+                                 row->strand ? '+' : '-', row->sequence_length);
             }
         }
         row = row->n_row; i++;
@@ -404,7 +453,7 @@ void taf_write_block2(Alignment *p_alignment, Alignment *alignment, bool run_len
             if (alignment->column_tags != NULL && alignment->column_tags[0] != NULL) {
                 write_header(alignment->column_tags[0], lw, " @", ":", "");
             }
-            LW_write(lw, "\n");
+            LW_putc(lw, '\n');
         }
         for(int64_t i=1; i<column_no; i++) {
             write_column(row, i, lw, run_length_encode_bases, color_bases);
@@ -413,7 +462,7 @@ void taf_write_block2(Alignment *p_alignment, Alignment *alignment, bool run_len
                     write_header(alignment->column_tags[i], lw, " @", ":", "");
                 }
             }
-            LW_write(lw, "\n");
+            LW_putc(lw, '\n');
         }
     }
 }

@@ -6,6 +6,7 @@
 
 #include "taf.h"
 #include "tai.h"
+#include "block_reader.h"
 #include "sonLib.h"
 #include <getopt.h>
 #include <time.h>
@@ -17,6 +18,7 @@ static void usage(void) {
     fprintf(stderr, "-s --sequenceLengths : Print length of each *reference* sequence in the (indexed) alignment\n");
     fprintf(stderr, "-a --alignmentStats : Print stats about block number, aligned bases, etc.\n");
     fprintf(stderr, "-b --sequenceIntervals : Print the BED intervals of each *reference* sequence covered by the alignment\n");
+    fprintf(stderr, "-T --threads N : Use N threads for bgzf I/O (default 1, only effective on bgzipped streams)\n");
     fprintf(stderr, "-l --logLevel : Set the log level\n");
     fprintf(stderr, "-h --help : Print this help message\n");
 }
@@ -33,6 +35,7 @@ int taf_stats_main(int argc, char *argv[]) {
     bool seq_intervals = false;
     int stat_option_count = 0;
     bool alignment_stats = false;
+    int bgzf_threads = 1;
 
     ///////////////////////////////////////////////////////////////////////////
     // Parse the inputs
@@ -44,11 +47,12 @@ int taf_stats_main(int argc, char *argv[]) {
                                                 { "sequenceLengths", no_argument, 0, 's' },
                                                 { "alignmentStats", no_argument, 0, 'a' },
                                                 { "sequenceIntervals", no_argument, 0, 'b' },
+                                                { "threads", required_argument, 0, 'T' },
                                                 { "help", no_argument, 0, 'h' },
                                                 { 0, 0, 0, 0 } };
 
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:sbah", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:sbahT:", long_options, &option_index);
         if (key == -1) {
             break;
         }
@@ -72,6 +76,9 @@ int taf_stats_main(int argc, char *argv[]) {
                 seq_intervals = 1;
                 ++stat_option_count;
                 break;
+            case 'T':
+                bgzf_threads = atoi(optarg);
+                break;
             case 'h':
                 usage();
                 return 0;
@@ -80,12 +87,13 @@ int taf_stats_main(int argc, char *argv[]) {
                 return 1;
         }
     }
-    
+
     //////////////////////////////////////////////
     //Log the inputs
     //////////////////////////////////////////////
 
     st_setLogLevelFromString(logLevelString);
+    LI_set_bgzf_threads(bgzf_threads);
     st_logInfo("Input file string : %s\n", taf_fn);
 
     //////////////////////////////////////////////
@@ -105,19 +113,30 @@ int taf_stats_main(int argc, char *argv[]) {
     }
     LI *li = LI_construct(taf_fh);
 
-    // sniff the format
-    int input_format = check_input_format(LI_peek_at_next_line(li));
-    if (input_format == 2) {
-        fprintf(stderr, "Input not supported: unable to detect ##maf or #taf header\n");
-        return 1;
-    } else if (input_format != 0 && seq_intervals) {
-        fprintf(stderr, "MAF input detected but -b only works with TAF input. Please use taffy view to convert\n");
-        return 1;
-    }
-    // parse the header
-    bool run_length_encode_bases = 0;
-    if(input_format == 0) {  // Is taf, check if run_length_encode_bases is set
-        tag_destruct(taf_read_header_2(li, &run_length_encode_bases));
+    // open a format-agnostic reader (handles MAF or TAF)
+    BlockReader *reader = NULL;
+    bool input_is_maf = false;
+    if (!seq_lengths) {
+        // seq_lengths goes through tai_sequence_lengths which manages its own header reading;
+        // for the other paths we need to consume the header up-front via BlockReader
+        reader = block_reader_open(li);
+        if (reader == NULL) {
+            LI_destruct(li);
+            if (taf_fn != NULL) fclose(taf_fh);
+            return 1;
+        }
+        input_is_maf = block_reader_is_maf(reader);
+        tag_destruct(block_reader_take_header(reader));
+    } else {
+        // for -s we still need to know the format to load the index correctly
+        int input_format = check_input_format(LI_peek_at_next_line(li));
+        if (input_format != 0 && input_format != 1) {
+            fprintf(stderr, "Input not supported: unable to detect ##maf or #taf header\n");
+            LI_destruct(li);
+            if (taf_fn != NULL) fclose(taf_fh);
+            return 1;
+        }
+        input_is_maf = (input_format == 1);
     }
 
     // load the index if it's required by the given options
@@ -136,7 +155,7 @@ int taf_stats_main(int argc, char *argv[]) {
             fprintf(stderr, "Required index %s not found. Please run taffy index first\n", tai_fn);
             return 1;
         }
-        tai = tai_load(tai_fh, input_format == 1);
+        tai = tai_load(tai_fh, input_is_maf);
     }
 
     // do the stats
@@ -155,7 +174,7 @@ int taf_stats_main(int argc, char *argv[]) {
         char *cur_seq = NULL;
         int64_t cur_start = -1;
         int64_t cur_end = 0;
-        while((alignment = taf_read_block(p_alignment, run_length_encode_bases, li)) != NULL) {
+        while ((alignment = block_reader_next(reader, p_alignment)) != NULL) {
             if (alignment->row_number > 0) {
                 if (!cur_seq || strcmp(cur_seq, alignment->row->sequence_name) != 0 || alignment->row->start != cur_end) {
                     if (cur_seq) {
@@ -187,16 +206,7 @@ int taf_stats_main(int argc, char *argv[]) {
     if(alignment_stats) {
         int64_t total_blocks = 0, total_columns = 0, total_aligned_bases = 0, total_gaps = 0, total_column_depth = 0;
         Alignment *alignment, *p_alignment = NULL;
-        while(1) {
-            if(input_format == 0) {
-                alignment = taf_read_block(p_alignment, run_length_encode_bases, li);
-            }
-            else {
-                alignment = maf_read_block(li);
-            }
-            if(!alignment) {  // No more blocks
-                break;
-            }
+        while ((alignment = block_reader_next(reader, p_alignment)) != NULL) {
             total_blocks++;
             total_columns += alignment_length(alignment);
             total_column_depth += alignment_length(alignment) * alignment->row_number;
@@ -237,7 +247,8 @@ int taf_stats_main(int argc, char *argv[]) {
         free(tai_fn);
         tai_destruct(tai);
     }
-    
+
+    block_reader_destruct(reader);
     LI_destruct(li);
     if(taf_fn != NULL) {
         fclose(taf_fh);

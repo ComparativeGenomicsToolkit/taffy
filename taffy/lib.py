@@ -35,21 +35,38 @@ def _dictionary_to_c_tags(tags):
     return first_c_tag
 
 
+def _is_url(file_string_or_handle):
+    """ True if the argument is a string that looks like a URL (e.g. http://, s3://). """
+    return isinstance(file_string_or_handle, str) and "://" in file_string_or_handle
+
+
 def _check_file_exists(file_string_or_handle):
-    """ Used to check that expected file strings exist, creates FileNotFoundError if not"""
-    if isinstance(file_string_or_handle, str):  # If is a file string
+    """ Used to check that expected file strings exist, creates FileNotFoundError if not.
+        URLs are skipped -- their reachability is checked at open time by htslib. """
+    if isinstance(file_string_or_handle, str) and not _is_url(file_string_or_handle):
         p = Path(file_string_or_handle)
         if not p.is_file():
             raise FileNotFoundError(f"The file {file_string_or_handle} doesn't exist")
 
 
 def _get_c_file_handle(file_string_or_handle, modifier_string="r"):
-    """ Gets the c file handle for file, which can be either a file string
-     or a file handle. If file handle you can set the modifier string.
-     Note the Python file handle is *way* slower
+    """ Gets the c file handle for file, which can be either a file string,
+     a URL string, or a file handle. If a file handle you can set the modifier string.
+     For URLs we go through open_tai_for_reading which slurps via htslib's hFILE
+     into a tmpfile -- this is the same path used by `taffy view -r` for the .tai.
+     Note the Python file handle is *way* slower than passing a path string.
      """
-    return lib.fopen(_to_c_string(file_string_or_handle), _to_c_string(modifier_string)) if \
-        isinstance(file_string_or_handle, str) else ffi.cast("FILE *", file_string_or_handle)
+    if isinstance(file_string_or_handle, str):
+        if _is_url(file_string_or_handle):
+            if modifier_string != "r":
+                raise ValueError("URL inputs are read-only")
+            fh = lib.open_tai_for_reading(_to_c_string(file_string_or_handle))
+            if fh == ffi.NULL:
+                raise IOError(f"Unable to open URL {file_string_or_handle} (htslib hopen failed; "
+                              f"is htslib built with libcurl?)")
+            return fh
+        return lib.fopen(_to_c_string(file_string_or_handle), _to_c_string(modifier_string))
+    return ffi.cast("FILE *", file_string_or_handle)
 
 
 class Alignment:
@@ -260,9 +277,18 @@ class AlignmentReader:
         self.make_row_links = make_row_links  # Optionally store links between rows
         _check_file_exists(file)
         self.file = file
-        self.c_file_handle = _get_c_file_handle(file)
         self.file_string_not_handle = isinstance(file, str)  # Will be true if the file is a string, not a file handle
-        self.c_li_handle = lib.LI_construct(self.c_file_handle)
+        # For URL inputs we route through LI_construct_from_path (htslib URL-aware bgzf_open)
+        # rather than fopen+LI_construct, since fopen can't open URLs.
+        if _is_url(file):
+            self.c_file_handle = ffi.NULL
+            self.c_li_handle = lib.LI_construct_from_path(_to_c_string(file))
+            if self.c_li_handle == ffi.NULL:
+                raise IOError(f"Unable to open URL {file} (htslib bgzf_open failed; "
+                              f"is htslib built with libcurl?)")
+        else:
+            self.c_file_handle = _get_c_file_handle(file)
+            self.c_li_handle = lib.LI_construct(self.c_file_handle)
         i = lib.check_input_format(lib.LI_peek_at_next_line(self.c_li_handle))
         if i not in (0, 1):
             raise RuntimeError("Input file is not a TAF or MAF file")
@@ -380,7 +406,9 @@ class AlignmentReader:
         if self.taf_index:
             lib.tai_iterator_destruct(self._c_taf_index_it)
         lib.LI_destruct(self.c_li_handle)  # Cleanup the allocated line iterator
-        if self.file_string_not_handle:  # Close the underlying file handle
+        if self.file_string_not_handle and self.c_file_handle != ffi.NULL:
+            # URL-backed readers don't have a separate FILE* (LI_construct_from_path
+            # owns the BGZF directly, which LI_destruct above already cleaned up).
             lib.fclose(self.c_file_handle)
 
     def __enter__(self):

@@ -207,6 +207,41 @@ static void test_norm_pipeline(CuTest *testCase) {
     st_system("rm %s", output_file);
 }
 
+// Verifies that taffy add-gap-bases -i x.maf produces output identical to
+// taffy view -i x.maf | taffy add-gap-bases. add-gap-bases relies on adjacent
+// blocks being linked (alignment_add_gap_strings reads l_row/r_row coordinates),
+// so this is the most sensitive of the dual-input migration tests.
+static void test_add_gap_bases_maf_input(CuTest *testCase) {
+    char *example_file = "./tests/evolverMammals.maf";
+    char *piped_out = "./tests/agb.piped.taf";
+    char *direct_out = "./tests/agb.direct.taf";
+    int i = st_system("./bin/taffy view -i %s | ./bin/taffy add-gap-bases ./tests/seqs/* > %s",
+                      example_file, piped_out);
+    CuAssertIntEquals(testCase, 0, i);
+    int j = st_system("./bin/taffy add-gap-bases -i %s -o %s ./tests/seqs/*",
+                      example_file, direct_out);
+    CuAssertIntEquals(testCase, 0, j);
+    int diff_ret = st_system("diff %s %s", piped_out, direct_out);
+    CuAssertIntEquals(testCase, 0, diff_ret);
+    st_system("rm -f %s %s", piped_out, direct_out);
+}
+
+// Verifies that taffy norm -i x.maf produces output identical to
+// taffy view -i x.maf | taffy norm. This is the per-tool dual-input
+// regression test for the BlockReader migration.
+static void test_norm_maf_input(CuTest *testCase) {
+    char *example_file = "./tests/evolverMammals.maf";
+    char *piped_out = "./tests/norm.piped.taf";
+    char *direct_out = "./tests/norm.direct.taf";
+    int i = st_system("./bin/taffy view -i %s | ./bin/taffy norm > %s", example_file, piped_out);
+    CuAssertIntEquals(testCase, 0, i);
+    int j = st_system("./bin/taffy norm -i %s -o %s", example_file, direct_out);
+    CuAssertIntEquals(testCase, 0, j);
+    int diff_ret = st_system("diff %s %s", piped_out, direct_out);
+    CuAssertIntEquals(testCase, 0, diff_ret);
+    st_system("rm -f %s %s", piped_out, direct_out);
+}
+
 CuSuite* normalize_test_suite(void) {
     CuSuite* suite = CuSuiteNew();
     SUITE_ADD_TEST(suite, test_normalize);
@@ -214,5 +249,7 @@ CuSuite* normalize_test_suite(void) {
     SUITE_ADD_TEST(suite, test_maf_norm_to_maf);
     SUITE_ADD_TEST(suite, test_dupe_filter);
     SUITE_ADD_TEST(suite, test_norm_pipeline);
+    SUITE_ADD_TEST(suite, test_norm_maf_input);
+    SUITE_ADD_TEST(suite, test_add_gap_bases_maf_input);
     return suite;
 }

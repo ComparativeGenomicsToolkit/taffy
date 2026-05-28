@@ -6,6 +6,7 @@
 
 #include "taf.h"
 #include "tai.h"
+#include "block_reader.h"
 #include "sonLib.h"
 #include <getopt.h>
 #include <time.h>
@@ -25,7 +26,8 @@ static void usage(void) {
     fprintf(stderr, "-r --dontIgnoreFirstRow : Do consider the first (reference) row of each maf block - by default we "
                     "don't alter the sort of the reference row\n");
     fprintf(stderr, "-s --repeatCoordinatesEveryNColumns : Repeat TAF coordinates of each sequence at least every n columns. By default: %" PRIi64 "\n", repeat_coordinates_every_n_columns);
-    fprintf(stderr, "-c --useCompression : Write the output using bgzip compression.\n");    
+    fprintf(stderr, "-c --useCompression : Write the output using bgzip compression.\n");
+    fprintf(stderr, "-T --threads N : Use N threads for bgzf I/O (default 1, only effective on bgzipped streams)\n");
     fprintf(stderr, "-l --logLevel : Set the log level\n");
     fprintf(stderr, "-h --help : Print this help message\n");
 }
@@ -89,6 +91,7 @@ int taf_sort_main(int argc, char *argv[]) {
     char *dup_filter_file = NULL;
     bool ignore_first_row = 1;
     bool use_compression = 0;
+    int bgzf_threads = 1;
 
     ///////////////////////////////////////////////////////////////////////////
     // Parse the inputs
@@ -105,11 +108,12 @@ int taf_sort_main(int argc, char *argv[]) {
                                                {"dontIgnoreFirstRow", no_argument, 0, 'r'},
                                                {"repeatCoordinatesEveryNColumns", required_argument, 0, 's'},
                                                {"useCompression", no_argument, 0, 'c'},
+                                               {"threads", required_argument, 0, 'T'},
                                                {"help",       no_argument,       0, 'h'},
                                                {0, 0,                            0, 0}};
 
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:o:n:hrf:p:d:s:c", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:o:n:hrf:p:d:s:cT:", long_options, &option_index);
         if (key == -1) {
             break;
         }
@@ -144,7 +148,10 @@ int taf_sort_main(int argc, char *argv[]) {
                 break;
             case 'c':
                 use_compression = 1;
-                break;                                
+                break;
+            case 'T':
+                bgzf_threads = atoi(optarg);
+                break;
             case 'h':
                 usage();
                 return 0;
@@ -159,6 +166,7 @@ int taf_sort_main(int argc, char *argv[]) {
     //////////////////////////////////////////////
 
     st_setLogLevelFromString(logLevelString);
+    LI_set_bgzf_threads(bgzf_threads);
     st_logInfo("Input file string : %s\n", input_file);
     st_logInfo("Output file string : %s\n", output_file);
     st_logInfo("Sort file string : %s\n", sort_file);
@@ -193,17 +201,24 @@ int taf_sort_main(int argc, char *argv[]) {
     stList *prefixes_to_sort_by = load_sort_file(sort_file);
     stList *prefixes_to_dup_filter = load_sort_file(dup_filter_file);
 
-    // Parse the header
-    bool run_length_encode_bases;
-    Tag *tag = taf_read_header_2(li, &run_length_encode_bases);
+    // Open a format-agnostic reader (TAF or MAF input)
+    BlockReader *reader = block_reader_open(li);
+    if (reader == NULL) {
+        LW_destruct(output, output_file != NULL);
+        LI_destruct(li);
+        if (input_file != NULL) fclose(input);
+        return 1;
+    }
+    bool run_length_encode_bases = block_reader_run_length_encoded(reader);
+    Tag *tag = block_reader_take_header(reader);
 
-    // Write the header
+    // For now, output is always TAF (a MAF output mode could be added later -- see pass-2 plan).
     taf_write_header(tag, output);
     tag_destruct(tag);
 
     // Write the alignment blocks
     Alignment *alignment, *p_alignment = NULL, *pp_alignment = NULL;
-    while((alignment = taf_read_block(p_alignment, run_length_encode_bases, li)) != NULL) {
+    while ((alignment = block_reader_next(reader, p_alignment)) != NULL) {
         process_alignment_block(pp_alignment, p_alignment, prefixes_to_filter_by, prefixes_to_pad,
                                 prefixes_to_sort_by, prefixes_to_dup_filter, run_length_encode_bases, ignore_first_row, output);
         pp_alignment = p_alignment;
@@ -220,6 +235,7 @@ int taf_sort_main(int argc, char *argv[]) {
     //////////////////////////////////////////////
 
 
+    block_reader_destruct(reader);
     LI_destruct(li);
     if(input_file != NULL) {
         fclose(input);

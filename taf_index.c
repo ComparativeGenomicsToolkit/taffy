@@ -49,7 +49,7 @@ static void usage(void) {
     fprintf(stderr, "-b --blockSize : Write an index line for intervals of this many bp [default:10000]\n");
     fprintf(stderr, "-u --universal : Build a universal column index in <file>.tui (ONEcode) "
                      "instead of the .tai. For a `cactus-hal2maf --universal` MAF/TAF.\n");
-    fprintf(stderr, "-T --tmpDir : Directory for --universal spill files "
+    fprintf(stderr, "-d --tmpDir : Directory for --universal spill files "
                      "[default: directory of the output .tui]\n");
     fprintf(stderr, "-n --genomeNames : File listing genome names "
                      "(whitespace-separated), ex from `halStats --genomes`.  "
@@ -57,6 +57,7 @@ static void usage(void) {
                      "For --universal when a name has >1 '.': if omitted, the "
                      "genome set is taken from the `# hal` tree in the header "
                      "(hal2maf writes one); this option overrides it.\n");
+    fprintf(stderr, "-T --threads N : Use N threads for bgzf I/O (default 1, only effective on bgzipped streams)\n");
     fprintf(stderr, "-l --logLevel : Set the log level\n");
     fprintf(stderr, "-h --help : Print this help message\n");
 }
@@ -73,6 +74,7 @@ int taf_index_main(int argc, char *argv[]) {
     bool universal = false;
     char *tmp_dir = NULL;
     char *genome_names_file = NULL;
+    int bgzf_threads = 1;
 
     ///////////////////////////////////////////////////////////////////////////
     // Parse the inputs
@@ -83,13 +85,14 @@ int taf_index_main(int argc, char *argv[]) {
                                                 { "inputFile", required_argument, 0, 'i' },
                                                 { "blockSize", required_argument, 0, 'b' },
                                                 { "universal", no_argument, 0, 'u' },
-                                                { "tmpDir", required_argument, 0, 'T' },
+                                                { "tmpDir", required_argument, 0, 'd' },
                                                 { "genomeNames", required_argument, 0, 'n' },
+                                                { "threads", required_argument, 0, 'T' },
                                                 { "help", no_argument, 0, 'h' },
                                                 { 0, 0, 0, 0 } };
 
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:b:uT:n:h", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:b:ud:n:hT:", long_options, &option_index);
         if (key == -1) {
             break;
         }
@@ -107,11 +110,14 @@ int taf_index_main(int argc, char *argv[]) {
             case 'u':
                 universal = true;
                 break;
-            case 'T':
+            case 'd':
                 tmp_dir = optarg;
                 break;
             case 'n':
                 genome_names_file = optarg;
+                break;
+            case 'T':
+                bgzf_threads = atoi(optarg);
                 break;
             case 'h':
                 usage();
@@ -127,6 +133,7 @@ int taf_index_main(int argc, char *argv[]) {
     //////////////////////////////////////////////
 
     st_setLogLevelFromString(logLevelString);
+    LI_set_bgzf_threads(bgzf_threads);
     st_logInfo("Input file string : %s\n", taf_fn);
     st_logInfo("Block size : %" PRIi64 "\n", block_size);
     
