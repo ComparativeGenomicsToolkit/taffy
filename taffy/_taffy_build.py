@@ -32,6 +32,12 @@ ffibuilder.cdef("""
     
     LI *LI_construct(FILE *fh);
 
+    /*
+     * Construct an LI directly from a local path or a URL (http://, https://,
+     * s3://, etc.) via htslib's URL-aware bgzf_open. Returns NULL on failure.
+     */
+    LI *LI_construct_from_path(const char *path);
+
     void LI_destruct(LI *li);
     
     char *LI_peek_at_next_line(LI *li);
@@ -248,6 +254,16 @@ ffibuilder.cdef("""
      * Free a tai iterator
      */
     void tai_iterator_destruct(TaiIt *tai_it);
+
+    /* Returns true if the path looks like a URL (contains "://"). */
+    bool is_url(const char *path);
+
+    /* Open an input source for the .tai index, whether local file or URL.
+     * For a local path: behaves like fopen(path, "r").
+     * For a URL: streams the entire response via htslib's hopen/hread into an
+     *            anonymous tmpfile() (auto-deleted on fclose). Returns NULL on
+     *            failure. */
+    FILE *open_tai_for_reading(const char *path);
 """)
 
 # set_source() gives the name of the python extension module to
@@ -260,9 +276,10 @@ ffibuilder.set_source("taffy._taffy_cffi",
                            #include <stdlib.h>
                            #include "htslib/bgzf.h"
                            #include "htslib/kstring.h"
-                           #include "taf.h" 
-                           #include "line_iterator.h" 
+                           #include "taf.h"
+                           #include "line_iterator.h"
                            #include "tai.h"
+                           #include "remote_io.h"
                       """,
                       include_dirs=["taffy/submodules/sonLib/externalTools/cutest",
                                     "taffy/submodules/sonLib/C/inc",
@@ -287,6 +304,7 @@ ffibuilder.set_source("taffy._taffy_cffi",
                                "taffy/impl/ond.c",
                                "taffy/impl/taf.c",
                                "taffy/impl/tai.c",
+                               "taffy/impl/remote_io.c",
                                ],
                       extra_compile_args=["-DUSE_HTSLIB"],
                       libraries=["hts"],
