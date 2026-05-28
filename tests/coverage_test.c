@@ -37,8 +37,25 @@ static void test_coverage(CuTest *testCase) {
     }
 }
 
+// Verifies that taffy coverage -i x.maf produces identical output to
+// taffy view -i x.maf | taffy coverage. This is the per-tool dual-input
+// regression test for the BlockReader migration.
+static void test_coverage_maf_input(CuTest *testCase) {
+    char *example_file = "./tests/coverage_test.maf";
+    char *piped_out = "./tests/coverage_test.piped.tsv";
+    char *direct_out = "./tests/coverage_test.direct.tsv";
+    int i = st_system("./bin/taffy view -i %s | ./bin/taffy coverage -g cat.a > %s", example_file, piped_out);
+    CuAssertIntEquals(testCase, 0, i);
+    int j = st_system("./bin/taffy coverage -i %s -g cat.a > %s", example_file, direct_out);
+    CuAssertIntEquals(testCase, 0, j);
+    int diff_ret = st_system("diff %s %s", piped_out, direct_out);
+    CuAssertIntEquals(testCase, 0, diff_ret);
+    st_system("rm -f %s %s", piped_out, direct_out);
+}
+
 CuSuite* coverage_test_suite(void) {
     CuSuite* suite = CuSuiteNew();
     SUITE_ADD_TEST(suite, test_coverage);
+    SUITE_ADD_TEST(suite, test_coverage_maf_input);
     return suite;
 }

@@ -5,6 +5,7 @@
 */
 extern "C" {
 #include "taf.h"
+#include "block_reader.h"
 #include "sonLib.h"
 }
 #include "bioioC.h"
@@ -20,7 +21,7 @@ static int64_t maximum_gap_string_length = 50;
 static void usage() {
     fprintf(stderr, "taffy add_gap_bases SEQ_FILExN [options]\n");    
     fprintf(stderr, "Add interstitial gap strings to taf file\n");
-    fprintf(stderr, "-i --inputFile : Input taf file to normalize. If not specified reads from stdin\n");
+    fprintf(stderr, "-i --inputFile : Input TAF or MAF file. If not specified reads from stdin\n");
     fprintf(stderr, "-o --outputFile : Output taf file. If not specified outputs to stdout\n");
     fprintf(stderr, "-a --halFile : HAL file for extracting gap sequence (MAF must be created with hal2maf *without* --onlySequenceNames)\n");
     fprintf(stderr, "-m --maximumGapStringLength : The maximum size of a gap string to add, be default: %" PRIi64 "\n",
@@ -143,13 +144,23 @@ int taf_add_gap_bases_main(int argc, char *argv[]) {
     LW *output = LW_construct(outputFile == NULL ? stdout : fopen(outputFile, "w"), use_compression);
     LI *li = LI_construct(input);
 
-    // Pass the header line to determine parameters and write the updated taf header
-    Tag *tag = taf_read_header_2(li, &run_length_encode_bases);
+    // Open a format-agnostic reader. For MAF input the reader auto-links adjacent
+    // blocks so alignment_add_gap_strings sees the inter-block coordinate continuity
+    // it needs. Output is always TAF (interstitial gap strings are a TAF-only feature).
+    BlockReader *reader = block_reader_open(li);
+    if (reader == NULL) {
+        LW_destruct(output, outputFile != NULL);
+        LI_destruct(li);
+        if (inputFile != NULL) fclose(input);
+        return 1;
+    }
+    run_length_encode_bases = block_reader_run_length_encoded(reader);
+    Tag *tag = block_reader_take_header(reader);
     taf_write_header(tag, output);
     tag_destruct(tag);
 
     Alignment *alignment, *p_alignment = NULL;
-    while((alignment = taf_read_block(p_alignment, run_length_encode_bases, li)) != NULL) {
+    while ((alignment = block_reader_next(reader, p_alignment)) != NULL) {
         // Add in the gap strings if there is a previous block
         if(p_alignment != NULL) {
             alignment_add_gap_strings(p_alignment, alignment, fastas, hal_handle, hal_species, maximum_gap_string_length);
@@ -172,6 +183,7 @@ int taf_add_gap_bases_main(int argc, char *argv[]) {
     // Cleanup
     //////////////////////////////////////////////
 
+    block_reader_destruct(reader);
     LI_destruct(li);
     if(inputFile != NULL) {
         fclose(input);

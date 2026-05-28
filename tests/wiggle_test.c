@@ -48,10 +48,30 @@ static void test_annotate(CuTest *testCase) {
     }
 }
 
+// Verifies that taffy annotate -i x.maf produces output identical to
+// taffy view -i x.maf | taffy annotate. Output is always TAF (column tags
+// have no MAF representation); only the input side gained MAF support.
+static void test_annotate_maf_input(CuTest *testCase) {
+    char *example_file = "./tests/evolverMammals.maf.mini";
+    char *example_wig = "./tests/evolverMammals.wig.mini";
+    char *piped_out = "./tests/annotate_test.piped.taf";
+    char *direct_out = "./tests/annotate_test.direct.taf";
+    int i = st_system("./bin/taffy view -i %s | ./bin/taffy annotate -w %s -t test_label -r 'Anc0.' > %s",
+                      example_file, example_wig, piped_out);
+    CuAssertIntEquals(testCase, 0, i);
+    int j = st_system("./bin/taffy annotate -i %s -w %s -t test_label -r 'Anc0.' -o %s",
+                      example_file, example_wig, direct_out);
+    CuAssertIntEquals(testCase, 0, j);
+    int diff_ret = st_system("diff %s %s", piped_out, direct_out);
+    CuAssertIntEquals(testCase, 0, diff_ret);
+    st_system("rm -f %s %s", piped_out, direct_out);
+}
+
 CuSuite* wiggle_test_suite(void) {
     CuSuite* suite = CuSuiteNew();
     SUITE_ADD_TEST(suite, test_wiggle);
     SUITE_ADD_TEST(suite, test_large_wiggle);
     SUITE_ADD_TEST(suite, test_annotate);
+    SUITE_ADD_TEST(suite, test_annotate_maf_input);
     return suite;
 }

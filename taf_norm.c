@@ -5,6 +5,7 @@
 */
 
 #include "taf.h"
+#include "block_reader.h"
 #include "sonLib.h"
 #include <getopt.h>
 #include <time.h>
@@ -21,8 +22,8 @@ static void usage(void) {
     fprintf(stderr, "Note, taffy norm will resort the rows alpha-numerically according to sequence name, "
                     "as is necessary to successfully merge all mergeable rows. Is the resorting is undesired, pipe the"
                     "result to taffy sort to resort.\n");
-    fprintf(stderr, "-i --inputFile : Input taf file to normalize. If not specified reads from stdin\n");
-    fprintf(stderr, "-o --outputFile : Output taf file. If not specified outputs to stdout\n");
+    fprintf(stderr, "-i --inputFile : Input TAF or MAF file to normalize. If not specified reads from stdin\n");
+    fprintf(stderr, "-o --outputFile : Output taf file (or maf if -k is given). If not specified outputs to stdout\n");
     fprintf(stderr, "-l --logLevel : Set the log level\n");
     fprintf(stderr, "-k --maf : Print maf output instead of taf\n");
     fprintf(stderr, "-m --maximumBlockLengthToMerge : Only merge together any two adjacent blocks if one or both is less than this many bases long, by default: %" PRIi64 "\n", maximum_block_length_to_merge);
@@ -37,13 +38,12 @@ static void usage(void) {
     fprintf(stderr, "-h --help : Print this help message\n");
 }
 
-static Alignment *get_next_taf_block(LI *li, bool run_length_encode_bases) {
+static Alignment *get_next_block(BlockReader *reader) {
     static Alignment *alignments[3];
     static int64_t alignment_index=0;
     assert(alignment_index >= 0);
     while(alignment_index < 3) {
-        alignments[alignment_index] = taf_read_block(alignment_index == 0 ? NULL : alignments[alignment_index-1],
-                                                     run_length_encode_bases, li); // Read a block
+        alignments[alignment_index] = block_reader_next(reader, alignment_index == 0 ? NULL : alignments[alignment_index-1]);
         if(alignments[alignment_index] == NULL) { // The read block is empty
             break;
         }
@@ -325,8 +325,18 @@ int taf_norm_main(int argc, char *argv[]) {
     LW *output = LW_construct(outputFile == NULL ? stdout : fopen(outputFile, "w"), use_compression);
     LI *li = LI_construct(input);
 
-    // Pass the header line to determine parameters and write the updated taf header
-    Tag *tag = taf_read_header_2(li, &run_length_encode_bases);
+    // Open a format-agnostic reader; for MAF input the reader transparently links adjacent
+    // blocks via alignment_link_adjacent so downstream merging logic sees the same coordinate
+    // continuity it gets from a TAF input.
+    BlockReader *reader = block_reader_open(li);
+    if (reader == NULL) {
+        LW_destruct(output, outputFile != NULL);
+        LI_destruct(li);
+        if (inputFile != NULL) fclose(input);
+        return 1;
+    }
+    run_length_encode_bases = block_reader_run_length_encoded(reader);
+    Tag *tag = block_reader_take_header(reader);
     if(output_maf && run_length_encode_bases) { // Remove this tag from the maf output as not relevant
         tag = tag_remove(tag, "run_length_encode_bases");
     }
@@ -334,7 +344,7 @@ int taf_norm_main(int argc, char *argv[]) {
     tag_destruct(tag);
 
     Alignment *alignment, *p_alignment = NULL, *p_p_alignment = NULL;
-    while((alignment = get_next_taf_block(li, run_length_encode_bases)) != NULL) {
+    while((alignment = get_next_block(reader)) != NULL) {
         // First resort the rows to be alphabetical and then realign with any previous block. This ensures
         // we will not have any mergeable rows unlinked. Note:
         // We do not allow row substitutions when linking two blocks to merge (see last parameter of function call),
@@ -396,6 +406,8 @@ int taf_norm_main(int argc, char *argv[]) {
     // Cleanup
     //////////////////////////////////////////////
 
+    block_reader_destruct(reader);
+    LI_destruct(li);
     if(inputFile != NULL) {
         fclose(input);
     }
