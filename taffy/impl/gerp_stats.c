@@ -39,6 +39,7 @@ void depth_stats_merge(DepthStats *dst, const DepthStats *src) {
         dst->sum[d]    += src->sum[d];
         dst->sum_sq[d] += src->sum_sq[d];
     }
+    dst->n_clamped += src->n_clamped;
 }
 
 void depth_stats_finalize(DepthStats *ds, int64_t min_n) {
@@ -118,7 +119,9 @@ void histogram_merge(Histogram *dst, const Histogram *src) {
     for (int64_t i = 0; i < dst->n_bins; i++) dst->bin_count[i] += src->bin_count[i];
     dst->n_clipped_lo += src->n_clipped_lo;
     dst->n_clipped_hi += src->n_clipped_hi;
-    dst->n_total      += src->n_total;
+    // Note: do NOT sum n_total here.  histogram_observe never touches
+    // n_total -- finalize re-derives it from bin_count[].  Summing here
+    // would double-count when merging two already-finalized histograms.
 }
 
 void histogram_finalize(Histogram *h) {

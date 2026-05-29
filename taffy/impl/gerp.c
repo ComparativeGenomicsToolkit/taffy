@@ -263,8 +263,10 @@ bool gerp_score_column_csets(const GerpTree *gt, GerpScratch *sc,
             sc->cset[v]    = bit;
             sc->present[v] = bit ? 1 : 0;
             if (bit) depth++;
-            // Leaves never receive child folds, but zero anyway so an
-            // accidentally-routed fold would be detected as garbage.
+            // Leaves never receive child folds; the zeroing here is dead
+            // for the current Step-1/Step-2 algorithm (only internals read
+            // count[]).  Kept as a tripwire if a future change starts
+            // folding into leaves.
             sc->count[4*v + 0] = sc->count[4*v + 1] = 0;
             sc->count[4*v + 2] = sc->count[4*v + 3] = 0;
             sc->children_present[v] = 0;

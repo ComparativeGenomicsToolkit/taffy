@@ -39,6 +39,9 @@ typedef struct {
     double  *mean;         // [max_depth + 1]; filled by _finalize
     double  *stddev;       // [max_depth + 1]; filled by _finalize
     int64_t *fallback_to;  // [max_depth + 1]; -1 = use own stats; else use this depth's
+    int64_t n_clamped;     // observations dropped because d > max_depth;
+                           // surfaced by the caller so a too-small --maxDepth
+                           // doesn't silently degrade z-scores to 0.
 } DepthStats;
 
 /* Construct with capacity for depths 0..max_depth inclusive. */
@@ -47,7 +50,12 @@ void depth_stats_destruct(DepthStats *ds);
 
 /* Tally one observation: column has integer depth d and (raw) RS value rs. */
 static inline void depth_stats_observe(DepthStats *ds, int64_t d, double rs) {
-    if (d < 0 || d > ds->max_depth) return;  // silently clamp out-of-range
+    if (d < 0 || d > ds->max_depth) {
+        // Surface out-of-range observations so the caller can warn if a
+        // too-small --maxDepth degraded a non-trivial slice of the data.
+        if (d >= 0) ds->n_clamped++;
+        return;
+    }
     ds->count[d]  += 1;
     ds->sum[d]    += rs;
     ds->sum_sq[d] += rs * rs;
