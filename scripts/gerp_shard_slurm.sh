@@ -114,14 +114,26 @@ MANIFEST="$OUTDIR/manifest.tsv"
 python3 - "$T_TOTAL" "$N_SHARDS" "$MANIFEST" <<'PY'
 import sys
 T, N, dst = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
+n_emit, n_skip = 0, 0
 with open(dst, "w") as out:
     out.write("shard\tcol_lo\tcol_hi\n")
     for k in range(N):
         lo = (k     * T) // N
         hi = ((k + 1) * T) // N
+        # T < N rounds several shards to lo == hi.  Skip them in the manifest
+        # so the runner doesn't fire an empty `taffy gerp --columnRange`.
+        # SLURM will still run the array slot but the runner's manifest
+        # lookup returns no row and the runner exits 0 cleanly.
+        if hi <= lo:
+            n_skip += 1
+            continue
         out.write(f"{k}\t{lo}\t{hi}\n")
+        n_emit += 1
 print(f"shard size: ~{T // N:,} columns each (last shard +{T - (T // N) * N} for remainder)",
       file=sys.stderr)
+if n_skip > 0:
+    print(f"skipped {n_skip} empty shards (T < N_SHARDS); manifest has {n_emit} rows",
+          file=sys.stderr)
 PY
 
 # --- Step 3: write the per-shard runner. ------------------------------
@@ -140,8 +152,9 @@ MANIFEST="$OUTDIR/manifest.tsv"
 # Lookup this shard's column range from the manifest (1-indexed, skip header).
 read SHARD_ID COL_LO COL_HI < <(awk -v k="\$K" 'NR>1 && \$1==k {print \$1, \$2, \$3; exit}' "\$MANIFEST")
 if [[ -z "\${COL_LO:-}" ]]; then
-    echo "shard \${K}: no manifest row found" >&2
-    exit 1
+    # T < N_SHARDS pruned this shard out of the manifest; nothing to do.
+    echo "shard \${K}: empty (T < N_SHARDS), skipping"
+    exit 0
 fi
 
 RS_OUT="\$OUTDIR/shard_\${K}.rs.wig.gz"

@@ -441,6 +441,15 @@ int taf_gerp_main(int argc, char *argv[]) {
     }
     st_logInfo("taffy gerp: tree has %" PRIi64 " leaves\n", gerp_tree_n_leaves(gt));
 
+    // CLI mutual-exclusion check goes BEFORE the output file opens so a
+    // bad combination doesn't leave a stub output file behind.  -r, -R,
+    // and --columnRange are pairwise exclusive (full-fledged validation
+    // of the individual values happens later, after the index is loaded).
+    if ((region != NULL) + (regionFile != NULL) + (columnRangeArg != NULL) > 1) {
+        fprintf(stderr, "taffy gerp: -r, -R, and --columnRange are mutually exclusive\n");
+        return 1;
+    }
+
     // Output(s).
     FILE *out_fh = (outputFile == NULL) ? stdout : fopen(outputFile, "w");
     if (out_fh == NULL) {
@@ -492,11 +501,7 @@ int taf_gerp_main(int argc, char *argv[]) {
     //   no -r/-R  -> regions == NULL  (stream the whole input)
     //   -r        -> singleton list of size 1
     //   -R FILE   -> list parsed from file
-    // -r, -R, and --columnRange are mutually exclusive.
-    if ((region != NULL) + (regionFile != NULL) + (columnRangeArg != NULL) > 1) {
-        fprintf(stderr, "taffy gerp: -r, -R, and --columnRange are mutually exclusive\n");
-        return 1;
-    }
+    // Mutual exclusion already checked above the output opens.
     GerpRegion *regions = NULL;
     int64_t n_regions = 0;
     if (regionFile != NULL) {
@@ -521,18 +526,23 @@ int taf_gerp_main(int argc, char *argv[]) {
     // [LO, HI), validated against T below once the .tui is loaded.
     TuiInterval col_range_iv = { 0, 0 };
     bool have_col_range = false;
+    bool empty_col_range = false;
     if (columnRangeArg != NULL) {
         long long lo = 0, hi = 0;
         char extra = 0;
         if (sscanf(columnRangeArg, "%lld-%lld%c", &lo, &hi, &extra) != 2 ||
-            lo < 0 || hi <= lo) {
+            lo < 0 || hi < lo) {
             fprintf(stderr, "taffy gerp: invalid --columnRange %s "
-                            "(expected LO-HI with HI > LO >= 0)\n", columnRangeArg);
+                            "(expected LO-HI with HI >= LO >= 0)\n", columnRangeArg);
             return 1;
         }
         col_range_iv.start = (int64_t)lo;
         col_range_iv.end   = (int64_t)hi;
         have_col_range = true;
+        // lo == hi is a legal empty range: a SLURM shard whose slice of T
+        // happens to be zero (T < N or rounding).  Skip all work cleanly
+        // so the runner doesn't have to special-case it.
+        if (lo == hi) empty_col_range = true;
     }
 
     // Region / column-range mode: load the .tui (universal MAF) or .tai
@@ -593,8 +603,11 @@ int taf_gerp_main(int argc, char *argv[]) {
     // Outer loop: 1 iteration in streaming or column-range mode;
     // n_regions iterations in region mode (each builds its own iterator
     // over the shared tui/tai, then runs the inner read/score/emit batched
-    // loop to exhaustion).
-    int64_t n_iter = (regions != NULL) ? n_regions : 1;
+    // loop to exhaustion).  Empty column-range -> 0 iterations (success
+    // no-op for SLURM shards that ended up with a zero slice).
+    int64_t n_iter = (regions != NULL) ? n_regions
+                   : empty_col_range   ? 0
+                   :                     1;
     for (int64_t reg_idx = 0; reg_idx < n_iter && !fatal; reg_idx++) {
         TuiExtractIt *tui_it = NULL;
         TaiIt        *tai_it = NULL;
