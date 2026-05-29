@@ -135,7 +135,7 @@ if [[ "$STAGE_LOCAL" -eq 1 ]]; then
     STAGE_GB=$(( (INPUT_BYTES + TUI_BYTES) / (1024**3) ))
     echo ">> stage-in size: ~${STAGE_GB} GB per task (input + .tui)"
     if [[ -z "$TMP_GB" ]]; then
-        echo ">> hint:          consider --tmp $(( STAGE_GB * 2 )) so SLURM picks a node with enough local scratch"
+        echo ">> hint:          if your cluster advertises --tmp, consider --tmp $(( STAGE_GB + 100 )) (input + small output budget); otherwise omit"
     fi
 fi
 
