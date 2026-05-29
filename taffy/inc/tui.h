@@ -136,6 +136,23 @@ TuiInterval *tui_query(Tui *tui, const char *seq_name,
  */
 int64_t *tui_load_seq_runs(Tui *tui, const char *seq_name, int64_t *n_out);
 
+/*
+ * Enumerate every sequence in the .tui's directory: name -> length (bp).
+ * Walks the d-records (already name-sorted by the builder) via oneGoto and
+ * returns an stHash mapping a freshly-allocated char* (the seq name) to
+ * the seq length stored directly as the value pointer (cast via intptr_t,
+ * mirroring tai_sequence_lengths's convention).
+ *
+ * Returns NULL on I/O error.
+ *
+ * Includes ALL sequences in the universal alignment -- both anchor (row-0)
+ * and leaf-genome.  The .tui doesn't tag them; callers that need anchor-
+ * only (e.g. for sharding without double-counting universal columns) must
+ * filter by name prefix against the # hal tree's internal labels, OR shard
+ * by universal-column range instead (see tui_total_columns).
+ */
+stHash *tui_sequence_lengths(const char *tui_path);
+
 /////////////////////////////////////////////////////////////////////////////
 // Reverse lookup: universal column -> a target genome's coordinate.
 //

@@ -6,10 +6,12 @@
 
 #include "taf.h"
 #include "tai.h"
+#include "tui.h"
 #include "block_reader.h"
 #include "sonLib.h"
 #include <getopt.h>
 #include <time.h>
+#include <unistd.h>
 
 static void usage(void) {
     fprintf(stderr, "taffy stats [options]\n");
@@ -139,11 +141,16 @@ int taf_stats_main(int argc, char *argv[]) {
         input_is_maf = (input_format == 1);
     }
 
-    // load the index if it's required by the given options
+    // load the index if it's required by the given options.  For seq_lengths
+    // we accept either a .tai (regular MAF) or a .tui (universal MAF) -- the
+    // .tui's directory has every sequence's length so the same -s output
+    // shape works on it.  Other stats options keep their .tai-only shape.
     bool index_required = seq_lengths;
     char *tai_fn = NULL;
+    char *tui_fn = NULL;
     FILE *tai_fh = NULL;
     Tai *tai = NULL;
+    bool used_tui = false;
     if (index_required) {
         if (taf_fn == NULL) {
             fprintf(stderr, "An index is needed to compute the requested stats so an input filename must be specified with -i\n");
@@ -151,16 +158,36 @@ int taf_stats_main(int argc, char *argv[]) {
         }
         tai_fn = tai_path(taf_fn);
         tai_fh = fopen(tai_fn, "r");
-        if (tai_fh == NULL) {
+        if (tai_fh != NULL) {
+            tai = tai_load(tai_fh, input_is_maf);
+        } else if (seq_lengths) {
+            // Fall back to .tui for the -s path only (other options still
+            // need a .tai-shaped index).
+            tui_fn = tui_path(taf_fn);
+            if (access(tui_fn, F_OK) == 0) {
+                used_tui = true;
+            } else {
+                fprintf(stderr, "Required index %s not found (and no .tui sibling either). Please run taffy index first\n",
+                        tai_fn);
+                return 1;
+            }
+        } else {
             fprintf(stderr, "Required index %s not found. Please run taffy index first\n", tai_fn);
             return 1;
         }
-        tai = tai_load(tai_fh, input_is_maf);
     }
 
     // do the stats
     if (seq_lengths) {
-        stHash *seq_to_len = tai_sequence_lengths(tai, li);
+        stHash *seq_to_len = used_tui
+                             ? tui_sequence_lengths(tui_fn)
+                             : tai_sequence_lengths(tai, li);
+        if (seq_to_len == NULL) {
+            fprintf(stderr, "Failed to read sequence directory from %s\n",
+                    used_tui ? tui_fn : tai_fn);
+            free(tai_fn); free(tui_fn);
+            return 1;
+        }
         stList *seq_names = stHash_getKeys(seq_to_len);
         for (int64_t i = 0; i < stList_length(seq_names); ++i) {
             void *hash_val = stHash_search(seq_to_len, stList_get(seq_names, i));
@@ -245,7 +272,8 @@ int taf_stats_main(int argc, char *argv[]) {
 
     if (index_required) {
         free(tai_fn);
-        tai_destruct(tai);
+        free(tui_fn);
+        if (tai != NULL) tai_destruct(tai);
     }
 
     block_reader_destruct(reader);

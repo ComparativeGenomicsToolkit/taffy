@@ -1793,6 +1793,42 @@ static int64_t tui_find_d_lower_bound(OneFile *of, int64_t n_d, const char *pref
     return lo;
 }
 
+stHash *tui_sequence_lengths(const char *tui_path) {
+    if (tui_path == NULL) return NULL;
+    OneFile *of = oneFileOpenRead(tui_path, NULL, "tui", 1);
+    if (of == NULL) return NULL;
+
+    // n_d is the d-line count; populated from the footer regardless of
+    // where the cursor is.
+    I64 n_d = 0;
+    oneStats(of, 'd', &n_d, NULL, NULL);
+
+    // Value field is the seq length, stored as a void* (cast via intptr_t).
+    // Same convention tai_sequence_lengths uses.
+    stHash *out = stHash_construct3(stHash_stringKey, stHash_stringEqualKey,
+                                    free, NULL);
+    // 8192 mirrors tui_find_d's buffer (and the writer's "%8191s" upper
+    // bound) -- the two sides need to move together if either gets bumped.
+    char buf[8192];
+    for (int64_t i = 1; i <= (int64_t)n_d; i++) {
+        if (!oneGoto(of, 'd', i)) { stHash_destruct(out); oneFileClose(of); return NULL; }
+        if (oneReadLine(of) != 'd') { stHash_destruct(out); oneFileClose(of); return NULL; }
+        int64_t n = oneLen(of);
+        if (n < 0 || n >= (int64_t)sizeof(buf)) {
+            stHash_destruct(out); oneFileClose(of); return NULL;
+        }
+        memcpy(buf, oneString(of), (size_t)n);
+        buf[n] = '\0';
+        int64_t slen = oneInt(of, 2);
+        // d-records are name-sorted and unique, so no need to check for
+        // existing entry -- and the void* value path here means stHash
+        // wouldn't free the old value anyway.
+        stHash_insert(out, stString_copy(buf), (void *)(intptr_t)slen);
+    }
+    oneFileClose(of);
+    return out;
+}
+
 TuiGenomeLift *tui_genome_lift_load(Tui *tui, const char *genome_name) {
     if (tui == NULL || genome_name == NULL || *genome_name == 0) return NULL;
 
