@@ -217,6 +217,7 @@ static void usage(void) {
     fprintf(stderr, "-D --depthFile : Optional second wig with the per-base count of A/C/G/T leaves at each column.\n");
     fprintf(stderr, "-r --region SEQ:START-END : Restrict to one anchor chrom range.  Requires <inputFile>.tui (universal MAF, auto-detected) OR <inputFile>.tai (regular MAF).  Half-open, 0-based.\n");
     fprintf(stderr, "-R --regionFile FILE : Like -r but a file of regions (one SEQ:START-END per line; '#' comments + blanks ignored).  Amortises one .tui/.tai load across all regions -- intended for SLURM-style sharding with many small regions per shard.\n");
+    fprintf(stderr, "   --columnRange LO-HI : Restrict to a universal-column range (half-open, 0-based; HI <= T from `taffy stats -u`).  Requires .tui.  Each universal column belongs to exactly one shard, so this is the natural unit for SLURM sharding -- no chrom-by-chrom double-counting.  Mutually exclusive with -r/-R.\n");
     fprintf(stderr, "--branchScale : Global multiplier on branch lengths (default 1.0).\n");
     fprintf(stderr, "--minLeaves : Minimum surviving non-gap leaves to score a column (default 2).\n");
     fprintf(stderr, "--paralog MODE : How to treat duplicate-species rows in one block (default union).\n");
@@ -236,6 +237,7 @@ enum {
     OPT_PARALOG,
     OPT_SKIP_PARALOGS,
     OPT_KEEP_PARALOGS,
+    OPT_COLUMN_RANGE,
 };
 
 static int parse_paralog_policy(const char *s, GerpParalogPolicy *out) {
@@ -323,6 +325,7 @@ int taf_gerp_main(int argc, char *argv[]) {
     char *treeFile       = NULL;
     char *region         = NULL;
     char *regionFile     = NULL;
+    char *columnRangeArg = NULL;
     bool use_compression = false;
     double branch_scale  = 1.0;
     int64_t min_leaves   = 2;
@@ -339,6 +342,7 @@ int taf_gerp_main(int argc, char *argv[]) {
             { "depthFile",      required_argument, 0, 'D' },
             { "region",         required_argument, 0, 'r' },
             { "regionFile",     required_argument, 0, 'R' },
+            { "columnRange",    required_argument, 0, OPT_COLUMN_RANGE },
             { "branchScale",    required_argument, 0, OPT_BRANCH_SCALE },
             { "minLeaves",      required_argument, 0, OPT_MIN_LEAVES },
             { "paralog",        required_argument, 0, OPT_PARALOG },
@@ -372,6 +376,7 @@ int taf_gerp_main(int argc, char *argv[]) {
                 break;
             case OPT_SKIP_PARALOGS: paralog_policy = GERP_PARALOG_SKIP;  break;
             case OPT_KEEP_PARALOGS: paralog_policy = GERP_PARALOG_FIRST; break;
+            case OPT_COLUMN_RANGE:  columnRangeArg = optarg; break;
             case 'h': usage(); return 0;
             default:  usage(); return 1;
         }
@@ -487,9 +492,9 @@ int taf_gerp_main(int argc, char *argv[]) {
     //   no -r/-R  -> regions == NULL  (stream the whole input)
     //   -r        -> singleton list of size 1
     //   -R FILE   -> list parsed from file
-    // -r and -R are mutually exclusive.
-    if (region != NULL && regionFile != NULL) {
-        fprintf(stderr, "taffy gerp: -r and -R are mutually exclusive\n");
+    // -r, -R, and --columnRange are mutually exclusive.
+    if ((region != NULL) + (regionFile != NULL) + (columnRangeArg != NULL) > 1) {
+        fprintf(stderr, "taffy gerp: -r, -R, and --columnRange are mutually exclusive\n");
         return 1;
     }
     GerpRegion *regions = NULL;
@@ -511,20 +516,44 @@ int taf_gerp_main(int argc, char *argv[]) {
         n_regions = 1;
     }
 
-    // Region mode: load the .tui (universal MAF) or .tai (regular MAF)
-    // index ONCE up front; the outer loop below reuses it across every
-    // region.  This is the whole point of -R: a 92 GB .tui only loads
-    // once per shard instead of once per region.
+    // Parse --columnRange LO-HI directly into a TuiInterval (the iterator
+    // takes column intervals natively, no tui_query needed).  Half-open
+    // [LO, HI), validated against T below once the .tui is loaded.
+    TuiInterval col_range_iv = { 0, 0 };
+    bool have_col_range = false;
+    if (columnRangeArg != NULL) {
+        long long lo = 0, hi = 0;
+        char extra = 0;
+        if (sscanf(columnRangeArg, "%lld-%lld%c", &lo, &hi, &extra) != 2 ||
+            lo < 0 || hi <= lo) {
+            fprintf(stderr, "taffy gerp: invalid --columnRange %s "
+                            "(expected LO-HI with HI > LO >= 0)\n", columnRangeArg);
+            return 1;
+        }
+        col_range_iv.start = (int64_t)lo;
+        col_range_iv.end   = (int64_t)hi;
+        have_col_range = true;
+    }
+
+    // Region / column-range mode: load the .tui (universal MAF) or .tai
+    // (regular MAF) index ONCE up front; the outer loop below reuses it
+    // across every region.  --columnRange forces the .tui path (column
+    // coords are a .tui concept).
     Tui  *tui    = NULL;
     Tai  *tai    = NULL;
     FILE *tai_fh = NULL;
-    if (regions != NULL) {
+    if (regions != NULL || have_col_range) {
         if (inputFile == NULL) {
-            fprintf(stderr, "taffy gerp: -r/-R requires -i <file> (cannot index stdin)\n");
+            fprintf(stderr, "taffy gerp: -r/-R/--columnRange requires -i <file> (cannot index stdin)\n");
             return 1;
         }
         char *tui_fn = tui_path(inputFile);
         bool tui_present = (access(tui_fn, F_OK) == 0);
+        if (have_col_range && !tui_present) {
+            fprintf(stderr, "taffy gerp: --columnRange requires a .tui index: %s\n", tui_fn);
+            free(tui_fn);
+            return 1;
+        }
         if (tui_present) {
             tui = tui_load(tui_fn);
             if (tui == NULL) {
@@ -548,9 +577,20 @@ int taf_gerp_main(int argc, char *argv[]) {
             free(tai_fn);
             st_logInfo("taffy gerp: loaded .tai index\n");
         }
+        if (have_col_range) {
+            int64_t T = tui_total_columns(tui);
+            if (col_range_iv.end > T) {
+                fprintf(stderr, "taffy gerp: --columnRange %" PRIi64 "-%" PRIi64
+                                " exceeds T=%" PRIi64 " (total universal columns).\n",
+                        col_range_iv.start, col_range_iv.end, T);
+                return 1;
+            }
+            st_logInfo("taffy gerp: column-range mode, [%" PRIi64 ", %" PRIi64 ") of T=%" PRIi64 "\n",
+                       col_range_iv.start, col_range_iv.end, T);
+        }
     }
 
-    // Outer loop: 1 iteration in streaming mode (consume the whole input);
+    // Outer loop: 1 iteration in streaming or column-range mode;
     // n_regions iterations in region mode (each builds its own iterator
     // over the shared tui/tai, then runs the inner read/score/emit batched
     // loop to exhaustion).
@@ -576,6 +616,13 @@ int taf_gerp_main(int argc, char *argv[]) {
                 st_logDebug("taffy gerp: region %s:%" PRIi64 "-%" PRIi64 " via .tai\n",
                             r->seq, r->start, r->start + r->length);
             }
+        } else if (have_col_range) {
+            // Direct column-range iterator: hand TuiInterval{LO,HI} straight
+            // to tui_extract_iterator (no tui_query / chrom resolution).
+            // `uiv` stays NULL -- col_range_iv lives on the stack across the
+            // single iteration, no allocation to free in the per-iter cleanup.
+            tui_it = tui_extract_iterator(tui, li, input_format == 1, rle,
+                                          &col_range_iv, 1);
         }
 
         // TAF read needs the previous block (p_aln) for delta-coord
@@ -610,6 +657,14 @@ int taf_gerp_main(int argc, char *argv[]) {
                     a = maf_read_block(li);
                 }
                 if (a == NULL) break;
+                // Column-range exactly-once semantics are guaranteed by the
+                // iterator itself: tui_extract_iterator clips each physical
+                // block to the requested column range, so a boundary block
+                // becomes two sub-blocks -- one in each shard, with the
+                // universal columns of each sub-block disjoint from the
+                // other.  No additional driver-side filter needed; verified
+                // by split-vs-single equivalence test on apes (300K cols,
+                // data lines byte-identical after sort).
                 // The previous batch's carry is now consumed by taf_read_block
                 // (it was used to decode this new block); safe to free.  Region
                 // mode doesn't use the carry chain.
