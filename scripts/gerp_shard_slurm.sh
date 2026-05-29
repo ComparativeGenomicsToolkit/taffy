@@ -54,12 +54,14 @@ Optional:
   --mem GB      Per-task memory in GB (default 32)
   --min-chrom-bp N
                 Drop chroms smaller than N bp from the manifest entirely.
-                Default 0 (include all).  Recommended >0 on big inputs:
-                each region is a separate \`taffy gerp\` invocation paying
-                the tui_load + header-parse cost (~30-60s on the 92 GB
-                577-way .tui), so per-region overhead dominates for
-                tiny chroms.  10000 is a sane starting point on
-                vertebrate-scale alignments.
+                Default 0 (include all).  Useful for trimming long-tail
+                tiny anchor chroms whose alignment contribution is
+                negligible.  With \`taffy gerp -R\` (the runner uses one
+                invocation per shard, so tui_load is amortised) the main
+                remaining per-region cost is the tui_query + iterator
+                setup.  10000 is a reasonable starting point on
+                vertebrate-scale alignments; 0 is fine if you want
+                whole-genome coverage.
   --tree FILE   Newick tree override (default: \`# hal\` from MAF header)
   --partition X SLURM partition (--partition=X)
   --account X   SLURM account (--account=X)
@@ -164,8 +166,8 @@ awk -v dir="$OUTDIR/regions" 'NR>1 {print $2":"$3"-"$4 >> (dir "/shard_" $1 ".re
     "$MANIFEST"
 
 # --- Step 4: write the per-shard runner. ------------------------------
-# Process every region in this shard's manifest, append outputs.  bgzip
-# blocks concatenate cleanly so `cat` is enough for the joining step.
+# One `taffy gerp -R` invocation per shard -- the .tui loads ONCE for the
+# shard instead of once per region, which is the whole point of -R.
 RUNNER="$OUTDIR/run_shard.sh"
 cat > "$RUNNER" <<EOF
 #!/bin/bash
@@ -187,26 +189,14 @@ if [[ -s "\$RS_OUT" && -s "\$DEPTH_OUT" ]]; then
     exit 0
 fi
 
-SCRATCH=\$(mktemp -d -t taffy_gerp_shard_XXXXXX)
-trap 'rm -rf "\$SCRATCH"' EXIT
-
-i=0
-while read -r REGION; do
-    [[ -z "\$REGION" ]] && continue
-    SAFE=\$(echo "\$REGION" | tr ':/' '__')
-    "\$TAFFY" gerp -i "\$INPUT" -r "\$REGION" -c -T "\$THREADS" \\
-        \$TREE_FLAG \\
-        -o "\$SCRATCH/r_\${i}_\${SAFE}.rs.wig.gz" \\
-        -D "\$SCRATCH/r_\${i}_\${SAFE}.depth.wig.gz"
-    i=\$((i + 1))
-done < "\$REGIONS"
-
-# Concat all the per-region wigs into the shard output.  BGZF is
-# append-safe (each input ends in an EOF block which is also valid mid-
-# stream); zcat / htslib read concatenated bgzip transparently.
-cat "\$SCRATCH"/r_*.rs.wig.gz    > "\$RS_OUT".tmp && mv "\$RS_OUT".tmp    "\$RS_OUT"
-cat "\$SCRATCH"/r_*.depth.wig.gz > "\$DEPTH_OUT".tmp && mv "\$DEPTH_OUT".tmp "\$DEPTH_OUT"
-echo "shard \${K}: done (\$i regions)"
+# Write to .tmp then rename so a failed run doesn't leave a half-written
+# .wig.gz that future idempotency checks would mistake for completed work.
+"\$TAFFY" gerp -i "\$INPUT" -R "\$REGIONS" -c -T "\$THREADS" \\
+    \$TREE_FLAG \\
+    -o "\$RS_OUT".tmp -D "\$DEPTH_OUT".tmp
+mv "\$RS_OUT".tmp    "\$RS_OUT"
+mv "\$DEPTH_OUT".tmp "\$DEPTH_OUT"
+echo "shard \${K}: done (\$(wc -l < \$REGIONS) regions)"
 EOF
 chmod +x "$RUNNER"
 
