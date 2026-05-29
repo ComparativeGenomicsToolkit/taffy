@@ -155,8 +155,13 @@ typedef struct {
     // Track when chrom changes so the caller can emit variableStep
     // headers in pass 3.  Set on every successful tuple read; toggled
     // to false after the caller acknowledges via _ack_chrom().
-    bool       chrom_changed;
-    const char *last_emitted_chrom;
+    //
+    // last_emitted_chrom is owned (stString_copy on transition + free on
+    // close): WigStream::cur_chrom is freed/recopied on every variableStep
+    // line, so a borrowed pointer here would dangle across the next
+    // variableStep.
+    bool   chrom_changed;
+    char  *last_emitted_chrom;
 } JointWig;
 
 static JointWig *joint_open(const char *rs_path, const char *depth_path) {
@@ -177,6 +182,7 @@ static void joint_close(JointWig *j) {
     if (j == NULL) return;
     wig_stream_close(j->rs);
     wig_stream_close(j->depth);
+    free(j->last_emitted_chrom);
     free(j);
 }
 
@@ -187,6 +193,14 @@ static void joint_close(JointWig *j) {
 static bool advance_depth_to(JointWig *j, const char *chrom, int64_t pos,
                              int64_t *out_depth) {
     if (j->depth == NULL) { *out_depth = 0; return true; }
+    // Cap the number of cross-chrom skips so a corrupted depth wig
+    // with millions of extra chroms doesn't spin silently here.  The
+    // expected ratio is 1:1 same-chrom and ~K extra cross-chrom skips
+    // at each chrom boundary (where K = chrom count of depth wig); a
+    // 1 M cap catches truly garbage input without false-positives on
+    // legitimate wigs.
+    int64_t skipped = 0;
+    const int64_t kSkipCap = 1000000;
     while (1) {
         if (!j->depth->have_pending && !wig_stream_next(j->depth)) {
             fprintf(stderr, "taffy gerp-stats: depth wig EOF before RS position "
@@ -196,6 +210,13 @@ static bool advance_depth_to(JointWig *j, const char *chrom, int64_t pos,
         if (strcmp(j->depth->pending_chrom, chrom) != 0) {
             // Different chrom: discard this depth tuple, keep advancing.
             j->depth->have_pending = false;
+            if (++skipped >= kSkipCap) {
+                fprintf(stderr, "taffy gerp-stats: depth wig: %" PRIi64 " consecutive "
+                                "cross-chrom records without finding %s:%" PRIi64 " -- "
+                                "input likely corrupt or mismatched.\n",
+                        skipped, chrom, pos);
+                return false;
+            }
             continue;
         }
         if (j->depth->pending_pos < pos) {
@@ -237,8 +258,11 @@ static bool joint_next(JointWig *j, const char **chrom_out, int64_t *pos_out,
     *depth_out = depth;
     if (j->last_emitted_chrom == NULL ||
         strcmp(j->last_emitted_chrom, chrom) != 0) {
-        j->chrom_changed       = true;
-        j->last_emitted_chrom  = chrom;
+        j->chrom_changed = true;
+        // Own the chrom copy: WigStream's cur_chrom is freed at the next
+        // variableStep, so a borrowed pointer would dangle.
+        free(j->last_emitted_chrom);
+        j->last_emitted_chrom = stString_copy(chrom);
     } else {
         j->chrom_changed = false;
     }
@@ -578,7 +602,13 @@ static int pass3_run(JointWig *j, const DepthStats *ds, const Histogram *h,
             int64_t d   = 0;
             int     e   = 0;
             if (!joint_next(j, &chrom, &pos, &rs, &d, &e)) { err = e; break; }
-            b_chrom[n] = (char *) chrom;
+            // Own the chrom copy: `chrom` borrows into WigStream::cur_chrom,
+            // which the wig reader frees at the next variableStep line --
+            // and "next variableStep" can happen later in this same batch
+            // on a universal MAF with many anchor chroms per 4096 cols.
+            // Freed below after the parallel block emits its variableStep
+            // headers (lines 619-621).
+            b_chrom[n] = stString_copy(chrom);
             b_pos[n]   = pos;
             b_rs[n]    = rs;
             b_depth[n] = d;
@@ -642,6 +672,11 @@ static int pass3_run(JointWig *j, const DepthStats *ds, const Histogram *h,
             for (int i = 0; i < n; i++) {
                 if (b_out[i].len > 0) LW_putn(out, b_out[i].buf, b_out[i].len);
             }
+        }
+        // Drop the owned chrom copies now that headers have been emitted.
+        for (int i = 0; i < n; i++) {
+            free(b_chrom[i]);
+            b_chrom[i] = NULL;
         }
         // Merge per-thread per-clade tallies and reset the per-thread copies.
         for (int t = 0; t < n_threads; t++) {
@@ -996,6 +1031,20 @@ int taf_gerp_stats_main(int argc, char *argv[]) {
     depth_stats_finalize(ds, min_bucket_n);
     st_logInfo("taffy gerp-stats: pass 1 done -- %" PRIi64 " columns in %" PRIi64 "s\n",
                n_total, (int64_t)(time(NULL) - startTime));
+    if (ds->n_clamped > 0) {
+        // The clamped observations get z=0 in pass 3, which silently
+        // depresses the global histogram + per-clade tails.  Surface to
+        // stderr so the user can re-run with a larger --maxDepth.  We
+        // don't know the actual max depth seen (observe drops the value
+        // on the floor), so the recommendation is just "bigger."
+        double pct = (n_total > 0) ? 100.0 * (double)ds->n_clamped / (double)n_total : 0.0;
+        fprintf(stderr,
+                "taffy gerp-stats: WARNING -- %" PRIi64 " of %" PRIi64
+                " columns (%.3f%%) had depth > --maxDepth=%" PRIi64
+                " and were dropped from depth-correction (z=0). "
+                "Re-run with a larger --maxDepth if those columns matter.\n",
+                ds->n_clamped, n_total, pct, max_depth);
+    }
 
     if (depth_correct == DC_NONE) {
         // With no depth correction, the "z-score" is the raw RS.  Wire
