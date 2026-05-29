@@ -11,6 +11,7 @@
 #include "sonLib.h"
 #include "sonLibTree.h"
 #include <getopt.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -249,7 +250,21 @@ int taf_stats_main(int argc, char *argv[]) {
         }
         if (!anchors_only) {
             tai_fn = tai_path(taf_fn);
-            tai_fh = fopen(tai_fn, "r");
+            // Reject a .tai that's older than the .maf/.taf -- cactus
+            // pipelines regenerate the alignment but sometimes forget to
+            // re-run `taffy index`, and stale .tai sequence lengths are
+            // silently wrong.  Log + fall through to the .tui path; the
+            // .tui builder is always re-run with the alignment.
+            struct stat tai_st, taf_st;
+            if (stat(tai_fn, &tai_st) == 0 && stat(taf_fn, &taf_st) == 0 &&
+                tai_st.st_mtime < taf_st.st_mtime) {
+                st_logCritical("taffy stats: .tai %s is older than %s -- "
+                               "treating as stale and falling back to .tui "
+                               "(re-run `taffy index` if you want -s via .tai)\n",
+                               tai_fn, taf_fn);
+            } else {
+                tai_fh = fopen(tai_fn, "r");
+            }
         }
         if (tai_fh != NULL) {
             tai = tai_load(tai_fh, input_is_maf);
@@ -409,6 +424,7 @@ int taf_stats_main(int argc, char *argv[]) {
         free(tai_fn);
         free(tui_fn);
         if (tai != NULL) tai_destruct(tai);
+        if (tai_fh != NULL) fclose(tai_fh);
     }
     if (internal_labels != NULL) stSet_destruct(internal_labels);
     if (tree_for_labels != NULL) stTree_destruct(tree_for_labels);
