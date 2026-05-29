@@ -96,40 +96,60 @@ typedef struct {
     GerpBuf depth;
     int64_t cols_scored;
     int     status;              // GERP_BLOCK_OK / SKIP / UNKNOWN_SPECIES
+    bool    had_paralog;         // any leaf had > 1 row in this block
     const char *unknown_seq;     // borrowed from aln when status == UNKNOWN
     bool    bad_strand;
     const char *bad_strand_seq;
 } GerpBlockResult;
 
-// Per-thread scratch -- one set per OpenMP worker thread.
+// Per-thread scratch -- one set per OpenMP worker thread.  entries[] is
+// grown on demand to fit the largest block this thread sees; leaf_csets
+// is fixed-size at n_leaves bytes.
 typedef struct {
-    GerpScratch    *sc;
-    Alignment_Row **row_by_leaf;
-    char           *leaf_bases;
+    GerpScratch  *sc;
+    GerpRowEntry *entries;
+    int64_t       entries_cap;
+    uint8_t      *leaf_csets;
 } GerpThreadState;
 
 static void score_one_block(const GerpTree *gt, GerpThreadState *ts,
                             const Alignment *aln, GerpBlockResult *res,
-                            bool skip_paralogs, int64_t min_leaves,
+                            GerpParalogPolicy policy, int64_t min_leaves,
                             double branch_scale, bool want_depth) {
     gerpbuf_reset(&res->rs);
     if (want_depth) gerpbuf_reset(&res->depth);
     res->cols_scored = 0;
     res->status = GERP_BLOCK_OK;
+    res->had_paralog = false;
     res->unknown_seq = NULL;
     res->bad_strand = false;
     res->bad_strand_seq = NULL;
 
-    int rc = gerp_block_resolve_rows(gt, aln, skip_paralogs,
-                                     ts->row_by_leaf, &res->unknown_seq);
+    // entries[] needs room for every leaf row in the block (UNION mode
+    // keeps them all).  Grow geometrically and remember the new cap.
+    if (aln->row_number > ts->entries_cap) {
+        int64_t new_cap = ts->entries_cap > 0 ? ts->entries_cap : 16;
+        while (new_cap < aln->row_number) new_cap *= 2;
+        ts->entries = st_realloc(ts->entries,
+                                 (size_t)new_cap * sizeof(GerpRowEntry));
+        ts->entries_cap = new_cap;
+    }
+
+    int64_t n_active = 0, n_paralog_dups = 0;
+    int rc = gerp_block_resolve_rows(gt, aln, policy,
+                                     ts->entries, ts->entries_cap,
+                                     &n_active, &n_paralog_dups,
+                                     &res->unknown_seq);
     if (rc == GERP_BLOCK_UNKNOWN_SPECIES) {
         res->status = GERP_BLOCK_UNKNOWN_SPECIES;
         return;
     }
     if (rc == GERP_BLOCK_SKIP) {
-        res->status = GERP_BLOCK_SKIP;
+        res->status      = GERP_BLOCK_SKIP;
+        res->had_paralog = true;  // SKIP only triggers on paralog
         return;
     }
+    res->had_paralog = (n_paralog_dups > 0);
 
     Alignment_Row *ref = aln->row;
     if (ref == NULL || ref->bases == NULL) return;
@@ -155,15 +175,21 @@ static void score_one_block(const GerpTree *gt, GerpThreadState *ts,
     for (int64_t col = 0; col < col_n; col++) {
         char rb = ref->bases[col];
         if (rb == '-') continue;  // gap in row-0 -> no anchor coord
-        for (int64_t i = 0; i < n_leaves; i++) {
-            Alignment_Row *r = ts->row_by_leaf[i];
-            ts->leaf_bases[i] = (r != NULL) ? r->bases[col] : 0;
+        // Build per-leaf character set by OR-ing each active row's base
+        // bit at this column.  In UNION mode paralog rows of the same
+        // species accumulate into a multi-bit cset; in FIRST mode there's
+        // at most one entry per leaf so the cset is single-bit.
+        memset(ts->leaf_csets, 0, (size_t)n_leaves);
+        for (int64_t k = 0; k < n_active; k++) {
+            const GerpRowEntry *e = &ts->entries[k];
+            uint8_t bit = gerp_base_to_bit(e->row->bases[col]);
+            if (bit) ts->leaf_csets[e->leaf_id] |= bit;
         }
         double  rs    = 0;
         int64_t depth = 0;
-        bool    scored = gerp_score_column(gt, ts->sc, ts->leaf_bases,
-                                           min_leaves, branch_scale,
-                                           &rs, &depth);
+        bool    scored = gerp_score_column_csets(gt, ts->sc, ts->leaf_csets,
+                                                 min_leaves, branch_scale,
+                                                 &rs, &depth);
         int64_t wig_pos = anchor + 1;
         if (scored) {
             gerpbuf_put_score(&res->rs, wig_pos, rs, 4);
@@ -192,8 +218,12 @@ static void usage(void) {
     fprintf(stderr, "-r --region SEQ:START-END : Restrict to one anchor chrom range.  Requires <inputFile>.tui (universal MAF, auto-detected) OR <inputFile>.tai (regular MAF).  Half-open, 0-based.\n");
     fprintf(stderr, "--branchScale : Global multiplier on branch lengths (default 1.0).\n");
     fprintf(stderr, "--minLeaves : Minimum surviving non-gap leaves to score a column (default 2).\n");
-    fprintf(stderr, "--skipParalogs : Skip blocks with duplicate species (default ON).\n");
-    fprintf(stderr, "--keepParalogs : Inverse of --skipParalogs (score using the first-seen row per species).\n");
+    fprintf(stderr, "--paralog MODE : How to treat duplicate-species rows in one block (default union).\n");
+    fprintf(stderr, "                 union -- OR each species's paralog bases into a multi-state leaf cset (Hartigan).\n");
+    fprintf(stderr, "                 skip  -- drop the entire block (strict GERP++ semantics).\n");
+    fprintf(stderr, "                 first -- score using only the first-seen row per species.\n");
+    fprintf(stderr, "--skipParalogs : Alias for --paralog skip.\n");
+    fprintf(stderr, "--keepParalogs : Alias for --paralog first (kept for back-compat; prefer --paralog union).\n");
     fprintf(stderr, "-T --threads N : Parallel block scoring + bgzf I/O on bgzipped streams (default 1).\n");
     fprintf(stderr, "-l --logLevel : Set the log level.\n");
     fprintf(stderr, "-h --help : Print this help message.\n");
@@ -202,9 +232,18 @@ static void usage(void) {
 enum {
     OPT_BRANCH_SCALE = 256,
     OPT_MIN_LEAVES,
+    OPT_PARALOG,
     OPT_SKIP_PARALOGS,
     OPT_KEEP_PARALOGS,
 };
+
+static int parse_paralog_policy(const char *s, GerpParalogPolicy *out) {
+    if (s == NULL) return -1;
+    if (strcmp(s, "union") == 0) { *out = GERP_PARALOG_UNION; return 0; }
+    if (strcmp(s, "skip")  == 0) { *out = GERP_PARALOG_SKIP;  return 0; }
+    if (strcmp(s, "first") == 0) { *out = GERP_PARALOG_FIRST; return 0; }
+    return -1;
+}
 
 int taf_gerp_main(int argc, char *argv[]) {
     time_t startTime = time(NULL);
@@ -218,7 +257,7 @@ int taf_gerp_main(int argc, char *argv[]) {
     bool use_compression = false;
     double branch_scale  = 1.0;
     int64_t min_leaves   = 2;
-    bool skip_paralogs   = true;
+    GerpParalogPolicy paralog_policy = GERP_PARALOG_UNION;
     int n_threads        = 1;
 
     while (1) {
@@ -232,6 +271,7 @@ int taf_gerp_main(int argc, char *argv[]) {
             { "region",         required_argument, 0, 'r' },
             { "branchScale",    required_argument, 0, OPT_BRANCH_SCALE },
             { "minLeaves",      required_argument, 0, OPT_MIN_LEAVES },
+            { "paralog",        required_argument, 0, OPT_PARALOG },
             { "skipParalogs",   no_argument,       0, OPT_SKIP_PARALOGS },
             { "keepParalogs",   no_argument,       0, OPT_KEEP_PARALOGS },
             { "threads",        required_argument, 0, 'T' },
@@ -252,8 +292,15 @@ int taf_gerp_main(int argc, char *argv[]) {
             case 'T': n_threads      = atoi(optarg); break;
             case OPT_BRANCH_SCALE:  branch_scale  = atof(optarg); break;
             case OPT_MIN_LEAVES:    min_leaves    = atol(optarg); break;
-            case OPT_SKIP_PARALOGS: skip_paralogs = true;  break;
-            case OPT_KEEP_PARALOGS: skip_paralogs = false; break;
+            case OPT_PARALOG:
+                if (parse_paralog_policy(optarg, &paralog_policy) != 0) {
+                    fprintf(stderr, "taffy gerp: --paralog must be one of union|skip|first (got %s)\n",
+                            optarg);
+                    return 1;
+                }
+                break;
+            case OPT_SKIP_PARALOGS: paralog_policy = GERP_PARALOG_SKIP;  break;
+            case OPT_KEEP_PARALOGS: paralog_policy = GERP_PARALOG_FIRST; break;
             case 'h': usage(); return 0;
             default:  usage(); return 1;
         }
@@ -337,15 +384,16 @@ int taf_gerp_main(int argc, char *argv[]) {
         dout = LW_construct(dout_fh, use_compression);
     }
 
-    // Per-thread state.  One GerpScratch + row_by_leaf + leaf_bases per
-    // worker.  Allocated once before the batched loop; reused across all
-    // blocks the thread processes.
+    // Per-thread state.  One GerpScratch + entries[] + leaf_csets per
+    // worker.  entries[] grows on demand as blocks come in; leaf_csets is
+    // n_leaves bytes (one 4-bit cset per leaf, per column).
     int64_t n_leaves = gerp_tree_n_leaves(gt);
     GerpThreadState *ts = st_calloc((size_t)n_threads, sizeof(GerpThreadState));
     for (int t = 0; t < n_threads; t++) {
         ts[t].sc          = gerp_scratch_construct(gt);
-        ts[t].row_by_leaf = st_malloc((size_t)n_leaves * sizeof(Alignment_Row *));
-        ts[t].leaf_bases  = st_malloc((size_t)n_leaves);
+        ts[t].entries     = NULL;
+        ts[t].entries_cap = 0;
+        ts[t].leaf_csets  = st_malloc((size_t)n_leaves);
     }
 
     // Per-batch slot.  4x n_threads keeps workers fed when block work is
@@ -360,7 +408,8 @@ int taf_gerp_main(int argc, char *argv[]) {
         if (want_depth) gerpbuf_init(&results[i].depth, 4096);
     }
 
-    int64_t n_blocks = 0, n_skipped_paralog = 0, n_scored_cols = 0;
+    int64_t n_blocks = 0, n_skipped_paralog = 0, n_paralog_blocks = 0;
+    int64_t n_scored_cols = 0;
     int fatal = 0;
 
     // Region mode: open the .tui (universal MAF) or .tai (regular MAF)
@@ -478,7 +527,7 @@ int taf_gerp_main(int argc, char *argv[]) {
             int t = 0;
 #endif
             score_one_block(gt, &ts[t], batch_aln[i], &results[i],
-                            skip_paralogs, min_leaves, branch_scale,
+                            paralog_policy, min_leaves, branch_scale,
                             want_depth);
         }
 
@@ -501,6 +550,7 @@ int taf_gerp_main(int argc, char *argv[]) {
                 fatal = 1;
                 break;
             }
+            if (r->had_paralog) n_paralog_blocks++;
             if (r->status == GERP_BLOCK_SKIP) {
                 n_skipped_paralog++;
                 continue;
@@ -542,10 +592,13 @@ int taf_gerp_main(int argc, char *argv[]) {
     free(uiv);
     free(region_seq);
 
-    st_logInfo("taffy gerp: %" PRIi64 " blocks read, %" PRIi64 " skipped (paralogs), "
-               "%" PRIi64 " columns scored in %" PRIi64 " seconds\n",
-               n_blocks, n_skipped_paralog, n_scored_cols,
-               (int64_t)(time(NULL) - startTime));
+    const char *policy_name = (paralog_policy == GERP_PARALOG_UNION) ? "union"
+                            : (paralog_policy == GERP_PARALOG_SKIP)  ? "skip"
+                            :                                          "first";
+    st_logInfo("taffy gerp: %" PRIi64 " blocks read, %" PRIi64 " with paralogs (policy=%s; "
+               "%" PRIi64 " block-skips), %" PRIi64 " columns scored in %" PRIi64 " seconds\n",
+               n_blocks, n_paralog_blocks, policy_name, n_skipped_paralog,
+               n_scored_cols, (int64_t)(time(NULL) - startTime));
 
     for (int i = 0; i < batch_cap; i++) {
         gerpbuf_destroy(&results[i].rs);
@@ -555,8 +608,8 @@ int taf_gerp_main(int argc, char *argv[]) {
     free(batch_aln);
     for (int t = 0; t < n_threads; t++) {
         gerp_scratch_destruct(ts[t].sc);
-        free(ts[t].row_by_leaf);
-        free(ts[t].leaf_bases);
+        free(ts[t].entries);
+        free(ts[t].leaf_csets);
     }
     free(ts);
 

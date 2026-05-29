@@ -36,6 +36,7 @@ struct GerpTree {
     stSet  *internal_labels;  // ancestor set (labels of all internal nodes)
     stSet  *all_labels;       // every labelled node, for extract_genome_name
     stHash *leaf_by_label;    // leaf label -> (int64_t *) leaf id
+    stHash *node_by_label;    // any labelled node -> stTree* (borrowed)
 };
 
 // Post-order walk that fills parent[], branch_len[], leaf_id_of_node[],
@@ -81,8 +82,12 @@ static void gt_count(stTree *node, int64_t *n_nodes, int64_t *n_leaves) {
 }
 
 // Collect ALL labels (leaves + internals) into all_labels, and internal
-// labels into internal_labels.  Borrows the label strings from stTree.
-static void gt_collect_labels(stTree *node, stSet *all_labels, stSet *internal_labels) {
+// labels into internal_labels.  Borrows the label strings from stTree;
+// also populates node_by_label as a label -> stTree* index (borrowed
+// node pointers) so the gerp-stats clade-attribution walk doesn't have
+// to retraverse the tree per chrom.
+static void gt_collect_labels(stTree *node, stSet *all_labels, stSet *internal_labels,
+                              stHash *node_by_label) {
     int64_t nc = stTree_getChildNumber(node);
     const char *lbl = stTree_getLabel(node);
     if (lbl != NULL && *lbl != '\0') {
@@ -91,9 +96,12 @@ static void gt_collect_labels(stTree *node, stSet *all_labels, stSet *internal_l
         // long after).
         stSet_insert(all_labels, stString_copy(lbl));
         if (nc > 0) stSet_insert(internal_labels, stString_copy(lbl));
+        // node_by_label borrows the label string from stTree (no copy);
+        // safe because the tree outlives the hash.
+        stHash_insert(node_by_label, (char *)lbl, node);
     }
     for (int64_t i = 0; i < nc; i++) {
-        gt_collect_labels(stTree_getChild(node, i), all_labels, internal_labels);
+        gt_collect_labels(stTree_getChild(node, i), all_labels, internal_labels, node_by_label);
     }
 }
 
@@ -120,10 +128,11 @@ GerpTree *gerp_tree_construct(const char *newick) {
     gt_walk(root, -1, gt, &cur);
     assert(cur == gt->n_nodes && gt->n_leaves == expected_n_leaves);
 
-    // Label sets.
+    // Label sets + node lookup.
     gt->all_labels      = stSet_construct3(stHash_stringKey, stHash_stringEqualKey, free);
     gt->internal_labels = stSet_construct3(stHash_stringKey, stHash_stringEqualKey, free);
-    gt_collect_labels(root, gt->all_labels, gt->internal_labels);
+    gt->node_by_label   = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, NULL, NULL);
+    gt_collect_labels(root, gt->all_labels, gt->internal_labels, gt->node_by_label);
 
     // leaf label -> leaf id, for fast row resolution.  Values are owned
     // int64_t allocations.
@@ -149,7 +158,36 @@ void gerp_tree_destruct(GerpTree *gt) {
     if (gt->internal_labels) stSet_destruct(gt->internal_labels);
     if (gt->all_labels)      stSet_destruct(gt->all_labels);
     if (gt->leaf_by_label)   stHash_destruct(gt->leaf_by_label);
+    if (gt->node_by_label)   stHash_destruct(gt->node_by_label);
     free(gt);
+}
+
+const char *gerp_tree_walk_to_set(const GerpTree *gt,
+                                   const char *name,
+                                   stSet *targets) {
+    if (gt == NULL || name == NULL || targets == NULL) return NULL;
+    stTree *node = stHash_search(gt->node_by_label, (void *)name);
+    if (node == NULL) return NULL;
+    while (node != NULL) {
+        const char *lbl = stTree_getLabel(node);
+        if (lbl != NULL && stSet_search(targets, (void *)lbl) != NULL) {
+            // Return the canonical label pointer from the targets set --
+            // borrowed by the caller, owned by `targets`.
+            return (const char *) stSet_search(targets, (void *)lbl);
+        }
+        node = stTree_getParent(node);
+    }
+    return NULL;
+}
+
+int64_t gerp_tree_depth_from_root(const GerpTree *gt, const char *name) {
+    if (gt == NULL || name == NULL) return -1;
+    stTree *node = stHash_search(gt->node_by_label, (void *)name);
+    if (node == NULL) return -1;
+    int64_t d = 0;
+    stTree *p = stTree_getParent(node);
+    while (p != NULL) { d++; p = stTree_getParent(p); }
+    return d;
 }
 
 bool gerp_tree_is_ancestor(const GerpTree *gt, const char *name) {
@@ -208,29 +246,20 @@ void gerp_scratch_destruct(GerpScratch *sc) {
     free(sc);
 }
 
-static inline uint8_t base_to_bit(char b) {
-    switch (b) {
-        case 'A': return 0x1;
-        case 'C': return 0x2;
-        case 'G': return 0x4;
-        case 'T': return 0x8;
-        default:  return 0;
-    }
-}
-
-bool gerp_score_column(const GerpTree *gt, GerpScratch *sc,
-                       const char *leaf_bases, int64_t min_leaves,
-                       double branch_scale,
-                       double *out_rs, int64_t *out_depth) {
+bool gerp_score_column_csets(const GerpTree *gt, GerpScratch *sc,
+                             const uint8_t *leaf_csets, int64_t min_leaves,
+                             double branch_scale,
+                             double *out_rs, int64_t *out_depth) {
     // Initialise per-node state.  Leaves get their cset/present set from
     // the column; internals are zeroed (count[] votes accumulated during
-    // the post-order fold below).
+    // the post-order fold below).  A leaf's cset can be multi-bit when
+    // paralog rows of the same species were OR'd by the caller -- Fitch
+    // treats this as a polymorphic leaf (multi-state character).
     int64_t depth = 0;
     for (int64_t v = 0; v < gt->n_nodes; v++) {
         if (gt->leaf_id_of_node[v] >= 0) {
             int64_t i = gt->leaf_id_of_node[v];
-            char b = leaf_bases[i];
-            uint8_t bit = (b == 0) ? 0 : base_to_bit((char)toupper((unsigned char)b));
+            uint8_t bit = leaf_csets[i];
             sc->cset[v]    = bit;
             sc->present[v] = bit ? 1 : 0;
             if (bit) depth++;
@@ -262,6 +291,13 @@ bool gerp_score_column(const GerpTree *gt, GerpScratch *sc,
     // internal node's step-1 must complete before step-2 (since step-2
     // reads v.cset).  The single post-order pass below handles both
     // because children precede their parent in the iteration order.
+    //
+    // Multi-bit leaf csets (paralog union): step 2 contributes to count[]
+    // for every base in v.cset.  This makes a paralog leaf "vote" for each
+    // of its observed paralog bases at the parent -- equivalent to giving
+    // the species a polymorphic character.  The Hartigan rule's max-vote
+    // logic at the parent then prefers any base that both the paralog
+    // leaf AND the other children share.
     double cost = 0;
     double branch_sum = 0;
 
@@ -309,6 +345,24 @@ bool gerp_score_column(const GerpTree *gt, GerpScratch *sc,
     return true;
 }
 
+bool gerp_score_column(const GerpTree *gt, GerpScratch *sc,
+                       const char *leaf_bases, int64_t min_leaves,
+                       double branch_scale,
+                       double *out_rs, int64_t *out_depth) {
+    // Char-input convenience wrapper.  Build per-leaf csets (single-bit
+    // each, no paralog union) and delegate.  Used by the unit tests; the
+    // production scorer in taf_gerp.c uses gerp_score_column_csets
+    // directly so it can OR paralog rows into multi-bit csets.
+    int64_t n_leaves = gt->n_leaves;
+    uint8_t csets[n_leaves > 0 ? n_leaves : 1];
+    for (int64_t i = 0; i < n_leaves; i++) {
+        char b = leaf_bases[i];
+        csets[i] = (b == 0) ? 0 : gerp_base_to_bit(b);
+    }
+    return gerp_score_column_csets(gt, sc, csets, min_leaves, branch_scale,
+                                   out_rs, out_depth);
+}
+
 /////////////////////////////////////////////////////////////////////////////
 // Per-block row resolution
 /////////////////////////////////////////////////////////////////////////////
@@ -319,7 +373,7 @@ bool gerp_score_column(const GerpTree *gt, GerpScratch *sc,
 // NULL on failure instead of calling st_errAbort (the version in taf.c
 // aborts the process when called with hal_species != NULL).  Returns a
 // borrowed pointer into gt->all_labels (do NOT free).
-static const char *gerp_resolve_genome(const GerpTree *gt, const char *sequence_name) {
+const char *gerp_tree_resolve_genome(const GerpTree *gt, const char *sequence_name) {
     size_t n = strlen(sequence_name);
     if (n == 0) return NULL;
     // Walk through every '.' position in the name and ask the label set.
@@ -350,16 +404,24 @@ static const char *gerp_resolve_genome(const GerpTree *gt, const char *sequence_
 }
 
 int gerp_block_resolve_rows(const GerpTree *gt, const Alignment *aln,
-                            bool skip_paralogs,
-                            Alignment_Row **row_by_leaf,
+                            GerpParalogPolicy policy,
+                            GerpRowEntry *entries, int64_t entries_cap,
+                            int64_t *n_active, int64_t *n_paralog_dups,
                             const char **unknown_seq) {
-    for (int64_t i = 0; i < gt->n_leaves; i++) row_by_leaf[i] = NULL;
-    if (unknown_seq) *unknown_seq = NULL;
+    if (unknown_seq)    *unknown_seq    = NULL;
+    if (n_active)       *n_active       = 0;
+    if (n_paralog_dups) *n_paralog_dups = 0;
 
+    // Per-leaf seen flag for paralog detection.  VLA on stack -- n_leaves
+    // tops out in the low thousands even for vgp scale (577).
+    int64_t n_leaves = gt->n_leaves;
+    uint8_t seen[n_leaves > 0 ? n_leaves : 1];
+    memset(seen, 0, (size_t)n_leaves);
+
+    int64_t na = 0, ndup = 0;
     Alignment_Row *row = aln->row;
-    bool paralog_seen = false;
     while (row != NULL) {
-        const char *genome = gerp_resolve_genome(gt, row->sequence_name);
+        const char *genome = gerp_tree_resolve_genome(gt, row->sequence_name);
         if (genome == NULL) {
             if (unknown_seq) *unknown_seq = row->sequence_name;
             return GERP_BLOCK_UNKNOWN_SPECIES;
@@ -380,15 +442,28 @@ int gerp_block_resolve_rows(const GerpTree *gt, const Alignment *aln,
             return GERP_BLOCK_UNKNOWN_SPECIES;
         }
         int64_t leaf_id = *p;
-        if (row_by_leaf[leaf_id] != NULL) {
-            paralog_seen = true;
-            // Keep first-seen row; v1 paralog policy is "skip the block",
-            // not "use one of the paralogs".
-        } else {
-            row_by_leaf[leaf_id] = row;
+        bool already = (seen[leaf_id] != 0);
+        if (already) {
+            ndup++;
+            if (policy == GERP_PARALOG_SKIP) {
+                return GERP_BLOCK_SKIP;
+            }
+            if (policy == GERP_PARALOG_FIRST) {
+                // Drop this paralog row; the first-seen row is already in
+                // entries[].
+                row = row->n_row;
+                continue;
+            }
+            // UNION: fall through to append this additional row.
         }
+        seen[leaf_id] = 1;
+        assert(na < entries_cap);
+        entries[na].leaf_id = leaf_id;
+        entries[na].row     = row;
+        na++;
         row = row->n_row;
     }
-    if (paralog_seen && skip_paralogs) return GERP_BLOCK_SKIP;
+    if (n_active)       *n_active       = na;
+    if (n_paralog_dups) *n_paralog_dups = ndup;
     return GERP_BLOCK_OK;
 }
