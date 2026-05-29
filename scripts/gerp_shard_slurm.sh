@@ -15,6 +15,17 @@
 # sub-blocks, with disjoint columns).  No chrom enumeration, no bin
 # packing, no double counting from leaf vs. anchor chrom names.
 #
+# Local-stage mode (default ON)
+# -----------------------------
+# At vertebrate scale the .tui is a 92 GB random-access index against a
+# 1.4 TB .maf.gz; the per-column query pattern hammers the network FS.
+# By default each task copies INPUT + INPUT.tui to $TMPDIR up-front (one
+# sequential bulk read per task) then runs gerp against the local copies.
+# Use fewer shards with more cores each to amortise the stage-in cost
+# (e.g. -n 8 -T 32 instead of -n 32 -T 8).  --no-stage-local reads from
+# the original network path -- only sensible for small inputs or local
+# filesystems.
+#
 # Outputs (under $OUTDIR):
 #
 #   manifest.tsv                  # shard_id <TAB> col_lo <TAB> col_hi
@@ -37,6 +48,8 @@ N_SHARDS=10
 THREADS=10
 TIME_HOURS=24
 MEM_GB=32
+TMP_GB=""            # passed to sbatch --tmp= when set (MB on most schedulers)
+STAGE_LOCAL=1
 TREE=""
 PARTITION=""
 ACCOUNT=""
@@ -47,18 +60,30 @@ TAFFY="${TAFFY:-$(command -v taffy || true)}"
 usage() {
     cat >&2 <<EOF
 gerp_shard_slurm.sh -- run \`taffy gerp\` on a universal MAF in N SLURM shards
-                       (column-range sharding via the .tui's T)
+                       (column-range sharding; default stages input to \$TMPDIR)
 
 Required:
   -i FILE       Input universal MAF (.maf.gz with a sibling .tui index)
   -o DIR        Output directory (created if missing)
 
 Optional:
-  -n INT        Number of shards (default 10)
+  -n INT        Number of shards (default 10; with local-stage prefer
+                fewer-larger shards, e.g. -n 8 -T 32, to amortise the
+                stage-in cost per task)
   -T INT        Threads per shard (default 10; --cpus-per-task=INT)
   --time HRS    Per-task wall limit in hours (default 24)
   --mem GB      Per-task memory in GB (default 32)
-  --tree FILE   Newick tree override (default: \`# hal\` from MAF header)
+  --tmp GB      Per-task local-scratch requirement (--tmp=N to sbatch).
+                Default unset.  Required when local-stage is on AND
+                your cluster enforces \`--tmp\`; size to (1.5 * input
+                bytes + output budget) so the stage + outputs fit.
+  --no-stage-local
+                Disable copying INPUT + .tui to \$TMPDIR; read from the
+                original path.  Saves the stage time but every per-
+                column .tui query hits the network FS.  Only sensible
+                on local-filesystem inputs.
+  --tree FILE   Newick tree override (default: \`# hal\` from MAF header).
+                Also staged to \$TMPDIR when local-stage is on.
   --partition X SLURM partition (--partition=X)
   --account X   SLURM account (--account=X)
   --no-concat   Skip the post-array concatenation job
@@ -70,19 +95,21 @@ EOF
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -i)            INPUT="$2"; shift 2;;
-        -o)            OUTDIR="$2"; shift 2;;
-        -n)            N_SHARDS="$2"; shift 2;;
-        -T)            THREADS="$2"; shift 2;;
-        --time)        TIME_HOURS="$2"; shift 2;;
-        --mem)         MEM_GB="$2"; shift 2;;
-        --tree)        TREE="$2"; shift 2;;
-        --partition)   PARTITION="$2"; shift 2;;
-        --account)     ACCOUNT="$2"; shift 2;;
-        --no-concat)   DO_CONCAT=0; shift;;
-        --dry-run)     DRY_RUN=1; shift;;
-        -h|--help)     usage 0;;
-        *)             echo "unknown arg: $1" >&2; usage 1;;
+        -i)              INPUT="$2"; shift 2;;
+        -o)              OUTDIR="$2"; shift 2;;
+        -n)              N_SHARDS="$2"; shift 2;;
+        -T)              THREADS="$2"; shift 2;;
+        --time)          TIME_HOURS="$2"; shift 2;;
+        --mem)           MEM_GB="$2"; shift 2;;
+        --tmp)           TMP_GB="$2"; shift 2;;
+        --no-stage-local) STAGE_LOCAL=0; shift;;
+        --tree)          TREE="$2"; shift 2;;
+        --partition)     PARTITION="$2"; shift 2;;
+        --account)       ACCOUNT="$2"; shift 2;;
+        --no-concat)     DO_CONCAT=0; shift;;
+        --dry-run)       DRY_RUN=1; shift;;
+        -h|--help)       usage 0;;
+        *)               echo "unknown arg: $1" >&2; usage 1;;
     esac
 done
 
@@ -91,12 +118,26 @@ done
 [[ -n "$TAFFY"  ]] || { echo "ERROR: taffy not on PATH (set \$TAFFY)" >&2; exit 1; }
 [[ -f "$INPUT"      ]] || { echo "ERROR: input not found: $INPUT" >&2; exit 1; }
 [[ -f "${INPUT}.tui" ]] || { echo "ERROR: $INPUT has no .tui sibling -- run \`taffy index -u\` first" >&2; exit 1; }
+[[ -z "$TREE" || -f "$TREE" ]] || { echo "ERROR: --tree file not found: $TREE" >&2; exit 1; }
 
 mkdir -p "$OUTDIR"
-echo ">> output dir: $OUTDIR"
-echo ">> taffy:      $TAFFY"
-echo ">> input:      $INPUT (.tui present)"
-echo ">> shards:     $N_SHARDS,  threads/shard: $THREADS"
+echo ">> output dir:    $OUTDIR"
+echo ">> taffy:         $TAFFY"
+echo ">> input:         $INPUT (.tui present)"
+echo ">> shards:        $N_SHARDS,  threads/shard: $THREADS"
+echo ">> local-stage:   $([[ $STAGE_LOCAL -eq 1 ]] && echo "ON (copies to \$TMPDIR)" || echo "OFF (reads from network)")"
+[[ -n "$TMP_GB" ]] && echo ">> --tmp request: ${TMP_GB} GB per task"
+
+# Belt-and-suspenders sizing hint when local-stage is on.
+if [[ "$STAGE_LOCAL" -eq 1 ]]; then
+    INPUT_BYTES=$(stat -c %s "$INPUT" 2>/dev/null || stat -f %z "$INPUT")
+    TUI_BYTES=$(stat -c %s "$INPUT.tui" 2>/dev/null || stat -f %z "$INPUT.tui")
+    STAGE_GB=$(( (INPUT_BYTES + TUI_BYTES) / (1024**3) ))
+    echo ">> stage-in size: ~${STAGE_GB} GB per task (input + .tui)"
+    if [[ -z "$TMP_GB" ]]; then
+        echo ">> hint:          consider --tmp $(( STAGE_GB * 2 )) so SLURM picks a node with enough local scratch"
+    fi
+fi
 
 # --- Step 1: total universal column count T from the .tui. ------------
 echo ">> reading T via \`taffy stats -u\` ..."
@@ -137,6 +178,9 @@ if n_skip > 0:
 PY
 
 # --- Step 3: write the per-shard runner. ------------------------------
+# When STAGE_LOCAL is on, each task copies INPUT + .tui (+ optional tree)
+# to $TMPDIR up front then runs gerp locally.  $TMPDIR is set by SLURM's
+# job prolog on every reasonable cluster; we fall back to /tmp if not.
 RUNNER="$OUTDIR/run_shard.sh"
 cat > "$RUNNER" <<EOF
 #!/bin/bash
@@ -146,10 +190,11 @@ INPUT="$INPUT"
 OUTDIR="$OUTDIR"
 THREADS="$THREADS"
 TAFFY="$TAFFY"
-TREE_FLAG=$([[ -n "$TREE" ]] && echo "-t $TREE" || echo "")
+TREE="$TREE"
+STAGE_LOCAL=$STAGE_LOCAL
 MANIFEST="$OUTDIR/manifest.tsv"
 
-# Lookup this shard's column range from the manifest (1-indexed, skip header).
+# Lookup this shard's column range from the manifest (skip header).
 read SHARD_ID COL_LO COL_HI < <(awk -v k="\$K" 'NR>1 && \$1==k {print \$1, \$2, \$3; exit}' "\$MANIFEST")
 if [[ -z "\${COL_LO:-}" ]]; then
     # T < N_SHARDS pruned this shard out of the manifest; nothing to do.
@@ -160,19 +205,64 @@ fi
 RS_OUT="\$OUTDIR/shard_\${K}.rs.wig.gz"
 DEPTH_OUT="\$OUTDIR/shard_\${K}.depth.wig.gz"
 
-# Idempotency: if both outputs exist + non-empty, skip.
+# Idempotency: if both outputs exist + non-empty, skip without staging.
 if [[ -s "\$RS_OUT" && -s "\$DEPTH_OUT" ]]; then
     echo "shard \${K}: outputs present, skipping"
     exit 0
 fi
 
-# .tmp -> rename so a failed run doesn't leave a half-written .wig.gz
-# that future idempotency checks would mistake for completed work.
-"\$TAFFY" gerp -i "\$INPUT" --columnRange "\${COL_LO}-\${COL_HI}" -c -T "\$THREADS" \\
+# Resolve the scratch dir.  SLURM sets \$TMPDIR per task; if not set
+# (running outside SLURM, or unusual cluster), make our own under /tmp.
+SCRATCH="\${TMPDIR:-/tmp/taffy_gerp_\${SLURM_JOB_ID:-\$\$}_\${K}}"
+mkdir -p "\$SCRATCH"
+# Clean up our scratch on exit -- SLURM's prolog usually does this too,
+# but be explicit so failure modes don't leave 1.5 TB lying around.
+trap 'rm -rf "\$SCRATCH/taffy_stage" 2>/dev/null || true' EXIT
+
+if [[ "\$STAGE_LOCAL" -eq 1 ]]; then
+    STAGE_DIR="\$SCRATCH/taffy_stage"
+    mkdir -p "\$STAGE_DIR"
+    BASENAME=\$(basename "\$INPUT")
+    LOCAL_INPUT="\$STAGE_DIR/\$BASENAME"
+    echo "shard \${K}: staging INPUT + .tui to \$STAGE_DIR ..."
+    t0=\$SECONDS
+    cp "\$INPUT"     "\$LOCAL_INPUT"
+    cp "\$INPUT.tui" "\$LOCAL_INPUT.tui"
+    if [[ -n "\$TREE" ]]; then
+        LOCAL_TREE="\$STAGE_DIR/\$(basename "\$TREE")"
+        cp "\$TREE" "\$LOCAL_TREE"
+    fi
+    echo "shard \${K}: stage-in took \$((SECONDS - t0)) s"
+    GERP_INPUT="\$LOCAL_INPUT"
+    GERP_TREE="\${LOCAL_TREE:-}"
+else
+    GERP_INPUT="\$INPUT"
+    GERP_TREE="\$TREE"
+fi
+TREE_FLAG=\$([[ -n "\$GERP_TREE" ]] && echo "-t \$GERP_TREE" || echo "")
+
+# Outputs land in scratch first; cp -> mv (rename within OUTDIR) at the
+# end so partial writes never make it to a path that the idempotency
+# check would mistake for completed work.
+RS_TMP="\$SCRATCH/shard_\${K}.rs.wig.gz"
+DEPTH_TMP="\$SCRATCH/shard_\${K}.depth.wig.gz"
+
+echo "shard \${K}: running gerp on columns [\${COL_LO}, \${COL_HI}) ..."
+t0=\$SECONDS
+"\$TAFFY" gerp -i "\$GERP_INPUT" --columnRange "\${COL_LO}-\${COL_HI}" -c -T "\$THREADS" \\
     \$TREE_FLAG \\
-    -o "\$RS_OUT".tmp -D "\$DEPTH_OUT".tmp
-mv "\$RS_OUT".tmp    "\$RS_OUT"
-mv "\$DEPTH_OUT".tmp "\$DEPTH_OUT"
+    -o "\$RS_TMP" -D "\$DEPTH_TMP"
+echo "shard \${K}: gerp took \$((SECONDS - t0)) s"
+
+echo "shard \${K}: staging out to \$OUTDIR ..."
+t0=\$SECONDS
+cp "\$RS_TMP"    "\$RS_OUT".tmp    && mv "\$RS_OUT".tmp    "\$RS_OUT"
+cp "\$DEPTH_TMP" "\$DEPTH_OUT".tmp && mv "\$DEPTH_OUT".tmp "\$DEPTH_OUT"
+echo "shard \${K}: stage-out took \$((SECONDS - t0)) s"
+
+# Drop local copies eagerly even though trap will sweep on exit -- frees
+# scratch for the next task to land on this node.
+rm -f "\$RS_TMP" "\$DEPTH_TMP"
 echo "shard \${K}: done (columns [\${COL_LO}, \${COL_HI}))"
 EOF
 chmod +x "$RUNNER"
@@ -186,6 +276,7 @@ SBATCH_ARGS=(
     --output="$OUTDIR/slurm_%A_%a.log"
     -J taffy_gerp_shard
 )
+[[ -n "$TMP_GB"    ]] && SBATCH_ARGS+=( --tmp="${TMP_GB}G" )
 [[ -n "$PARTITION" ]] && SBATCH_ARGS+=( --partition="$PARTITION" )
 [[ -n "$ACCOUNT"   ]] && SBATCH_ARGS+=( --account="$ACCOUNT" )
 
