@@ -1,8 +1,8 @@
 /*
- * Pure data / math for taffy gerp-rank.  Public contract in gerp_rank.h.
+ * Pure data / math for taffy gerp-rank.  Public contract in gerp_stats.h.
  */
 
-#include "gerp_rank.h"
+#include "gerp_stats.h"
 #include "sonLib.h"
 #include <math.h>
 #include <string.h>
@@ -128,6 +128,20 @@ void histogram_finalize(Histogram *h) {
         h->bin_cum[i] = cum;
     }
     h->n_total = cum;  // counts include clipped (they were assigned to the edge bin)
+}
+
+double histogram_quantile(const Histogram *h, double q) {
+    if (h->n_total == 0) return NAN;
+    if (q <= 0.0) return h->min_val;
+    if (q >= 1.0) return h->max_val;
+    int64_t target = (int64_t)(q * (double) h->n_total);
+    for (int64_t b = 0; b < h->n_bins; b++) {
+        if (h->bin_cum[b] >= target) {
+            double bin_w = (h->max_val - h->min_val) / (double) h->n_bins;
+            return h->min_val + (double)b * bin_w + bin_w * 0.5;
+        }
+    }
+    return h->max_val;
 }
 
 double histogram_percentile(const Histogram *h, double v) {

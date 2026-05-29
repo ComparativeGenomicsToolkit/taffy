@@ -1,13 +1,13 @@
 /*
- * Unit tests for taffy/impl/gerp_rank.c.  Focused on the data math:
+ * Unit tests for taffy/impl/gerp_stats.c.  Focused on the data math:
  * DepthStats (per-depth mean/stddev + fallback table) and Histogram
  * (CDF + percentile lookup).  The streaming wig + 3-pass driver is
  * exercised end-to-end by the test harness running taffy gerp ->
- * taffy gerp-rank against evolverMammals (separate test below).
+ * taffy gerp-stats against evolverMammals (separate test below).
  */
 
 #include "CuTest.h"
-#include "gerp_rank.h"
+#include "gerp_stats.h"
 #include "sonLib.h"
 #include <math.h>
 
@@ -135,7 +135,7 @@ static void test_histogram_merge(CuTest *tc) {
     histogram_destruct(b);
 }
 
-CuSuite* gerp_rank_test_suite(void) {
+CuSuite* gerp_stats_test_suite(void) {
     CuSuite* suite = CuSuiteNew();
     SUITE_ADD_TEST(suite, test_depth_stats_basic_moments);
     SUITE_ADD_TEST(suite, test_depth_stats_min_n_fallback);

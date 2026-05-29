@@ -18,7 +18,7 @@ CuSuite* wiggle_test_suite(void);
 CuSuite* block_reader_test_suite(void);
 CuSuite* stats_test_suite(void);
 CuSuite* gerp_test_suite(void);
-CuSuite* gerp_rank_test_suite(void);
+CuSuite* gerp_stats_test_suite(void);
 
 static int allTests(void) {
     CuString *output = CuStringNew();
@@ -34,7 +34,7 @@ static int allTests(void) {
     CuSuiteAddSuite(suite, block_reader_test_suite());
     CuSuiteAddSuite(suite, stats_test_suite());
     CuSuiteAddSuite(suite, gerp_test_suite());
-    CuSuiteAddSuite(suite, gerp_rank_test_suite());
+    CuSuiteAddSuite(suite, gerp_stats_test_suite());
 
     CuSuiteRun(suite);
     CuSuiteSummary(suite, output);

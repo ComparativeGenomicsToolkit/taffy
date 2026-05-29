@@ -10,11 +10,11 @@
  * Post-processing for taffy gerp output: depth-correct RS scores (z-score
  * per integer depth bucket against the empirical mean/stddev at that
  * depth), then map the corrected scores to percentile ranks via a binned
- * CDF.  See gerp_rank.c for the algorithm; taf_gerp_rank.c for the CLI.
+ * CDF.  See gerp_stats.c for the algorithm; taf_gerp_stats.c for the CLI.
  *
  * All structures here are pure data + math.  No I/O.  Thread-safety: the
  * per-thread accumulators (DepthStats / Histogram) are designed to be
- * cheaply merged after a parallel-for; see gerp_rank.c::depth_stats_merge
+ * cheaply merged after a parallel-for; see gerp_stats.c::depth_stats_merge
  * and histogram_merge.
  */
 
@@ -125,6 +125,12 @@ void histogram_merge(Histogram *dst, const Histogram *src);
 
 /* Compute cumulative counts; must be called once pass-2 is complete. */
 void histogram_finalize(Histogram *h);
+
+/* Approximate quantile lookup: returns the value whose CDF position is
+ * `q` (in [0, 1]).  Uses linear interpolation across the bin that
+ * straddles q*n_total.  Returns the histogram's min/max if q falls
+ * outside the populated range. */
+double histogram_quantile(const Histogram *h, double q);
 
 /*
  * Percentile lookup.  Returns a value in [0, 100].  The reported percentile
