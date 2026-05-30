@@ -6,10 +6,17 @@
 # query at a log-decade ladder of N values: 1, 10, 100, 1k, ..., chr10_len.
 #
 # Tools (each gets one cell per N, run in parallel within a size wave):
-#   tui      taffy view -i UNI.maf.gz -r REF_CHROM:0-N           (universal MAF + .tui)
-#   tai      taffy view -i HG38.maf.gz -r REF_CHROM:0-N          (hg38-anchored + .tai)
-#   hal      hal2maf --refGenome HG --refSequence CHR ... HAL    (HAL baseline)
+#   tui_taf  taffy view -i UNI.maf.gz -r REF:0-N -U query        (universal MAF + .tui -> TAF)
+#   tui_maf  taffy view -i UNI.maf.gz -r REF:0-N -U query -m     (universal MAF + .tui -> MAF)
+#   tai_taf  taffy view -i HG38.maf.gz -r REF:0-N                (hg38-anchored + .tai -> TAF)
+#   tai_maf  taffy view -i HG38.maf.gz -r REF:0-N -m             (hg38-anchored + .tai -> MAF)
+#   hal      hal2maf --refGenome HG --refSequence CHR ... HAL    (HAL baseline -> MAF)
 #   bb       bigBedToBed BB CHR 0 N stdout                       (bigbed floor)
+#
+# -U query reorients .tui-extracted blocks onto the queried genome so
+# the output is hg38-anchored (comparable to the .tai path).  Without
+# it the universal lift's default `-U ancestor` keeps blocks in their
+# native ancestor anchor and emits ~12x more data.
 #
 # Per cell we record wall seconds + max RSS (KB) + exit + timed-out flag +
 # output byte count to bench.tsv.
@@ -240,21 +247,40 @@ for N in "\${SIZES[@]}"; do
 
     declare -A pids
     declare -A rowfiles
-    for tool in tui tai hal bb; do
+    # 6 cells per wave: 4 taffy (uni vs hg38 x TAF vs MAF) + hal + bb.
+    # Tool labels encode (index-path, output-format) so a row's meaning
+    # is self-describing in bench.tsv.
+    for tool in tui_taf tui_maf tai_taf tai_maf hal bb; do
         rowfiles[\$tool]="\$LOGDIR/row_\${tool}_\${N}.tsv"
     done
 
-    # tui: taffy view universal MAF
-    ( run_cell tui "\$N" \\
-        "\$TAFFY" view -i "\$UNI" -r "\${REF_CHROM}:0-\${N}" -T "\$TAFFY_T" \\
-      ) > "\${rowfiles[tui]}" &
-    pids[tui]=\$!
+    # tui_taf / tui_maf: universal MAF, reoriented onto the queried
+    # genome (-U query) so blocks come out hg38-anchored -- comparable
+    # to the .tai path / bigBed.  Without -U query the default is
+    # `-U ancestor`, which passes blocks through in their native
+    # ancestor anchor + emits every overlapping universal-column block
+    # (~12x larger output that conflates this bench's question).
+    # -m forces MAF; absence => TAF (taffy view's default).
+    ( run_cell tui_taf "\$N" \\
+        "\$TAFFY" view -i "\$UNI" -r "\${REF_CHROM}:0-\${N}" -U query    -T "\$TAFFY_T" \\
+      ) > "\${rowfiles[tui_taf]}" &
+    pids[tui_taf]=\$!
 
-    # tai: taffy view hg38-anchored MAF
-    ( run_cell tai "\$N" \\
-        "\$TAFFY" view -i "\$HG38" -r "\${REF_CHROM}:0-\${N}" -T "\$TAFFY_T" \\
-      ) > "\${rowfiles[tai]}" &
-    pids[tai]=\$!
+    ( run_cell tui_maf "\$N" \\
+        "\$TAFFY" view -i "\$UNI" -r "\${REF_CHROM}:0-\${N}" -U query -m -T "\$TAFFY_T" \\
+      ) > "\${rowfiles[tui_maf]}" &
+    pids[tui_maf]=\$!
+
+    # tai_taf / tai_maf: hg38-anchored MAF via .tai.
+    ( run_cell tai_taf "\$N" \\
+        "\$TAFFY" view -i "\$HG38" -r "\${REF_CHROM}:0-\${N}"    -T "\$TAFFY_T" \\
+      ) > "\${rowfiles[tai_taf]}" &
+    pids[tai_taf]=\$!
+
+    ( run_cell tai_maf "\$N" \\
+        "\$TAFFY" view -i "\$HG38" -r "\${REF_CHROM}:0-\${N}" -m -T "\$TAFFY_T" \\
+      ) > "\${rowfiles[tai_maf]}" &
+    pids[tai_maf]=\$!
 
     # hal: hal2maf (if installed)
     if [[ -n "\$HAL2MAF" ]]; then
@@ -277,7 +303,7 @@ for N in "\${SIZES[@]}"; do
     fi
 
     # Wait for each cell and append its row in canonical order.
-    for tool in tui tai hal bb; do
+    for tool in tui_taf tui_maf tai_taf tai_maf hal bb; do
         if [[ -n "\${pids[\$tool]:-}" ]]; then
             wait "\${pids[\$tool]}" || true
             if [[ -s "\${rowfiles[\$tool]}" ]]; then
@@ -317,7 +343,11 @@ with open(os.path.join(bench_dir, "bench.tsv")) as f:
             continue
 
 tools = sorted({r["tool"] for r in rows})
-colors = {"tui":"#1f77b4", "tai":"#2ca02c", "hal":"#d62728", "bb":"#ff7f0e"}
+colors = {
+    "tui_taf": "#1f77b4", "tui_maf": "#aec7e8",
+    "tai_taf": "#2ca02c", "tai_maf": "#98df8a",
+    "hal":     "#d62728", "bb":      "#ff7f0e",
+}
 
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5.5))
 fig.subplots_adjust(left=0.07, right=0.97, top=0.92, bottom=0.13, wspace=0.25)
