@@ -50,6 +50,7 @@ HAL_SEQ="chr10"               # hal2maf --refSequence
 BB_CHROM="chr10"              # bigBedToBed positional chrom name
 MAX_SIZE=""                   # cap of the size ladder; default = chr10's known length
 TIME_BUDGET=1800              # per-cell wall seconds (timeout sends SIGKILL)
+HAL_TIME_BUDGET=""            # per-cell cap just for hal; defaults to TIME_BUDGET
 SBATCH_TIME=24
 SBATCH_MEM=64
 PARTITION=""
@@ -81,6 +82,11 @@ Optional:
   --maxSize INT     Cap on the size ladder.  Default = chr10's length
                     pulled from \`taffy stats -s\` on the .tai input.
   --timeBudget SEC  Per-cell wall cap (timeout) (default $TIME_BUDGET)
+  --halTimeBudget SEC  Tighter cap just for the hal2maf cell.  Useful
+                    because hal2maf scales much worse than the other
+                    tools and you may want to short-circuit it at,
+                    say, 60 s while leaving --timeBudget generous for
+                    taffy on the big N values.  Default = --timeBudget.
   --time HRS    sbatch wall (default $SBATCH_TIME)
   --mem GB      sbatch mem (default $SBATCH_MEM)
   --partition X --account X
@@ -105,7 +111,8 @@ while [[ $# -gt 0 ]]; do
         --halSeq)       HAL_SEQ="$2"; shift 2;;
         --bbChrom)      BB_CHROM="$2"; shift 2;;
         --maxSize)      MAX_SIZE="$2"; shift 2;;
-        --timeBudget)   TIME_BUDGET="$2"; shift 2;;
+        --timeBudget)    TIME_BUDGET="$2"; shift 2;;
+        --halTimeBudget) HAL_TIME_BUDGET="$2"; shift 2;;
         --time)         SBATCH_TIME="$2"; shift 2;;
         --mem)          SBATCH_MEM="$2"; shift 2;;
         --partition)    PARTITION="$2"; shift 2;;
@@ -154,7 +161,7 @@ echo ">> BigBed:        $BB"
 echo ">> ref chrom:     $REF_CHROM (hal $HAL_GENOME / $HAL_SEQ, bb $BB_CHROM)"
 echo ">> max size:      $MAX_SIZE bp"
 echo ">> cpus/task:     $T_TOTAL (each taffy gets $((T_TOTAL / 4)) bgzf threads)"
-echo ">> time budget:   $TIME_BUDGET s per cell"
+echo ">> time budget:   $TIME_BUDGET s per cell${HAL_TIME_BUDGET:+ (hal: ${HAL_TIME_BUDGET}s)}"
 
 # --- Build the size ladder: 1, 10, ..., chr10_len.  Capped to MAX_SIZE
 SIZES=()
@@ -186,6 +193,7 @@ HAL_GENOME="$HAL_GENOME"
 HAL_SEQ="$HAL_SEQ"
 BB_CHROM="$BB_CHROM"
 TIME_BUDGET=$TIME_BUDGET
+HAL_TIME_BUDGET=${HAL_TIME_BUDGET:-$TIME_BUDGET}
 TAFFY="$TAFFY"
 HAL2MAF="$HAL2MAF"
 BIGBED2BED="$BIGBED2BED"
@@ -200,11 +208,11 @@ if [[ ! -s "\$BENCH_TSV" ]]; then
     printf "tool\tsize_bp\twall_s\tpeak_rss_kb\texit\ttimed_out\tout_bytes\n" > "\$BENCH_TSV"
 fi
 
-# Run one cell.  Args: tool_name N cmd...
+# Run one cell.  Args: tool_name N budget_secs cmd...
 # Writes a single TSV row to stdout.
 run_cell() {
-    local tool="\$1" N="\$2"
-    shift 2
+    local tool="\$1" N="\$2" budget="\$3"
+    shift 3
     local stem="\${tool}_\${N}"
     local time_file="\$LOGDIR/time_\${stem}.txt"
     local out_file="\$LOGDIR/out_\${stem}"   # discarded after wc
@@ -214,7 +222,7 @@ run_cell() {
     # line on failure (which would otherwise occupy the time_file's first
     # row and break our read).
     /usr/bin/time -q -f '%e %M' -o "\$time_file" \\
-        timeout --signal=KILL "\$TIME_BUDGET" "\$@" \\
+        timeout --signal=KILL "\$budget" "\$@" \\
         > "\$out_file" 2> "\$err_file"
     local rc=\$?
 
@@ -261,30 +269,31 @@ for N in "\${SIZES[@]}"; do
     # ancestor anchor + emits every overlapping universal-column block
     # (~12x larger output that conflates this bench's question).
     # -m forces MAF; absence => TAF (taffy view's default).
-    ( run_cell tui_taf "\$N" \\
+    ( run_cell tui_taf "\$N" "\$TIME_BUDGET" \\
         "\$TAFFY" view -i "\$UNI" -r "\${REF_CHROM}:0-\${N}" -U query    -T "\$TAFFY_T" \\
       ) > "\${rowfiles[tui_taf]}" &
     pids[tui_taf]=\$!
 
-    ( run_cell tui_maf "\$N" \\
+    ( run_cell tui_maf "\$N" "\$TIME_BUDGET" \\
         "\$TAFFY" view -i "\$UNI" -r "\${REF_CHROM}:0-\${N}" -U query -m -T "\$TAFFY_T" \\
       ) > "\${rowfiles[tui_maf]}" &
     pids[tui_maf]=\$!
 
     # tai_taf / tai_maf: hg38-anchored MAF via .tai.
-    ( run_cell tai_taf "\$N" \\
+    ( run_cell tai_taf "\$N" "\$TIME_BUDGET" \\
         "\$TAFFY" view -i "\$HG38" -r "\${REF_CHROM}:0-\${N}"    -T "\$TAFFY_T" \\
       ) > "\${rowfiles[tai_taf]}" &
     pids[tai_taf]=\$!
 
-    ( run_cell tai_maf "\$N" \\
+    ( run_cell tai_maf "\$N" "\$TIME_BUDGET" \\
         "\$TAFFY" view -i "\$HG38" -r "\${REF_CHROM}:0-\${N}" -m -T "\$TAFFY_T" \\
       ) > "\${rowfiles[tai_maf]}" &
     pids[tai_maf]=\$!
 
-    # hal: hal2maf (if installed)
+    # hal: hal2maf (if installed); uses HAL_TIME_BUDGET (defaults to
+    # TIME_BUDGET) so the user can short-circuit it independently.
     if [[ -n "\$HAL2MAF" ]]; then
-        ( run_cell hal "\$N" \\
+        ( run_cell hal "\$N" "\$HAL_TIME_BUDGET" \\
             "\$HAL2MAF" --refGenome "\$HAL_GENOME" --refSequence "\$HAL_SEQ" \\
                        --start 0 --length "\$N" "\$HAL" /dev/stdout \\
           ) > "\${rowfiles[hal]}" &
@@ -296,7 +305,7 @@ for N in "\${SIZES[@]}"; do
     # has shipped; the positional "chrom start end" form some older
     # builds had isn't there in v1 (kent/src/utils/bigBedToBed.c).
     if [[ -n "\$BIGBED2BED" ]]; then
-        ( run_cell bb "\$N" \\
+        ( run_cell bb "\$N" "\$TIME_BUDGET" \\
             "\$BIGBED2BED" -chrom="\$BB_CHROM" -start=0 -end="\$N" "\$BB" stdout \\
           ) > "\${rowfiles[bb]}" &
         pids[bb]=\$!
