@@ -265,10 +265,13 @@ for N in "\${SIZES[@]}"; do
         pids[hal]=\$!
     fi
 
-    # bb: bigBedToBed (if installed)
+    # bb: bigBedToBed (if installed).  Uses the flag-based CLI
+    # (-chrom=/-start=/-end=) which is what every UCSC build since ~2015
+    # has shipped; the positional "chrom start end" form some older
+    # builds had isn't there in v1 (kent/src/utils/bigBedToBed.c).
     if [[ -n "\$BIGBED2BED" ]]; then
         ( run_cell bb "\$N" \\
-            "\$BIGBED2BED" "\$BB" "\$BB_CHROM" 0 "\$N" stdout \\
+            "\$BIGBED2BED" -chrom="\$BB_CHROM" -start=0 -end="\$N" "\$BB" stdout \\
           ) > "\${rowfiles[bb]}" &
         pids[bb]=\$!
     fi
