@@ -2274,6 +2274,12 @@ int64_t tui_extract_col_start(const TuiExtractIt *it) { return it->last_col_star
 
 bool tui_extract_has_next(TuiExtractIt *it) { return it->phys != NULL; }
 
+void tui_extract_take_ownership(TuiExtractIt *it) {
+    // Disown the most recent yield so the next _next() / _destruct doesn't
+    // free it.  Caller takes responsibility for `alignment_destruct`.
+    it->to_free = NULL;
+}
+
 void tui_extract_iterator_destruct(TuiExtractIt *it) {
     if (it->to_free != NULL) alignment_destruct(it->to_free, 1);
     if (it->phys != NULL) alignment_destruct(it->phys, 1);

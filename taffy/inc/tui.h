@@ -242,6 +242,18 @@ Alignment *tui_extract_next(TuiExtractIt *it, LI *li);
 bool tui_extract_has_next(TuiExtractIt *it);
 void tui_extract_iterator_destruct(TuiExtractIt *it);
 
+/*
+ * Disown the alignment from the iterator's "auto-free on next call" slot.
+ * Use when the caller needs to keep the most recent yield alive across the
+ * next tui_extract_next() call -- e.g. to feed it as the p_alignment to
+ * taf_write_block2 so consecutive blocks' shared rows get properly
+ * delta-encoded.  After this call, the iterator no longer tracks the
+ * yield; the caller is responsible for `alignment_destruct`-ing it.
+ *
+ * Safe to call when there's no current yield (no-op).
+ */
+void tui_extract_take_ownership(TuiExtractIt *it);
+
 /* Universal column of the FIRST column of the sub-block just returned by
  * tui_extract_next() (i.e. tcol of its row-0).  Call right after _next(). */
 int64_t tui_extract_col_start(const TuiExtractIt *it);

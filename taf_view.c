@@ -420,7 +420,20 @@ int taf_view_main(int argc, char *argv[]) {
                     region_seq, region_start, region_start + region_length);
         }
         Alignment *alignment = NULL;
+        Alignment *prev_alignment = NULL;  // kept alive across iterations for TAF delta
         while ((alignment = tui_extract_next(xit, li)) != NULL) {
+            // Take ownership of THIS yield from the iterator so the next
+            // tui_extract_next() doesn't free it -- we need it as
+            // p_alignment in the NEXT iter's TAF delta write.  Without
+            // this, taf_write_block2(NULL, ...) was the only safe choice
+            // and the TAF emit would degenerate: each block written as
+            // "all rows inserted" even when consecutive blocks share
+            // contiguous rows (very common in -U query, where row-0 is
+            // the queried genome and advances monotonically).  Pre-fix
+            // the parser asserted on round-trip because new blocks
+            // looked like "carry 9 + insert 9" with only 9 bases.
+            tui_extract_take_ownership(xit);
+
             int64_t col_start = tui_extract_col_start(xit);
             // Apply the optional rename FIRST so the reorient match below
             // sees the post-name-map row sequence_name (same convention as
@@ -448,18 +461,34 @@ int taf_view_main(int argc, char *argv[]) {
             }
             modify_alignment(alignment);
             if (taf_output) {
-                // emitted blocks are generally NOT file-adjacent (the scan
-                // skips non-overlapping ones) -> never delta vs a prior block
-                taf_write_block2(NULL, alignment, run_length_encode_output_bases,
+                // Match consecutive blocks' rows via WFA so the writer
+                // can emit minimal i/d/s/g/G ops (rather than i-for-
+                // every-row, which produces structurally invalid TAF).
+                // alignment_link_adjacent sets r_row/l_row pointers that
+                // write_coordinates reads to compute the deltas.  Same
+                // helper the MAF reader's block_reader uses for the
+                // streaming-read case.
+                if (prev_alignment != NULL) {
+                    alignment_link_adjacent(prev_alignment, alignment, 1);
+                }
+                taf_write_block2(prev_alignment, alignment, run_length_encode_output_bases,
                                  repeat_coordinates_every_n_columns, output, color_bases, omit_coordinates);
             } else if (maf_output) {
+                // MAF has no inter-block row carry, so the link/p_alignment
+                // dance is unnecessary -- preserve the pre-fix
+                // optimisation.
                 maf_write_block2(alignment, output, color_bases);
             } else {
                 assert(paf_output == true);
                 paf_write_block(alignment, output, all_to_all_paf, paf_cs);
             }
+
+            // Rotate: drop the previously-held block, current becomes prev.
+            if (prev_alignment != NULL) alignment_destruct(prev_alignment, 1);
+            prev_alignment = alignment;
         }
-        tui_extract_iterator_destruct(xit);   // owns/frees the yielded blocks
+        if (prev_alignment != NULL) alignment_destruct(prev_alignment, 1);
+        tui_extract_iterator_destruct(xit);   // safe: most-recent yield was disowned
         free(uiv);                            // NULL for tcol input
         tui_destruct(tui);
       } else {
