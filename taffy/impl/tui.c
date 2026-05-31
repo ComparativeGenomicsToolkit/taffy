@@ -1239,9 +1239,22 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
     // on block size (vertebrate-scale blocks vary by ~3 orders of magnitude).
     // The interval is short for quick smoke tests + still useful for the
     // 27-hour 577-way build (~30 messages/hour).
+    //
+    // Per-iteration cost is just `++tick_ctr & MASK == 0` (one int increment
+    // + AND + branch, all branch-predicted in the common case).  The actual
+    // time(NULL) check happens only once per TUI_TICK_INTERVAL blocks.  This
+    // matters at vertebrate scale: a 1B-block input previously made 1B vDSO
+    // time() calls per block-emit (~5-10 s total) -- with the throttle that
+    // drops to ~1M calls (~10 ms), well under the noise floor of the I/O
+    // dominated phase-1 loop.  At 10k blocks/s the time() check fires
+    // ~10/s, still way more frequently than the 600 s log threshold.
     time_t t_last_log = t_phase1_start;
     const int64_t LOG_EVERY_SEC = 600;
+    const int64_t TUI_TICK_INTERVAL = 1024;       // power-of-2 for bitmask
+    const int64_t TUI_TICK_MASK     = TUI_TICK_INTERVAL - 1;
+    int64_t tick_ctr = 0;
     #define TUI_PHASE1_TICK() do {                                              \
+        if ((++tick_ctr & TUI_TICK_MASK) != 0) break;                           \
         time_t now = time(NULL);                                                \
         if (now - t_last_log >= LOG_EVERY_SEC) {                                \
             int64_t elapsed = (int64_t)(now - t_phase1_start);                  \
