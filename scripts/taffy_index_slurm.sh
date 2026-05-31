@@ -1,0 +1,204 @@
+#!/bin/bash
+#
+# taffy index -u (universal .tui builder) -- SLURM wrapper with local-stage
+#
+# Single-task SLURM job: copies the input MAF/TAF to $TMPDIR, runs
+# `taffy index -u` writing the .tui (+ spill files) to scratch, then copies
+# the .tui back to the requested output path.  Trap-cleanup removes scratch
+# on any exit (success or failure).
+#
+# Why local-stage?  Phase 1 of the indexer is a streaming scan -- on a
+# vertebrate-scale input that's TB of sequential reads from the network FS.
+# Phase 2 spills per-genome temp files (also TB-class total).  Doing both
+# from scratch instead of the source FS keeps the network I/O bounded to a
+# single sequential cp at start and one short cp at end, instead of an
+# unbounded random pattern across the whole run.
+#
+# Usage:
+#   taffy_index_slurm.sh -i INPUT.uni.maf.gz [-o OUTPUT.tui] [options]
+#
+# The default output is sibling of the input: INPUT.tui.
+
+set -euo pipefail
+
+INPUT=""
+OUTPUT=""
+T_BGZF=4                  # taffy index -T  (bgzf decompress threads)
+PHASE2_THREADS=1          # taffy index --phase2Threads  (parallel phase-2 workers)
+SBATCH_TIME=48            # hours
+SBATCH_MEM=256            # GB
+TMP_GB=""                 # sbatch --tmp=N when set; default unset
+GENOME_NAMES=""           # optional --genomeNames passthrough
+PARTITION=""
+ACCOUNT=""
+DRY_RUN=0
+TAFFY="${TAFFY:-$(command -v taffy || true)}"
+
+usage() {
+    cat >&2 <<EOF
+taffy_index_slurm.sh -- single-task SLURM job that builds a .tui in scratch
+                       and copies the result to its final location.
+
+Required:
+  -i FILE             Input universal MAF or TAF
+                      (must be a cactus-hal2maf --universal output)
+
+Optional:
+  -o FILE             Output .tui path (default: <INPUT>.tui)
+  -T N                bgzf decompress threads for phase 1 (default $T_BGZF)
+  --phase2Threads N   Parallel workers in phase 2 (default $PHASE2_THREADS).
+                      Each in-flight worker holds ONE genome's runs[] in
+                      RAM (tens of GB for vertebrate-scale giants).  On a
+                      1.5 TB host with the 577-way: N=8 is safe;
+                      N=16 is borderline; N>=32 may OOM.
+  --tmpDir DIR        Override the in-job scratch base.  Default \$TMPDIR.
+                      Forwarded to \`taffy index --tmpDir\` so phase-1 spill
+                      files also land in scratch (NOT next to the output).
+  --genomeNames FILE  Passed through to \`taffy index --genomeNames\`.
+                      Use when seq names contain >1 '.' and you need to
+                      disambiguate genome vs sequence.
+  --time HRS          sbatch --time (default $SBATCH_TIME)
+  --mem GB            sbatch --mem  (default $SBATCH_MEM)
+  --tmp GB            sbatch --tmp= local scratch requirement (optional).
+                      Required on clusters that enforce \`--tmp\`; size to
+                      ~(2 * input size) so input + spill files fit.
+  --partition X --account X
+  --dry-run           Print the sbatch command, don't submit
+  -h                  Help
+
+Override taffy binary via env: TAFFY=/path/to/taffy
+EOF
+    exit "${1:-0}"
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -i)              INPUT="$2"; shift 2;;
+        -o)              OUTPUT="$2"; shift 2;;
+        -T)              T_BGZF="$2"; shift 2;;
+        --phase2Threads) PHASE2_THREADS="$2"; shift 2;;
+        --tmpDir)        TMPDIR_OVERRIDE="$2"; shift 2;;
+        --genomeNames)   GENOME_NAMES="$2"; shift 2;;
+        --time)          SBATCH_TIME="$2"; shift 2;;
+        --mem)           SBATCH_MEM="$2"; shift 2;;
+        --tmp)           TMP_GB="$2"; shift 2;;
+        --partition)     PARTITION="$2"; shift 2;;
+        --account)       ACCOUNT="$2"; shift 2;;
+        --dry-run)       DRY_RUN=1; shift;;
+        -h|--help)       usage 0;;
+        *)               echo "unknown arg: $1" >&2; usage 1;;
+    esac
+done
+
+[[ -n "$INPUT" ]] || { echo "ERROR: -i required" >&2; usage 1; }
+[[ -n "$TAFFY" ]] || { echo "ERROR: taffy not on PATH (set \$TAFFY)" >&2; exit 1; }
+[[ -f "$INPUT" ]] || { echo "ERROR: input not found: $INPUT" >&2; exit 1; }
+[[ -z "$GENOME_NAMES" || -f "$GENOME_NAMES" ]] || {
+    echo "ERROR: --genomeNames file not found: $GENOME_NAMES" >&2; exit 1; }
+# Default output is sibling of input: INPUT.tui.
+if [[ -z "$OUTPUT" ]]; then OUTPUT="${INPUT}.tui"; fi
+# Resolve to absolute paths so the runner script doesn't depend on cwd.
+INPUT=$(readlink -f "$INPUT")
+OUTPUT=$(readlink -f "$OUTPUT" || echo "$OUTPUT")
+mkdir -p "$(dirname "$OUTPUT")"
+
+INPUT_BYTES=$(stat -c %s "$INPUT" 2>/dev/null || stat -f %z "$INPUT")
+INPUT_GB=$(( INPUT_BYTES / (1024**3) ))
+
+echo ">> input:           $INPUT (${INPUT_GB} GB)"
+echo ">> output:          $OUTPUT"
+echo ">> taffy:           $TAFFY"
+echo ">> bgzf threads:    $T_BGZF"
+echo ">> phase2 threads:  $PHASE2_THREADS"
+[[ -n "${TMPDIR_OVERRIDE:-}" ]] && echo ">> tmpdir override: $TMPDIR_OVERRIDE"
+[[ -n "$GENOME_NAMES" ]] && echo ">> genome names:    $GENOME_NAMES"
+[[ -n "$TMP_GB" ]] && echo ">> --tmp request:   ${TMP_GB} GB"
+if [[ -z "$TMP_GB" ]]; then
+    echo ">> hint:            if your cluster advertises --tmp, consider --tmp $(( INPUT_GB * 2 + 50 )) (input + spill budget); otherwise omit"
+fi
+
+mkdir -p "$(dirname "$OUTPUT")"
+LOG_DIR=$(dirname "$OUTPUT")
+RUNNER=$(mktemp -p "$LOG_DIR" .tui_runner_XXXXXX.sh)
+
+cat > "$RUNNER" <<EOF
+#!/bin/bash
+set -euo pipefail
+INPUT="$INPUT"
+OUTPUT="$OUTPUT"
+TAFFY="$TAFFY"
+T_BGZF="$T_BGZF"
+PHASE2_THREADS="$PHASE2_THREADS"
+GENOME_NAMES="$GENOME_NAMES"
+
+# Resolve scratch.  SLURM sets \$TMPDIR per task; if not set (running
+# outside SLURM), use the override or fall back to /tmp.
+SCRATCH="${TMPDIR_OVERRIDE:-\${TMPDIR:-/tmp/taffy_index_\${SLURM_JOB_ID:-\$\$}}}"
+STAGE_DIR="\$SCRATCH/taffy_index_stage"
+mkdir -p "\$STAGE_DIR"
+# Trap-cleanup on exit (success OR failure).  Phase-1 spill files alone
+# can be TB-class; leaving them on shared scratch is rude.
+trap 'rm -rf "\$STAGE_DIR" 2>/dev/null || true' EXIT
+
+BASENAME=\$(basename "\$INPUT")
+LOCAL_INPUT="\$STAGE_DIR/\$BASENAME"
+LOCAL_TUI="\$STAGE_DIR/\$BASENAME.tui"
+
+echo "[\$(date +%H:%M:%S)] stage-in: \$INPUT -> \$LOCAL_INPUT"
+t0=\$SECONDS
+cp "\$INPUT" "\$LOCAL_INPUT"
+echo "[\$(date +%H:%M:%S)] stage-in done in \$((SECONDS - t0)) s"
+
+GENOME_NAMES_FLAG=""
+if [[ -n "\$GENOME_NAMES" ]]; then
+    # Stage the genome-names file too (cheap, keeps the run self-contained).
+    LOCAL_GN="\$STAGE_DIR/\$(basename "\$GENOME_NAMES")"
+    cp "\$GENOME_NAMES" "\$LOCAL_GN"
+    GENOME_NAMES_FLAG="-n \$LOCAL_GN"
+fi
+
+echo "[\$(date +%H:%M:%S)] indexing"
+t0=\$SECONDS
+# --tmpDir => phase-1 spills also land in scratch, not next to the output.
+"\$TAFFY" index -i "\$LOCAL_INPUT" -u \\
+    -T "\$T_BGZF" --phase2Threads "\$PHASE2_THREADS" \\
+    --tmpDir "\$STAGE_DIR" \\
+    \$GENOME_NAMES_FLAG
+echo "[\$(date +%H:%M:%S)] index done in \$((SECONDS - t0)) s"
+
+echo "[\$(date +%H:%M:%S)] stage-out: \$LOCAL_TUI -> \$OUTPUT"
+t0=\$SECONDS
+# .tmp + rename so a half-copied file never lands at the final path (some
+# downstream tools test for existence rather than completeness).
+cp "\$LOCAL_TUI" "\$OUTPUT.tmp"
+mv "\$OUTPUT.tmp" "\$OUTPUT"
+echo "[\$(date +%H:%M:%S)] stage-out done in \$((SECONDS - t0)) s"
+echo "[\$(date +%H:%M:%S)] DONE: \$OUTPUT (\$(stat -c %s "\$OUTPUT") bytes)"
+EOF
+chmod +x "$RUNNER"
+
+SBATCH_ARGS=(
+    --cpus-per-task=$(( T_BGZF > PHASE2_THREADS ? T_BGZF : PHASE2_THREADS ))
+    --mem="${SBATCH_MEM}G"
+    --time="${SBATCH_TIME}:00:00"
+    --output="${OUTPUT}.slurm_%j.log"
+    -J taffy_index
+)
+[[ -n "$TMP_GB"    ]] && SBATCH_ARGS+=( --tmp="${TMP_GB}G" )
+[[ -n "$PARTITION" ]] && SBATCH_ARGS+=( --partition="$PARTITION" )
+[[ -n "$ACCOUNT"   ]] && SBATCH_ARGS+=( --account="$ACCOUNT" )
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo ">> DRY RUN -- would submit:"
+    echo "sbatch ${SBATCH_ARGS[*]} --parsable $RUNNER"
+    echo
+    echo ">> generated runner: $RUNNER"
+    echo "   (preserved for inspection; rm when done)"
+else
+    echo ">> submitting..."
+    JOB=$(sbatch "${SBATCH_ARGS[@]}" --parsable "$RUNNER")
+    echo ">> job id: $JOB"
+    echo ">> runner: $RUNNER"
+    echo ">> log:    ${OUTPUT}.slurm_${JOB}.log"
+fi
+echo ">> done."
