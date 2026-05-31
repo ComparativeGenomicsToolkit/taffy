@@ -35,10 +35,15 @@
 # tool at a given N) and waves are sequential.  Sub-tool threading: each
 # taffy gets T_TOTAL / 4 bgzf threads; the other two are single-threaded.
 #
-# All four tools READ FROM THE INPUT PATHS AS GIVEN -- there is no local
-# stage for now (intentionally; we want to measure realistic
-# network-FS-backed behavior).  See --no-stage-local in
-# gerp_shard_slurm.sh for the staging pattern when we want to add it.
+# Local-stage mode (default ON)
+# -----------------------------
+# The four inputs (UNI + .tui, HG38 + .tai, HAL, BB) get copied to $TMPDIR
+# at the start of the job; all tools then read from the local copies.
+# Without staging the four parallel cells per wave fight each other for
+# network-FS bandwidth, which inflates the timings and conflates the
+# numbers we actually want to measure.  --no-stage-local skips the copy
+# and reads from the original paths (useful only for small inputs or
+# local-FS deployments).
 #
 # Usage:
 #   taffy_view_bench_slurm.sh \
@@ -62,6 +67,8 @@ TIME_BUDGET=1800              # per-cell wall seconds (timeout sends SIGKILL)
 HAL_TIME_BUDGET=""            # per-cell cap just for hal; defaults to TIME_BUDGET
 SBATCH_TIME=24
 SBATCH_MEM=64
+TMP_GB=""                     # passed to sbatch --tmp= when set; default unset
+STAGE_LOCAL=1
 PARTITION=""
 ACCOUNT=""
 DRY_RUN=0
@@ -98,6 +105,14 @@ Optional:
                     taffy on the big N values.  Default = --timeBudget.
   --time HRS    sbatch wall (default $SBATCH_TIME)
   --mem GB      sbatch mem (default $SBATCH_MEM)
+  --tmp GB      Per-task local scratch requirement (sbatch --tmp=N).
+                Default unset.  Required on clusters that enforce
+                \`--tmp\`; size to ~(sum of input sizes + 10%).
+  --no-stage-local
+                Disable copying UNI/.tui, HG38/.tai, HAL, BB to
+                \$TMPDIR.  All cells then read from the network paths
+                and the 6 parallel cells per wave fight each other
+                for FS bandwidth.  Only sensible for small inputs.
   --partition X --account X
   --dry-run     Print sbatch; do not submit
   -h            Help
@@ -122,11 +137,13 @@ while [[ $# -gt 0 ]]; do
         --maxSize)      MAX_SIZE="$2"; shift 2;;
         --timeBudget)    TIME_BUDGET="$2"; shift 2;;
         --halTimeBudget) HAL_TIME_BUDGET="$2"; shift 2;;
-        --time)         SBATCH_TIME="$2"; shift 2;;
-        --mem)          SBATCH_MEM="$2"; shift 2;;
-        --partition)    PARTITION="$2"; shift 2;;
-        --account)      ACCOUNT="$2"; shift 2;;
-        --dry-run)      DRY_RUN=1; shift;;
+        --time)             SBATCH_TIME="$2"; shift 2;;
+        --mem)              SBATCH_MEM="$2"; shift 2;;
+        --tmp)              TMP_GB="$2"; shift 2;;
+        --no-stage-local)   STAGE_LOCAL=0; shift;;
+        --partition)        PARTITION="$2"; shift 2;;
+        --account)          ACCOUNT="$2"; shift 2;;
+        --dry-run)          DRY_RUN=1; shift;;
         -h|--help)      usage 0;;
         *)              echo "unknown arg: $1" >&2; usage 1;;
     esac
@@ -171,6 +188,23 @@ echo ">> ref chrom:     $REF_CHROM (hal $HAL_GENOME / $HAL_SEQ, bb $BB_CHROM)"
 echo ">> max size:      $MAX_SIZE bp"
 echo ">> cpus/task:     $T_TOTAL (each taffy gets $((T_TOTAL / 4)) bgzf threads)"
 echo ">> time budget:   $TIME_BUDGET s per cell${HAL_TIME_BUDGET:+ (hal: ${HAL_TIME_BUDGET}s)}"
+echo ">> local-stage:   $([[ $STAGE_LOCAL -eq 1 ]] && echo "ON (copies to \$TMPDIR)" || echo "OFF (reads from network)")"
+[[ -n "$TMP_GB" ]] && echo ">> --tmp request: ${TMP_GB} GB per task"
+
+# Belt-and-suspenders sizing hint when local-stage is on.
+if [[ "$STAGE_LOCAL" -eq 1 ]]; then
+    STAGE_BYTES=0
+    for f in "$UNI" "${UNI}.tui" "$HG38" "${HG38}.tai" "$HAL" "$BB"; do
+        if [[ -f "$f" ]]; then
+            STAGE_BYTES=$(( STAGE_BYTES + $(stat -c %s "$f" 2>/dev/null || stat -f %z "$f") ))
+        fi
+    done
+    STAGE_GB=$(( STAGE_BYTES / (1024**3) ))
+    echo ">> stage-in size: ~${STAGE_GB} GB total (UNI + .tui + HG38 + .tai + HAL + BB)"
+    if [[ -z "$TMP_GB" ]]; then
+        echo ">> hint:          if your cluster advertises --tmp, consider --tmp $(( STAGE_GB + 50 )); otherwise omit"
+    fi
+fi
 
 # --- Build the size ladder: 1, 10, ..., chr10_len.  Capped to MAX_SIZE
 SIZES=()
@@ -203,6 +237,7 @@ HAL_SEQ="$HAL_SEQ"
 BB_CHROM="$BB_CHROM"
 TIME_BUDGET=$TIME_BUDGET
 HAL_TIME_BUDGET=${HAL_TIME_BUDGET:-$TIME_BUDGET}
+STAGE_LOCAL=$STAGE_LOCAL
 TAFFY="$TAFFY"
 HAL2MAF="$HAL2MAF"
 BIGBED2BED="$BIGBED2BED"
@@ -211,6 +246,39 @@ SIZES=( ${SIZES[*]} )
 BENCH_TSV="\$OUTDIR/bench.tsv"
 LOGDIR="\$OUTDIR/logs"
 mkdir -p "\$LOGDIR"
+
+# --- Stage inputs to local scratch (\$TMPDIR or /tmp fallback). -----
+# Copy UNI + .tui, HG38 + .tai, HAL, and BB up front so the 6 parallel
+# cells per wave don't fight each other for network-FS bandwidth.
+# Sequential cp: friendlier to the source FS than parallel pulls.
+# Trap-cleanup so an aborted job doesn't leave TB of leftover scratch.
+if [[ "\$STAGE_LOCAL" -eq 1 ]]; then
+    SCRATCH="\${TMPDIR:-/tmp/taffy_view_bench_\${SLURM_JOB_ID:-\$\$}}"
+    STAGE_DIR="\$SCRATCH/taffy_stage"
+    mkdir -p "\$STAGE_DIR"
+    trap 'rm -rf "\$STAGE_DIR" 2>/dev/null || true' EXIT
+    # stage_one prints the destination path on stdout (for command
+    # substitution capture) and status to stderr so the dst doesn't get
+    # polluted by the progress messages.
+    stage_one() {
+        local src="\$1"
+        local dst="\$STAGE_DIR/\$(basename "\$src")"
+        echo "stage: \$src -> \$dst (\$(stat -c %s "\$src" 2>/dev/null || echo ?) bytes)" >&2
+        local t0=\$SECONDS
+        cp "\$src" "\$dst"
+        echo "       done in \$((SECONDS - t0)) s" >&2
+        echo "\$dst"
+    }
+    LOCAL_UNI=\$(stage_one "\$UNI");        stage_one "\$UNI.tui"  > /dev/null
+    LOCAL_HG38=\$(stage_one "\$HG38");      stage_one "\$HG38.tai" > /dev/null
+    LOCAL_HAL=\$(stage_one "\$HAL")
+    LOCAL_BB=\$(stage_one "\$BB")
+    UNI="\$LOCAL_UNI"
+    HG38="\$LOCAL_HG38"
+    HAL="\$LOCAL_HAL"
+    BB="\$LOCAL_BB"
+    echo "stage: all inputs staged to \$STAGE_DIR" >&2
+fi
 
 # Write header if file is empty / fresh.
 if [[ ! -s "\$BENCH_TSV" ]]; then
@@ -426,6 +494,7 @@ SBATCH_ARGS=(
     --output="$OUTDIR/slurm_%j.log"
     -J taffy_view_bench
 )
+[[ -n "$TMP_GB"    ]] && SBATCH_ARGS+=( --tmp="${TMP_GB}G" )
 [[ -n "$PARTITION" ]] && SBATCH_ARGS+=( --partition="$PARTITION" )
 [[ -n "$ACCOUNT"   ]] && SBATCH_ARGS+=( --account="$ACCOUNT" )
 
