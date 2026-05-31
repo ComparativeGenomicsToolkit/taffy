@@ -31,7 +31,9 @@
 static int bgzf_threads = 1;
 
 void LI_set_bgzf_threads(int n) {
-    bgzf_threads = (n > 0) ? n : 1;
+    if (n < 1) n = 1;
+    if (n > TAFFY_MAX_BGZF_THREADS) n = TAFFY_MAX_BGZF_THREADS;
+    bgzf_threads = n;
 }
 
 #ifdef USE_HTSLIB

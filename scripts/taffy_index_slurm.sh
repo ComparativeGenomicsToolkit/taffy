@@ -23,8 +23,8 @@ set -euo pipefail
 
 INPUT=""
 OUTPUT=""
-T_BGZF=4                  # taffy index -T  (bgzf decompress threads)
-PHASE2_THREADS=1          # taffy index --phase2Threads  (parallel phase-2 workers)
+T_THREADS=1               # taffy index -T  (phase-2 OMP workers; bgzf
+                          # auto-capped at TAFFY_MAX_BGZF_THREADS=8 inside)
 SBATCH_TIME=48            # hours
 SBATCH_MEM=256            # GB
 TMP_GB=""                 # sbatch --tmp=N when set; default unset
@@ -45,12 +45,16 @@ Required:
 
 Optional:
   -o FILE             Output .tui path (default: <INPUT>.tui)
-  -T N                bgzf decompress threads for phase 1 (default $T_BGZF)
-  --phase2Threads N   Parallel workers in phase 2 (default $PHASE2_THREADS).
-                      Each in-flight worker holds ONE genome's runs[] in
-                      RAM (tens of GB for vertebrate-scale giants).  On a
-                      1.5 TB host with the 577-way: N=8 is safe;
-                      N=16 is borderline; N>=32 may OOM.
+  -T N                Worker threads (default $T_THREADS).  Drives BOTH
+                      phase-2 OMP workers AND bgzf decompression.  bgzf
+                      side is auto-capped at TAFFY_MAX_BGZF_THREADS=8
+                      inside taffy itself (past 8 the htslib mt-pool
+                      overhead dominates the decompress win).  Phase-2
+                      side uses the full N: each in-flight worker holds
+                      ONE genome's runs[] in RAM (~tens of GB for
+                      vertebrate-scale giants), so memory peak roughly
+                      N * 40 GB.  On a 1.5 TB host with the 577-way:
+                      N=8 safe, N=16 borderline, N>=32 may OOM.
   --tmpDir DIR        Override the in-job scratch base.  Default \$TMPDIR.
                       Forwarded to \`taffy index --tmpDir\` so phase-1 spill
                       files also land in scratch (NOT next to the output).
@@ -75,8 +79,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         -i)              INPUT="$2"; shift 2;;
         -o)              OUTPUT="$2"; shift 2;;
-        -T)              T_BGZF="$2"; shift 2;;
-        --phase2Threads) PHASE2_THREADS="$2"; shift 2;;
+        -T)              T_THREADS="$2"; shift 2;;
         --tmpDir)        TMPDIR_OVERRIDE="$2"; shift 2;;
         --genomeNames)   GENOME_NAMES="$2"; shift 2;;
         --time)          SBATCH_TIME="$2"; shift 2;;
@@ -108,8 +111,7 @@ INPUT_GB=$(( INPUT_BYTES / (1024**3) ))
 echo ">> input:           $INPUT (${INPUT_GB} GB)"
 echo ">> output:          $OUTPUT"
 echo ">> taffy:           $TAFFY"
-echo ">> bgzf threads:    $T_BGZF"
-echo ">> phase2 threads:  $PHASE2_THREADS"
+echo ">> threads:         $T_THREADS (phase-2 OMP; bgzf auto-capped at 8 inside taffy)"
 [[ -n "${TMPDIR_OVERRIDE:-}" ]] && echo ">> tmpdir override: $TMPDIR_OVERRIDE"
 [[ -n "$GENOME_NAMES" ]] && echo ">> genome names:    $GENOME_NAMES"
 [[ -n "$TMP_GB" ]] && echo ">> --tmp request:   ${TMP_GB} GB"
@@ -127,8 +129,7 @@ set -euo pipefail
 INPUT="$INPUT"
 OUTPUT="$OUTPUT"
 TAFFY="$TAFFY"
-T_BGZF="$T_BGZF"
-PHASE2_THREADS="$PHASE2_THREADS"
+T_THREADS="$T_THREADS"
 GENOME_NAMES="$GENOME_NAMES"
 
 # Resolve scratch.  SLURM sets \$TMPDIR per task; if not set (running
@@ -161,7 +162,7 @@ echo "[\$(date +%H:%M:%S)] indexing"
 t0=\$SECONDS
 # --tmpDir => phase-1 spills also land in scratch, not next to the output.
 "\$TAFFY" index -i "\$LOCAL_INPUT" -u \\
-    -T "\$T_BGZF" --phase2Threads "\$PHASE2_THREADS" \\
+    -T "\$T_THREADS" \\
     --tmpDir "\$STAGE_DIR" \\
     \$GENOME_NAMES_FLAG
 echo "[\$(date +%H:%M:%S)] index done in \$((SECONDS - t0)) s"
@@ -178,7 +179,7 @@ EOF
 chmod +x "$RUNNER"
 
 SBATCH_ARGS=(
-    --cpus-per-task=$(( T_BGZF > PHASE2_THREADS ? T_BGZF : PHASE2_THREADS ))
+    --cpus-per-task=$T_THREADS
     --mem="${SBATCH_MEM}G"
     --time="${SBATCH_TIME}:00:00"
     --output="${OUTPUT}.slurm_%j.log"

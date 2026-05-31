@@ -27,11 +27,25 @@ typedef struct _LI {
 
 
 /*
+ * Cap on bgzf I/O thread count anywhere in taffy.  Bumping past this
+ * point gives diminishing returns (the bgzf_mt pool's coordination
+ * overhead overtakes the parallel decompress/compress win) while still
+ * costing the caller cores that are usually better spent on the
+ * algorithmic work (e.g. tui-index phase 2, gerp per-block scoring).
+ * Defined here so every callsite's clamp stays in sync.
+ */
+#define TAFFY_MAX_BGZF_THREADS 8
+
+/*
  * Set the number of threads bgzf I/O should use for both reads (LI) and
  * writes (LW).  Must be called BEFORE LI_construct / LW_construct take
  * effect on a given handle; later changes do not affect already-open
  * handles.  Default is 1 (no bgzf threads).  Has no effect when built
  * without USE_HTSLIB, or when the underlying stream is not BGZF.
+ *
+ * Clamped to [1, TAFFY_MAX_BGZF_THREADS] inside this function -- callers
+ * that compute n from a -T flag pass their full value and the cap is
+ * applied here rather than at every callsite.
  */
 void LI_set_bgzf_threads(int n);
 
