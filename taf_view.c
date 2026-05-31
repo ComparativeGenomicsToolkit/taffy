@@ -9,6 +9,7 @@
 #include "tui.h"
 #include "remote_io.h"
 #include "sonLib.h"
+#include "sonLibTree.h"
 #include <getopt.h>
 #include <time.h>
 #include <unistd.h>
@@ -31,6 +32,7 @@ static void usage(void) {
     fprintf(stderr, "-C --cs : Output PAF cigars in cs instead of cg format\n");
     fprintf(stderr, "-r --region  : Region SEQ:START-END (0-based half-open).  SEQ is a row-0 seq name (.tai path), or ANY genome.seq when a <inputFile>.tui is present (universal lift), or the sentinel `tcol` for a universal-column range\n");
     fprintf(stderr, "-U --universal MODE : Output mode for the universal lift {ancestor|tcol|query}.  Universal mode is AUTO-ENGAGED when <inputFile>.tui is present; -U just picks the mode.  ancestor = pass-through (default).  tcol = prepend a `tcol` sentinel row carrying the universal column at this block.  query = reorient blocks onto the queried genome (row-0, '+'); incompatible with `-r tcol:..`.  Blocks are always emitted in universal-column (file) order, which on a '-'-strand queried leaf descends in the queried-forward coordinate.\n");
+    fprintf(stderr, "   --noAncestors : Drop rows whose genome label is an internal-node label in the input header's `# hal` tree.  Only valid with -U query (where row-0 is a leaf so dropping ancestors is safe); produces a leaf-only output comparable to cactus-hal2maf's default.  Requires a `# hal` tree in the input header.\n");
     fprintf(stderr, "-s --repeatCoordinatesEveryNColumns : Repeat TAF coordinates of each sequence at least every n columns. By default: %" PRIi64 "\n", repeat_coordinates_every_n_columns);
     fprintf(stderr, "-u --runLengthEncodeBases : Run length encode output bases in TAF\n");
     fprintf(stderr, "-a --showOnlyReferenceDifferences : Replace matches with the reference (first row) with a * character\n");
@@ -77,6 +79,72 @@ static void modify_alignment(Alignment *alignment) {
     }
 }
 
+// Collect every internal-node label from an stTree into `out` (fresh
+// stString_copy'd char*).  Used by --noAncestors to build the set of
+// genome labels whose rows get stripped from each emitted block.
+// Same shape helper as taf_stats.c's collect_internal_labels.
+static void view_collect_internal_labels(stTree *node, stSet *out) {
+    int64_t nc = stTree_getChildNumber(node);
+    if (nc > 0) {
+        const char *lbl = stTree_getLabel(node);
+        if (lbl != NULL && *lbl != '\0') {
+            stSet_insert(out, stString_copy(lbl));
+        }
+    }
+    for (int64_t i = 0; i < nc; i++) {
+        view_collect_internal_labels(stTree_getChild(node, i), out);
+    }
+}
+
+// Try each '.' in seq_name as a split point; return true if any prefix is
+// in `internal_labels`.  Same dot-walk algorithm as gerp_tree_resolve_genome
+// and taf_stats.c's seq_is_anchor.
+static bool view_seq_is_ancestor(const char *seq_name, stSet *internal_labels) {
+    size_t n = strlen(seq_name);
+    char  stack_buf[1024];
+    char *buf = (n + 1 <= sizeof(stack_buf)) ? stack_buf : st_malloc(n + 1);
+    bool match = false;
+    size_t off = 0;
+    while (off < n) {
+        const char *dot = strchr(seq_name + off, '.');
+        if (dot == NULL || dot == seq_name + n - 1) break;
+        if (dot == seq_name) { off++; continue; }
+        size_t pre_n = (size_t)(dot - seq_name);
+        memcpy(buf, seq_name, pre_n);
+        buf[pre_n] = '\0';
+        if (stSet_search(internal_labels, buf) != NULL) { match = true; break; }
+        off = pre_n + 1;
+    }
+    if (buf != stack_buf) free(buf);
+    return match;
+}
+
+// Drop rows whose genome label is an internal-node label.  In-place edit of
+// the alignment's linked-row list; row_number decremented per drop.  Safe
+// to call with internal_labels == NULL (no-op).
+static void filter_out_ancestor_rows(Alignment *aln, stSet *internal_labels) {
+    if (internal_labels == NULL || aln == NULL || aln->row == NULL) return;
+    Alignment_Row **link = &aln->row;
+    while (*link != NULL) {
+        Alignment_Row *r = *link;
+        if (view_seq_is_ancestor(r->sequence_name, internal_labels)) {
+            *link = r->n_row;          // unlink
+            r->n_row = NULL;
+            // Clear cross-block pointers before destruct so we don't try to
+            // dereference into adjacent blocks (the link from prev's r_row
+            // also needs to drop; safest is to NULL r_row of any l_row that
+            // pointed here -- alignment_link_adjacent in the next iter will
+            // recompute, so this is good enough).
+            if (r->l_row != NULL) r->l_row->r_row = NULL;
+            r->l_row = NULL;
+            alignment_row_destruct(r);
+            aln->row_number--;
+        } else {
+            link = &r->n_row;
+        }
+    }
+}
+
 int taf_view_main(int argc, char *argv[]) {
     time_t startTime = time(NULL);
 
@@ -104,12 +172,14 @@ int taf_view_main(int argc, char *argv[]) {
     char *phylogeny_file = NULL;
     static bool color_bases = false;
     bool omit_coordinates = false;
+    bool no_ancestors = false;
     int bgzf_threads = 1;
 
     ///////////////////////////////////////////////////////////////////////////
     // Parse the inputs
     ///////////////////////////////////////////////////////////////////////////
 
+    enum { OPT_NO_ANCESTORS = 256 };
     while (1) {
         static struct option long_options[] = { { "logLevel", required_argument, 0, 'l' },
                                                 { "inputFile", required_argument, 0, 'i' },
@@ -129,6 +199,7 @@ int taf_view_main(int argc, char *argv[]) {
                                                 { "universal", required_argument, 0, 'U' },
                                                 { "useCompression", no_argument, 0, 'c' },
                                                 { "nameMapFile", required_argument, 0, 'n' },
+                                                { "noAncestors", no_argument, 0, OPT_NO_ANCESTORS },
                                                 { "threads", required_argument, 0, 'T' },
                                                 { "help", no_argument, 0, 'h' },
                                                 { 0, 0, 0, 0 } };
@@ -200,6 +271,9 @@ int taf_view_main(int argc, char *argv[]) {
                 break;
             case 'n':
                 nameMapFile = optarg;
+                break;
+            case OPT_NO_ANCESTORS:
+                no_ancestors = true;
                 break;
             case 'T':
                 bgzf_threads = atoi(optarg);
@@ -326,6 +400,32 @@ int taf_view_main(int argc, char *argv[]) {
         fprintf(stderr, "-U/--universal requires -r SEQ:START-END\n");
         return 1;
     }
+    if (no_ancestors && (!universal_mode_set || universal_mode != U_MODE_QUERY)) {
+        fprintf(stderr, "--noAncestors is only valid with -U query (row-0 must be a leaf so dropping ancestors is safe)\n");
+        return 1;
+    }
+
+    // --noAncestors: parse the input's `# hal` tree to get the set of
+    // internal-node labels.  Any row whose genome prefix matches one of
+    // them gets dropped from each emitted block down in the -U query loop.
+    stSet  *internal_labels = NULL;
+    stTree *tree_for_labels = NULL;
+    if (no_ancestors) {
+        Tag *hal = tag_find(tag, (char *) TAF_HAL_TREE_KEY);
+        if (hal == NULL) {
+            fprintf(stderr, "--noAncestors requires a `# hal` tree in the input header\n");
+            return 1;
+        }
+        tree_for_labels = stTree_parseNewickString(hal->value);
+        if (tree_for_labels == NULL) {
+            fprintf(stderr, "--noAncestors: failed to parse `# hal` Newick tree\n");
+            return 1;
+        }
+        internal_labels = stSet_construct3(stHash_stringKey, stHash_stringEqualKey, free);
+        view_collect_internal_labels(tree_for_labels, internal_labels);
+        st_logInfo("--noAncestors: %" PRIi64 " internal-node labels collected\n",
+                   stSet_size(internal_labels));
+    }
     if (universal_mode_set && inputFile != NULL) {
         // fail loudly BEFORE header write, so a user-error `-U` invocation
         // doesn't leave a partial bgzip output (-c) with just the header.
@@ -420,7 +520,20 @@ int taf_view_main(int argc, char *argv[]) {
                     region_seq, region_start, region_start + region_length);
         }
         Alignment *alignment = NULL;
+        Alignment *prev_alignment = NULL;  // kept alive across iterations for TAF delta
         while ((alignment = tui_extract_next(xit, li)) != NULL) {
+            // Take ownership of THIS yield from the iterator so the next
+            // tui_extract_next() doesn't free it -- we need it as
+            // p_alignment in the NEXT iter's TAF delta write.  Without
+            // this, taf_write_block2(NULL, ...) was the only safe choice
+            // and the TAF emit would degenerate: each block written as
+            // "all rows inserted" even when consecutive blocks share
+            // contiguous rows (very common in -U query, where row-0 is
+            // the queried genome and advances monotonically).  Pre-fix
+            // the parser asserted on round-trip because new blocks
+            // looked like "carry 9 + insert 9" with only 9 bases.
+            tui_extract_take_ownership(xit);
+
             int64_t col_start = tui_extract_col_start(xit);
             // Apply the optional rename FIRST so the reorient match below
             // sees the post-name-map row sequence_name (same convention as
@@ -445,21 +558,45 @@ int taf_view_main(int argc, char *argv[]) {
                 alignment->row_number++;
             } else if (universal_mode == U_MODE_QUERY) {
                 alignment_reorient_to_row(alignment, region_seq);
+                if (no_ancestors) {
+                    // Strip ancestor rows AFTER the reorient -- the
+                    // queried genome (now row-0) is by definition a leaf,
+                    // so this never touches row-0.  Done before
+                    // modify_alignment in case the -a/-b masking depends
+                    // on row count.
+                    filter_out_ancestor_rows(alignment, internal_labels);
+                }
             }
             modify_alignment(alignment);
             if (taf_output) {
-                // emitted blocks are generally NOT file-adjacent (the scan
-                // skips non-overlapping ones) -> never delta vs a prior block
-                taf_write_block2(NULL, alignment, run_length_encode_output_bases,
+                // Match consecutive blocks' rows via WFA so the writer
+                // can emit minimal i/d/s/g/G ops (rather than i-for-
+                // every-row, which produces structurally invalid TAF).
+                // alignment_link_adjacent sets r_row/l_row pointers that
+                // write_coordinates reads to compute the deltas.  Same
+                // helper the MAF reader's block_reader uses for the
+                // streaming-read case.
+                if (prev_alignment != NULL) {
+                    alignment_link_adjacent(prev_alignment, alignment, 1);
+                }
+                taf_write_block2(prev_alignment, alignment, run_length_encode_output_bases,
                                  repeat_coordinates_every_n_columns, output, color_bases, omit_coordinates);
             } else if (maf_output) {
+                // MAF has no inter-block row carry, so the link/p_alignment
+                // dance is unnecessary -- preserve the pre-fix
+                // optimisation.
                 maf_write_block2(alignment, output, color_bases);
             } else {
                 assert(paf_output == true);
                 paf_write_block(alignment, output, all_to_all_paf, paf_cs);
             }
+
+            // Rotate: drop the previously-held block, current becomes prev.
+            if (prev_alignment != NULL) alignment_destruct(prev_alignment, 1);
+            prev_alignment = alignment;
         }
-        tui_extract_iterator_destruct(xit);   // owns/frees the yielded blocks
+        if (prev_alignment != NULL) alignment_destruct(prev_alignment, 1);
+        tui_extract_iterator_destruct(xit);   // safe: most-recent yield was disowned
         free(uiv);                            // NULL for tcol input
         tui_destruct(tui);
       } else {
@@ -598,6 +735,8 @@ int taf_view_main(int argc, char *argv[]) {
         stList_destruct(tree_nodes);
         stTree_destruct(phylogeny);
     }
+    if (internal_labels != NULL) stSet_destruct(internal_labels);
+    if (tree_for_labels != NULL) stTree_destruct(tree_for_labels);
 
     st_logInfo("taffy view is done, %" PRIi64 " seconds have elapsed\n", time(NULL) - startTime);
 

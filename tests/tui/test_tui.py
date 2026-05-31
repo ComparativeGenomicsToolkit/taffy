@@ -350,6 +350,72 @@ def test_view_tcol_round_trip(tmp_path):
     assert _leaf_cols(parse_maf_columns(out1)) == _leaf_cols(parse_maf_columns(out2))
 
 
+@pytest.mark.parametrize('mode', ['ancestor', 'tcol', 'query'])
+@pytest.mark.parametrize('width', [100, 1000, 10000],
+                         ids=['100bp', '1kb', '10kb'])
+def test_view_universal_taf_round_trip(mode, width, tmp_path):
+    """`taffy view -U {ancestor,tcol,query}` writing TAF must produce
+    structurally valid output: round-tripping it back through `taffy view -m`
+    must match the direct `-m` emit of the same query byte-for-byte.
+
+    Regression test for the bug where the .tui-extract loop passed NULL as
+    the p_alignment to taf_write_block2 on every block.  Without a previous
+    block to diff against, the writer emitted "i 0 <coords> ... i N
+    <coords>" for every block's rows -- even rows whose name/strand/start
+    actually continued from the previous block.  The reader then computed
+    new_block.row_count = (previous_carry + N) but the column lines only
+    had N bases, hitting:
+
+      get_bases: Assertion `strlen(column) == column_length' failed.
+
+    The fix sets r_row/l_row pointers via alignment_link_adjacent and
+    passes the previous alignment to taf_write_block2, so the writer emits
+    the minimal i/d/s/g/G ops just like every other TAF write path.
+    """
+    region = f'{REF_SEQ_FULL}:0-{width}'
+    taf_out    = str(tmp_path / 'out.taf')
+    rt_maf     = str(tmp_path / 'rt.maf')
+    direct_maf = str(tmp_path / 'direct.maf')
+    # TAF and direct-MAF emit (both go through the same -U code path; the
+    # only difference is the writer at the very end).
+    run(TAFFY, 'view', '-i', UNI_MAF, '-U', mode, '-r', region, '-o', taf_out)
+    run(TAFFY, 'view', '-i', UNI_MAF, '-U', mode, '-r', region, '-m', '-o', direct_maf)
+    # Round-trip the TAF through `taffy view -m`.  This is what would have
+    # asserted pre-fix because the broken TAF couldn't be parsed.
+    run(TAFFY, 'view', '-i', taf_out, '-m', '-o', rt_maf)
+    with open(direct_maf) as f: direct = f.read()
+    with open(rt_maf) as f:     rt     = f.read()
+    assert rt == direct, (
+        f"-U {mode} TAF round-trip differs from direct -m for {region} "
+        f"(taf={os.path.getsize(taf_out)} bytes, "
+        f"rt_maf={len(rt)} bytes, direct_maf={len(direct)} bytes)")
+
+
+def test_view_universal_taf_pipes_into_stats(tmp_path):
+    """Pipe `taffy view -U query` TAF stdout straight into `taffy stats -a`
+    -- the exact pipeline that triggered the original assertion-fail report.
+    Asserts the pipeline exits zero and stats emits a sensible block count.
+    """
+    region = f'{REF_SEQ_FULL}:0-1000'
+    p = subprocess.run(
+        f'{TAFFY} view -i {UNI_MAF} -U query -r {region} | '
+        f'{TAFFY} stats -a',
+        shell=True, capture_output=True, text=True)
+    assert p.returncode == 0, (
+        f"pipeline failed: rc={p.returncode}\nstderr: {p.stderr}")
+    # Sanity: stats -a prints "Total blocks:\t<N>" where N matches what
+    # taffy view -m would give on the same query.
+    nblocks_line = next((L for L in p.stdout.splitlines()
+                         if L.startswith('Total blocks:')), None)
+    assert nblocks_line is not None, f"no Total blocks line in stats output:\n{p.stdout}"
+    n_blocks = int(nblocks_line.split('\t')[1])
+    direct_out, _ = run(TAFFY, 'view', '-i', UNI_MAF, '-U', 'query', '-r', region, '-m')
+    direct_blocks = sum(1 for L in direct_out.splitlines() if L.startswith('a'))
+    assert n_blocks == direct_blocks, (
+        f"stats counted {n_blocks} blocks, but taffy view -m emitted "
+        f"{direct_blocks}")
+
+
 def test_lift_unknown_target_genome(tmp_path):
     """`taffy lift -g BogusGenome` must exit non-zero with a useful stderr
     message -- not segfault, hang, or quietly emit empty output that the

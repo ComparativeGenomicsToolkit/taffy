@@ -13,6 +13,8 @@ extern int taf_sort_main(int argc, char *argv[]);
 extern int taf_stats_main(int argc, char *argv[]);
 extern int taf_annotate_main(int argc, char *argv[]);
 extern int taf_lift_main(int argc, char *argv[]);
+extern int taf_gerp_main(int argc, char *argv[]);
+extern int taf_gerp_stats_main(int argc, char *argv[]);
 }
 
 extern int taf_add_gap_bases_main(int argc, char *argv[]);
@@ -31,6 +33,8 @@ void usage() {
     fprintf(stderr, "    coverage       print coverage statistics of a given genome in a TAF file\n");
     fprintf(stderr, "    annotate       annotate a TAF file with labels from a wiggle file\n");
     fprintf(stderr, "    lift           lift a .wig annotation from ancestor coords to a leaf genome via .tui\n");
+    fprintf(stderr, "    gerp           per-column GERP RS conservation scoring -> wig\n");
+    fprintf(stderr, "    gerp-stats      depth-correct + percentile-rank gerp output\n");
     fprintf(stderr, "\n");
 
 #ifdef USE_HTSLIB
@@ -65,6 +69,10 @@ int main(int argc, char *argv[]) {
         return taf_annotate_main(argc - 1, argv + 1);
     } else if (strcmp(argv[1], "lift") == 0) {
         return taf_lift_main(argc - 1, argv + 1);
+    } else if (strcmp(argv[1], "gerp") == 0) {
+        return taf_gerp_main(argc - 1, argv + 1);
+    } else if (strcmp(argv[1], "gerp-stats") == 0) {
+        return taf_gerp_stats_main(argc - 1, argv + 1);
     } else {
         fprintf(stderr, "%s is not a valid taffy command\n", argv[1]);
         usage();

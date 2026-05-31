@@ -136,6 +136,23 @@ TuiInterval *tui_query(Tui *tui, const char *seq_name,
  */
 int64_t *tui_load_seq_runs(Tui *tui, const char *seq_name, int64_t *n_out);
 
+/*
+ * Enumerate every sequence in the .tui's directory: name -> length (bp).
+ * Walks the d-records (already name-sorted by the builder) via oneGoto and
+ * returns an stHash mapping a freshly-allocated char* (the seq name) to
+ * the seq length stored directly as the value pointer (cast via intptr_t,
+ * mirroring tai_sequence_lengths's convention).
+ *
+ * Returns NULL on I/O error.
+ *
+ * Includes ALL sequences in the universal alignment -- both anchor (row-0)
+ * and leaf-genome.  The .tui doesn't tag them; callers that need anchor-
+ * only (e.g. for sharding without double-counting universal columns) must
+ * filter by name prefix against the # hal tree's internal labels, OR shard
+ * by universal-column range instead (see tui_total_columns).
+ */
+stHash *tui_sequence_lengths(const char *tui_path);
+
 /////////////////////////////////////////////////////////////////////////////
 // Reverse lookup: universal column -> a target genome's coordinate.
 //
@@ -224,6 +241,18 @@ TuiExtractIt *tui_extract_iterator(Tui *tui, LI *li, int is_maf, bool rle,
 Alignment *tui_extract_next(TuiExtractIt *it, LI *li);
 bool tui_extract_has_next(TuiExtractIt *it);
 void tui_extract_iterator_destruct(TuiExtractIt *it);
+
+/*
+ * Disown the alignment from the iterator's "auto-free on next call" slot.
+ * Use when the caller needs to keep the most recent yield alive across the
+ * next tui_extract_next() call -- e.g. to feed it as the p_alignment to
+ * taf_write_block2 so consecutive blocks' shared rows get properly
+ * delta-encoded.  After this call, the iterator no longer tracks the
+ * yield; the caller is responsible for `alignment_destruct`-ing it.
+ *
+ * Safe to call when there's no current yield (no-op).
+ */
+void tui_extract_take_ownership(TuiExtractIt *it);
 
 /* Universal column of the FIRST column of the sub-block just returned by
  * tui_extract_next() (i.e. tcol of its row-0).  Call right after _next(). */
