@@ -161,9 +161,13 @@ fi
 echo "[\$(date +%H:%M:%S)] indexing"
 t0=\$SECONDS
 # --tmpDir => phase-1 spills also land in scratch, not next to the output.
+# -l INFO so the slurm log captures phase-1 progress ticks (every 600 s)
+# + phase-2 per-genome timings -- without this the log is silent through
+# multi-hour runs.
 "\$TAFFY" index -i "\$LOCAL_INPUT" -u \\
     -T "\$T_THREADS" \\
     --tmpDir "\$STAGE_DIR" \\
+    -l INFO \\
     \$GENOME_NAMES_FLAG
 echo "[\$(date +%H:%M:%S)] index done in \$((SECONDS - t0)) s"
 
