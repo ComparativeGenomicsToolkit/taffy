@@ -58,6 +58,7 @@ static void usage(void) {
                      "genome set is taken from the `# hal` tree in the header "
                      "(hal2maf writes one); this option overrides it.\n");
     fprintf(stderr, "-T --threads N : Use N threads for bgzf I/O (default 1, only effective on bgzipped streams)\n");
+    fprintf(stderr, "   --phase2Threads N : For --universal only.  Number of OpenMP workers in phase 2 (per-genome sort + encode).  Default 1 (serial).  Each concurrent worker loads ONE genome's full run list into RAM (tens of GB for the giants of a vertebrate-scale tree), so this can easily blow past available memory if set too high.  Rule of thumb: max_genome_runs_in_GB * N <= 0.5 * total RAM.  On a 1.5 TB box with the 577-way, N=4-8 is the safe zone; N=64 will OOM near the start of phase 2.\n");
     fprintf(stderr, "-l --logLevel : Set the log level\n");
     fprintf(stderr, "-h --help : Print this help message\n");
 }
@@ -75,11 +76,13 @@ int taf_index_main(int argc, char *argv[]) {
     char *tmp_dir = NULL;
     char *genome_names_file = NULL;
     int bgzf_threads = 1;
+    int phase2_threads = 1;
 
     ///////////////////////////////////////////////////////////////////////////
     // Parse the inputs
     ///////////////////////////////////////////////////////////////////////////
 
+    enum { OPT_PHASE2_THREADS = 256 };
     while (1) {
         static struct option long_options[] = { { "logLevel", required_argument, 0, 'l' },
                                                 { "inputFile", required_argument, 0, 'i' },
@@ -88,6 +91,7 @@ int taf_index_main(int argc, char *argv[]) {
                                                 { "tmpDir", required_argument, 0, 'd' },
                                                 { "genomeNames", required_argument, 0, 'n' },
                                                 { "threads", required_argument, 0, 'T' },
+                                                { "phase2Threads", required_argument, 0, OPT_PHASE2_THREADS },
                                                 { "help", no_argument, 0, 'h' },
                                                 { 0, 0, 0, 0 } };
 
@@ -118,6 +122,10 @@ int taf_index_main(int argc, char *argv[]) {
                 break;
             case 'T':
                 bgzf_threads = atoi(optarg);
+                break;
+            case OPT_PHASE2_THREADS:
+                phase2_threads = atoi(optarg);
+                if (phase2_threads < 1) phase2_threads = 1;
                 break;
             case 'h':
                 usage();
@@ -167,7 +175,13 @@ int taf_index_main(int argc, char *argv[]) {
         }
         char *tui_fn = tui_path(taf_fn);
         st_logInfo("Output index file : %s\n", tui_fn);
-        rv = tui_create(li, tui_fn, tmp_dir, genome_name_map, bgzf_threads);
+        // phase2_threads drives the parallel phase-2 worker pool; -T only
+        // sets bgzf decompression threads.  Pre-fix the same -T value was
+        // doing both, which OOMed on the 577-way at -T 64 (each worker
+        // loads a genome's full runs into RAM, ~tens of GB for the
+        // giants).  Default phase2_threads=1 keeps the safe behavior.
+        st_logInfo("Phase 2 worker threads : %d\n", phase2_threads);
+        rv = tui_create(li, tui_fn, tmp_dir, genome_name_map, phase2_threads);
         free(tui_fn);
         if (genome_name_map != NULL) {
             stHash_destruct(genome_name_map);

@@ -669,10 +669,22 @@ static int triple_cmp_by_t(const void *a, const void *b) {
 // format: alternating 'N' (seq dictionary) and 'D' (data) records.
 //
 // We mmap the spill; the per-spill seq dictionary is built locally as we walk
-// 'N' records, and each 'D' record's seq pointer is set via stString_copy
-// (matches the old text reader's semantics so the existing caller's per-record
-// free(runs[k].seq) loop is correct without changes).
-static Run *load_genome_runs(const char *path, int64_t *n_out) {
+// 'N' records.  Each 'D' record's seq pointer borrows directly from the dict
+// (NOT stString_copy'd per run) -- the dict is returned to the caller so it
+// outlives runs[] and gets freed via *dict_out instead of per-run.
+//
+// Why interning matters: pre-fix this function stString_copy'd dict[idx]
+// PER RUN.  For a giant-ancestor genome (~1B runs at 577-way root scale)
+// that's ~30 GB of redundant string copies per worker.  Combined with
+// n_threads concurrent workers in phase 2, this is what was OOMing the
+// 1.5 TB index host on the 577-way at high thread counts.
+//
+// Caller contract: free dict_out[0..dict_cap_out) then free(dict_out)
+// AFTER you're done with runs[].  Order matters -- runs[i].seq is a
+// borrowed pointer into dict_out[i], so freeing dict first would leave
+// runs holding dangling pointers.
+static Run *load_genome_runs(const char *path, int64_t *n_out,
+                             char ***dict_out, int64_t *dict_cap_out) {
     int fd = open(path, O_RDONLY);
     if (fd < 0) { *n_out = 0; return NULL; }
     struct stat sb;
@@ -722,7 +734,7 @@ static Run *load_genome_runs(const char *path, int64_t *n_out) {
                             "undefined seq_idx %" PRIi64, path, (int64_t)idx);
             }
             Run *r = &runs[n++];
-            r->seq    = stString_copy(dict[(int64_t)idx]);
+            r->seq    = dict[(int64_t)idx];   // borrowed; dict outlives runs
             r->t      = (int64_t)t;
             r->g      = (int64_t)g;
             r->len    = (int64_t)len;
@@ -734,12 +746,13 @@ static Run *load_genome_runs(const char *path, int64_t *n_out) {
         }
     }
 
-    // Free per-spill dict (seq names already stString_copy'd into Run.seq).
-    for (int64_t i = 0; i < dict_cap; i++) free(dict[i]);
-    free(dict);
+    // Hand the dict off to the caller -- runs[i].seq is a borrowed pointer
+    // into it, so it has to outlive the runs[] sort + per-seq processing.
     munmap(base, (size_t)sb.st_size);
 
-    *n_out = n;
+    *n_out        = n;
+    *dict_out     = dict;
+    *dict_cap_out = dict_cap;
     return runs;
 }
 
@@ -979,8 +992,10 @@ static Phase2Genome *phase2_genome_work(const P2GenomeRange *gr,
                                         const int64_t *slen_by_idx) {
     int64_t nr = 0;
     Run *runs = NULL;
+    char  **seq_dict = NULL;
+    int64_t  seq_dict_cap = 0;
     if (gr->spill_path != NULL) {
-        runs = load_genome_runs(gr->spill_path, &nr);
+        runs = load_genome_runs(gr->spill_path, &nr, &seq_dict, &seq_dict_cap);
         if (runs != NULL) qsort(runs, nr, sizeof(Run), run_cmp);
     }
 
@@ -1085,8 +1100,14 @@ static Phase2Genome *phase2_genome_work(const P2GenomeRange *gr,
         rc = bnd;
     }
 
-    for (int64_t k = 0; k < nr; k++) free(runs[k].seq);
+    // runs[].seq are borrowed pointers into seq_dict; free runs first then
+    // the dict.  (Order reversed and you free pointers that runs still
+    // holds, then read them in the next free() iteration's debug builds.)
     free(runs);
+    if (seq_dict != NULL) {
+        for (int64_t i = 0; i < seq_dict_cap; i++) free(seq_dict[i]);
+        free(seq_dict);
+    }
     return g;
 }
 
@@ -1433,11 +1454,19 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
     // so the c_ord_emit counter and OneFile state stay un-contended and
     // S record positions match the s_ord values already committed to the
     // d directory above.  n_threads<=1 falls back to a serial loop (no
-    // OpenMP runtime cost).  In-flight memory is bounded by n_threads ×
-    // max per-genome encoded-result size: workers can finish out-of-order
-    // and stall at the ordered region holding their result until earlier
-    // iterations clear, so the cap is on the order of n_threads × ~few GB
-    // for the worst pathological run-counts.
+    // OpenMP runtime cost).
+    //
+    // MEMORY: each in-flight worker holds the FULL runs[] for its genome
+    // (loaded by load_genome_runs, ~Run-struct + seq-string-copy per run)
+    // PLUS its Phase2Genome with all encoded chunks.  For the 577-way
+    // root-ish ancestors that's tens of GB per worker; with n_threads=64
+    // we observed an OOM near the start of phase 2 on a 1.5 TB box.
+    // Caller (taf_index.c) defaults phase2-threads to 1 for safety;
+    // user opts into more with --phase2Threads after sizing their
+    // giants.  ordered does NOT bound in-flight memory: with dynamic
+    // schedule the worker fetches the next iter immediately on yield,
+    // so n_threads workers ARE running simultaneously even though the
+    // ordered region serialises their writes.
     int nt = (n_threads > 1) ? n_threads : 1;
     #pragma omp parallel for schedule(dynamic, 1) num_threads(nt) ordered
     for (int64_t gi = 0; gi < n_genomes; gi++) {
