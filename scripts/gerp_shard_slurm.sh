@@ -55,6 +55,7 @@ PARTITION=""
 ACCOUNT=""
 DO_CONCAT=1
 DRY_RUN=0
+WAIT=1                # block driver until SLURM finishes; --no-wait to detach
 TAFFY="${TAFFY:-$(command -v taffy || true)}"
 
 usage() {
@@ -87,6 +88,12 @@ Optional:
   --partition X SLURM partition (--partition=X)
   --account X   SLURM account (--account=X)
   --no-concat   Skip the post-array concatenation job
+  --no-wait     Submit and detach (default: driver blocks until SLURM
+                returns).  Without --no-wait the driver passes -W to
+                sbatch so it exits only after the array (and concat,
+                if any) completes -- handy when wrapping this script
+                in a Makefile or a pipeline.  stderr from each task
+                lands in a separate .err.log next to the .log file.
   --dry-run     Print the sbatch commands but do not submit
   -h            Help
 EOF
@@ -107,6 +114,7 @@ while [[ $# -gt 0 ]]; do
         --partition)     PARTITION="$2"; shift 2;;
         --account)       ACCOUNT="$2"; shift 2;;
         --no-concat)     DO_CONCAT=0; shift;;
+        --no-wait)       WAIT=0; shift;;
         --dry-run)       DRY_RUN=1; shift;;
         -h|--help)       usage 0;;
         *)               echo "unknown arg: $1" >&2; usage 1;;
@@ -249,7 +257,10 @@ DEPTH_TMP="\$SCRATCH/shard_\${K}.depth.wig.gz"
 
 echo "shard \${K}: running gerp on columns [\${COL_LO}, \${COL_HI}) ..."
 t0=\$SECONDS
+# -l INFO so the slurm log shows phase-1 progress + paralog counts +
+# blocks/cols summary as it runs (without it the shard is silent for hours).
 "\$TAFFY" gerp -i "\$GERP_INPUT" --columnRange "\${COL_LO}-\${COL_HI}" -c -T "\$THREADS" \\
+    -l INFO \\
     \$TREE_FLAG \\
     -o "\$RS_TMP" -D "\$DEPTH_TMP"
 echo "shard \${K}: gerp took \$((SECONDS - t0)) s"
@@ -274,6 +285,7 @@ SBATCH_ARGS=(
     --mem="${MEM_GB}G"
     --time="${TIME_HOURS}:00:00"
     --output="$OUTDIR/slurm_%A_%a.log"
+    --error="$OUTDIR/slurm_%A_%a.err.log"
     -J taffy_gerp_shard
 )
 [[ -n "$TMP_GB"    ]] && SBATCH_ARGS+=( --tmp="${TMP_GB}G" )
@@ -287,7 +299,9 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
 else
     echo ">> submitting array..."
     ARRAY_JOB=$(sbatch "${SBATCH_ARGS[@]}" --parsable "$RUNNER")
-    echo ">> array job id: $ARRAY_JOB"
+    echo ">> array job id:  $ARRAY_JOB"
+    echo ">> per-task logs: $OUTDIR/slurm_${ARRAY_JOB}_<task>.log (stdout)"
+    echo ">>                $OUTDIR/slurm_${ARRAY_JOB}_<task>.err.log (stderr)"
 fi
 
 # --- Step 5: optional concat job (depends on array success). -----------
@@ -315,6 +329,7 @@ EOF
         --mem=4G
         --time=1:00:00
         --output="$OUTDIR/slurm_concat_%j.log"
+        --error="$OUTDIR/slurm_concat_%j.err.log"
         -J taffy_gerp_concat
     )
     [[ -n "$PARTITION" ]] && CONCAT_ARGS+=( --partition="$PARTITION" )
@@ -327,6 +342,38 @@ EOF
         CONCAT_JOB=$(sbatch "${CONCAT_ARGS[@]}" --parsable "$CONCAT_SCRIPT")
         echo ">> concat job id: $CONCAT_JOB"
     fi
+fi
+
+# --- Step 7: optionally block until everything finishes. --------------
+# `sbatch --wait <job>` blocks the caller until <job> finishes, with the
+# job's exit code as the caller's exit code.  Waiting on the concat
+# (which has afterok-dep on the array) covers the array too -- it can't
+# run until the array succeeds, and won't be reported done until itself
+# finishes.  If --no-concat, wait on the array instead.
+if [[ "$DRY_RUN" -ne 1 && "$WAIT" -eq 1 ]]; then
+    if [[ "$DO_CONCAT" -eq 1 ]]; then
+        WAIT_JOB="$CONCAT_JOB"
+        WAIT_KIND="concat (which depends on array $ARRAY_JOB)"
+    else
+        WAIT_JOB="$ARRAY_JOB"
+        WAIT_KIND="array"
+    fi
+    echo ">> waiting for $WAIT_KIND job $WAIT_JOB ..."
+    # --wait without resubmitting: re-attach with `sattach`-style, but
+    # the cleanest way is a fresh sbatch that depends on the target.
+    # Cheaper: just poll squeue.  Polling avoids spawning an extra job
+    # and respects the partition / account constraints already in place.
+    while squeue -j "$WAIT_JOB" -h -o "%T" 2>/dev/null | grep -qE "PENDING|RUNNING|CONFIGURING|COMPLETING|RESIZING|SUSPENDED|REQUEUED"; do
+        sleep 60
+    done
+    # Read the final state via sacct (squeue drops completed jobs after a
+    # short retention window, so squeue alone can race the exit).
+    FINAL_STATE=$(sacct -j "$WAIT_JOB" -X -n -o State 2>/dev/null | head -1 | tr -d ' ')
+    echo ">> $WAIT_KIND final state: ${FINAL_STATE:-UNKNOWN}"
+    case "$FINAL_STATE" in
+        COMPLETED) ;;
+        *)         echo ">> NON-SUCCESS state -- check $OUTDIR/slurm_*.err.log"; exit 1;;
+    esac
 fi
 
 echo ">> done."

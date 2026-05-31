@@ -72,6 +72,7 @@ STAGE_LOCAL=1
 PARTITION=""
 ACCOUNT=""
 DRY_RUN=0
+WAIT=1                        # block driver until SLURM finishes; --no-wait to detach
 TAFFY="${TAFFY:-$(command -v taffy || true)}"
 HAL2MAF="${HAL2MAF:-$(command -v hal2maf || true)}"
 BIGBED2BED="${BIGBED2BED:-$(command -v bigBedToBed || true)}"
@@ -114,6 +115,9 @@ Optional:
                 and the 6 parallel cells per wave fight each other
                 for FS bandwidth.  Only sensible for small inputs.
   --partition X --account X
+  --no-wait     Submit and detach (default: driver blocks until SLURM
+                completes).  stdout / stderr split: <OUTDIR>/slurm_<jobid>.log
+                and .err.log.
   --dry-run     Print sbatch; do not submit
   -h            Help
 
@@ -143,6 +147,7 @@ while [[ $# -gt 0 ]]; do
         --no-stage-local)   STAGE_LOCAL=0; shift;;
         --partition)        PARTITION="$2"; shift 2;;
         --account)          ACCOUNT="$2"; shift 2;;
+        --no-wait)          WAIT=0; shift;;
         --dry-run)          DRY_RUN=1; shift;;
         -h|--help)      usage 0;;
         *)              echo "unknown arg: $1" >&2; usage 1;;
@@ -492,6 +497,7 @@ SBATCH_ARGS=(
     --mem="${SBATCH_MEM}G"
     --time="${SBATCH_TIME}:00:00"
     --output="$OUTDIR/slurm_%j.log"
+    --error="$OUTDIR/slurm_%j.err.log"
     -J taffy_view_bench
 )
 [[ -n "$TMP_GB"    ]] && SBATCH_ARGS+=( --tmp="${TMP_GB}G" )
@@ -505,6 +511,23 @@ else
     echo ">> submitting..."
     JOB=$(sbatch "${SBATCH_ARGS[@]}" --parsable "$RUNNER")
     echo ">> job id: $JOB"
+    echo ">> stdout: $OUTDIR/slurm_${JOB}.log"
+    echo ">> stderr: $OUTDIR/slurm_${JOB}.err.log"
+fi
+
+# Block driver until the job finishes (poll squeue every 60s, final
+# state via sacct).  --no-wait skips this.
+if [[ "$DRY_RUN" -ne 1 && "$WAIT" -eq 1 ]]; then
+    echo ">> waiting for job $JOB ..."
+    while squeue -j "$JOB" -h -o "%T" 2>/dev/null | grep -qE "PENDING|RUNNING|CONFIGURING|COMPLETING|RESIZING|SUSPENDED|REQUEUED"; do
+        sleep 60
+    done
+    FINAL_STATE=$(sacct -j "$JOB" -X -n -o State 2>/dev/null | head -1 | tr -d ' ')
+    echo ">> job $JOB final state: ${FINAL_STATE:-UNKNOWN}"
+    case "$FINAL_STATE" in
+        COMPLETED) ;;
+        *)         echo ">> NON-SUCCESS state -- check $OUTDIR/slurm_${JOB}.err.log"; exit 1;;
+    esac
 fi
 
 echo ">> done."

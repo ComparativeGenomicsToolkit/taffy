@@ -32,6 +32,7 @@ GENOME_NAMES=""           # optional --genomeNames passthrough
 PARTITION=""
 ACCOUNT=""
 DRY_RUN=0
+WAIT=1                    # block driver until SLURM job finishes; --no-wait to detach
 TAFFY="${TAFFY:-$(command -v taffy || true)}"
 
 usage() {
@@ -67,6 +68,12 @@ Optional:
                       Required on clusters that enforce \`--tmp\`; size to
                       ~(2 * input size) so input + spill files fit.
   --partition X --account X
+  --no-wait           Submit and detach (default: driver blocks until
+                      SLURM completes).  When blocking, the driver
+                      polls squeue every 60 s and exits with non-zero
+                      if the job's final state isn't COMPLETED.
+                      stdout/stderr split: <OUTPUT>.slurm_<jobid>.log
+                      and .err.log.
   --dry-run           Print the sbatch command, don't submit
   -h                  Help
 
@@ -87,6 +94,7 @@ while [[ $# -gt 0 ]]; do
         --tmp)           TMP_GB="$2"; shift 2;;
         --partition)     PARTITION="$2"; shift 2;;
         --account)       ACCOUNT="$2"; shift 2;;
+        --no-wait)       WAIT=0; shift;;
         --dry-run)       DRY_RUN=1; shift;;
         -h|--help)       usage 0;;
         *)               echo "unknown arg: $1" >&2; usage 1;;
@@ -187,6 +195,7 @@ SBATCH_ARGS=(
     --mem="${SBATCH_MEM}G"
     --time="${SBATCH_TIME}:00:00"
     --output="${OUTPUT}.slurm_%j.log"
+    --error="${OUTPUT}.slurm_%j.err.log"
     -J taffy_index
 )
 [[ -n "$TMP_GB"    ]] && SBATCH_ARGS+=( --tmp="${TMP_GB}G" )
@@ -204,6 +213,25 @@ else
     JOB=$(sbatch "${SBATCH_ARGS[@]}" --parsable "$RUNNER")
     echo ">> job id: $JOB"
     echo ">> runner: $RUNNER"
-    echo ">> log:    ${OUTPUT}.slurm_${JOB}.log"
+    echo ">> stdout: ${OUTPUT}.slurm_${JOB}.log"
+    echo ">> stderr: ${OUTPUT}.slurm_${JOB}.err.log"
 fi
+
+# Block driver until the job finishes if --no-wait wasn't passed.
+# Uses squeue polling + sacct final-state check (squeue drops completed
+# jobs after a short retention window so squeue alone can race the
+# exit).
+if [[ "$DRY_RUN" -ne 1 && "$WAIT" -eq 1 ]]; then
+    echo ">> waiting for job $JOB ..."
+    while squeue -j "$JOB" -h -o "%T" 2>/dev/null | grep -qE "PENDING|RUNNING|CONFIGURING|COMPLETING|RESIZING|SUSPENDED|REQUEUED"; do
+        sleep 60
+    done
+    FINAL_STATE=$(sacct -j "$JOB" -X -n -o State 2>/dev/null | head -1 | tr -d ' ')
+    echo ">> job $JOB final state: ${FINAL_STATE:-UNKNOWN}"
+    case "$FINAL_STATE" in
+        COMPLETED) ;;
+        *)         echo ">> NON-SUCCESS state -- check ${OUTPUT}.slurm_${JOB}.err.log"; exit 1;;
+    esac
+fi
+
 echo ">> done."
