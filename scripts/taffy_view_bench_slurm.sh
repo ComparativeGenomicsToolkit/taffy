@@ -371,7 +371,7 @@ for N in "\${SIZES[@]}"; do
     # tui_taf / tui_maf: universal MAF, reoriented onto the queried
     # genome (-U query) so blocks come out hg38-anchored -- comparable
     # to the .tai path / bigBed.  Without -U query the default is
-    # `-U ancestor`, which passes blocks through in their native
+    # \`-U ancestor\`, which passes blocks through in their native
     # ancestor anchor + emits every overlapping universal-column block
     # (~12x larger output that conflates this bench's question).
     # -m forces MAF; absence => TAF (taffy view's default).
