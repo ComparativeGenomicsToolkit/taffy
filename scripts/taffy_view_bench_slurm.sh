@@ -62,7 +62,10 @@ REF_CHROM="hg38.chr10"        # taffy view -r prefix (genome.seq for universal M
 HAL_GENOME="hg38"             # hal2maf --refGenome
 HAL_SEQ="chr10"               # hal2maf --refSequence
 BB_CHROM="chr10"              # bigBedToBed positional chrom name
-MAX_SIZE=""                   # cap of the size ladder; default = chr10's known length
+START=1000000                 # start of the queried region; default 1 Mb to skip the
+                              # telomere-/repeat-dominated 0..1Mb prefix of chr10 that
+                              # has near-zero universal-MAF coverage
+MAX_SIZE=""                   # cap of the size ladder; default = chr10's length - START
 TIME_BUDGET=1800              # per-cell wall seconds (timeout sends SIGKILL)
 HAL_TIME_BUDGET=""            # per-cell cap just for hal; defaults to TIME_BUDGET
 SBATCH_TIME=24
@@ -96,8 +99,15 @@ Optional:
   --halGenome NAME  hal2maf --refGenome (default $HAL_GENOME)
   --halSeq NAME     hal2maf --refSequence (default $HAL_SEQ)
   --bbChrom NAME    bigBedToBed chrom (default $BB_CHROM)
-  --maxSize INT     Cap on the size ladder.  Default = chr10's length
-                    pulled from \`taffy stats -s\` on the .tai input.
+  --start INT       Start coord of the queried region (default $START).
+                    Each ladder cell N becomes \`REF_CHROM:START-(START+N)\`.
+                    Default 1 Mb skips the 0..1Mb chr10 prefix which is
+                    telomeric / repeat-dominated and has near-zero
+                    universal-MAF coverage; queries there are not
+                    representative of typical "what does taffy view do".
+  --maxSize INT     Cap on the size ladder (= max length N, not end).
+                    Default = chrom_length - START pulled from
+                    \`taffy stats -s\` on the .tai input.
   --timeBudget SEC  Per-cell wall cap (timeout) (default $TIME_BUDGET)
   --halTimeBudget SEC  Tighter cap just for the hal2maf cell.  Useful
                     because hal2maf scales much worse than the other
@@ -138,6 +148,7 @@ while [[ $# -gt 0 ]]; do
         --halGenome)    HAL_GENOME="$2"; shift 2;;
         --halSeq)       HAL_SEQ="$2"; shift 2;;
         --bbChrom)      BB_CHROM="$2"; shift 2;;
+        --start)        START="$2"; shift 2;;
         --maxSize)      MAX_SIZE="$2"; shift 2;;
         --timeBudget)    TIME_BUDGET="$2"; shift 2;;
         --halTimeBudget) HAL_TIME_BUDGET="$2"; shift 2;;
@@ -167,17 +178,23 @@ done
 [[ -f "$HAL"        ]] || { echo "ERROR: $HAL not found" >&2; exit 1; }
 [[ -f "$BB"         ]] || { echo "ERROR: $BB not found" >&2; exit 1; }
 
-# Default --maxSize: ask the .tai for $REF_CHROM's length so we cap the
-# ladder at the actual chrom end (no point bench-ing 134M+1 byte queries).
+# Default --maxSize: ask the .tai for $REF_CHROM's length and subtract
+# START so the ladder caps at the actual remaining bp (no point bench-ing
+# past the chrom end).
 if [[ -z "$MAX_SIZE" ]]; then
     # No `awk ... exit`: closing the pipe early SIGPIPEs `taffy stats` which
     # propagates as exit 141 under pipefail.  Scan the whole list instead --
     # it's a few hundred ref chroms, microseconds.
-    MAX_SIZE=$("$TAFFY" stats -i "$HG38" -s | awk -v c="$REF_CHROM" '$1==c {print $2}')
-    if [[ -z "$MAX_SIZE" || ! "$MAX_SIZE" =~ ^[0-9]+$ ]]; then
+    CHROM_LEN=$("$TAFFY" stats -i "$HG38" -s | awk -v c="$REF_CHROM" '$1==c {print $2}')
+    if [[ -z "$CHROM_LEN" || ! "$CHROM_LEN" =~ ^[0-9]+$ ]]; then
         echo "ERROR: could not get $REF_CHROM length from $HG38; pass --maxSize explicitly" >&2
         exit 1
     fi
+    if (( START >= CHROM_LEN )); then
+        echo "ERROR: --start $START is at/past $REF_CHROM end ($CHROM_LEN)" >&2
+        exit 1
+    fi
+    MAX_SIZE=$(( CHROM_LEN - START ))
 fi
 
 mkdir -p "$OUTDIR" "$OUTDIR/logs"
@@ -190,7 +207,8 @@ echo ">> hg38 MAF:      $HG38 (+.tai)"
 echo ">> HAL:           $HAL"
 echo ">> BigBed:        $BB"
 echo ">> ref chrom:     $REF_CHROM (hal $HAL_GENOME / $HAL_SEQ, bb $BB_CHROM)"
-echo ">> max size:      $MAX_SIZE bp"
+echo ">> start:         $START bp"
+echo ">> max size:      $MAX_SIZE bp  (query range = [start, start+N))"
 echo ">> cpus/task:     $T_TOTAL (each taffy gets $((T_TOTAL / 4)) bgzf threads)"
 echo ">> time budget:   $TIME_BUDGET s per cell${HAL_TIME_BUDGET:+ (hal: ${HAL_TIME_BUDGET}s)}"
 echo ">> local-stage:   $([[ $STAGE_LOCAL -eq 1 ]] && echo "ON (copies to \$TMPDIR)" || echo "OFF (reads from network)")"
@@ -240,6 +258,7 @@ REF_CHROM="$REF_CHROM"
 HAL_GENOME="$HAL_GENOME"
 HAL_SEQ="$HAL_SEQ"
 BB_CHROM="$BB_CHROM"
+START=$START
 TIME_BUDGET=$TIME_BUDGET
 HAL_TIME_BUDGET=${HAL_TIME_BUDGET:-$TIME_BUDGET}
 STAGE_LOCAL=$STAGE_LOCAL
@@ -335,7 +354,8 @@ run_cell() {
 
 # Per-size wave: fire 4 tools in parallel, wait, append rows in cell order.
 for N in "\${SIZES[@]}"; do
-    echo "=== wave N=\$N ==="
+    END=\$((START + N))
+    echo "=== wave N=\$N  range=\${REF_CHROM}:\${START}-\${END} ==="
     t_wave=\$SECONDS
 
     declare -A pids
@@ -356,12 +376,12 @@ for N in "\${SIZES[@]}"; do
     # (~12x larger output that conflates this bench's question).
     # -m forces MAF; absence => TAF (taffy view's default).
     ( run_cell tui_taf "\$N" "\$TIME_BUDGET" \\
-        "\$TAFFY" view -i "\$UNI" -r "\${REF_CHROM}:0-\${N}" -U query    -T "\$TAFFY_T" \\
+        "\$TAFFY" view -i "\$UNI" -r "\${REF_CHROM}:\${START}-\${END}" -U query    -T "\$TAFFY_T" \\
       ) > "\${rowfiles[tui_taf]}" &
     pids[tui_taf]=\$!
 
     ( run_cell tui_maf "\$N" "\$TIME_BUDGET" \\
-        "\$TAFFY" view -i "\$UNI" -r "\${REF_CHROM}:0-\${N}" -U query -m -T "\$TAFFY_T" \\
+        "\$TAFFY" view -i "\$UNI" -r "\${REF_CHROM}:\${START}-\${END}" -U query -m -T "\$TAFFY_T" \\
       ) > "\${rowfiles[tui_maf]}" &
     pids[tui_maf]=\$!
 
@@ -373,24 +393,24 @@ for N in "\${SIZES[@]}"; do
     # benefits from \$TAFFY_T).
     ( run_cell tui_taf_norm "\$N" "\$TIME_BUDGET" \\
         sh -c '"\$1" view -i "\$2" -r "\$3" -U query -T "\$4" | "\$1" norm' \\
-        _ "\$TAFFY" "\$UNI" "\${REF_CHROM}:0-\${N}" "\$TAFFY_T" \\
+        _ "\$TAFFY" "\$UNI" "\${REF_CHROM}:\${START}-\${END}" "\$TAFFY_T" \\
       ) > "\${rowfiles[tui_taf_norm]}" &
     pids[tui_taf_norm]=\$!
 
     ( run_cell tui_maf_norm "\$N" "\$TIME_BUDGET" \\
         sh -c '"\$1" view -i "\$2" -r "\$3" -U query -T "\$4" | "\$1" norm -k' \\
-        _ "\$TAFFY" "\$UNI" "\${REF_CHROM}:0-\${N}" "\$TAFFY_T" \\
+        _ "\$TAFFY" "\$UNI" "\${REF_CHROM}:\${START}-\${END}" "\$TAFFY_T" \\
       ) > "\${rowfiles[tui_maf_norm]}" &
     pids[tui_maf_norm]=\$!
 
     # tai_taf / tai_maf: hg38-anchored MAF via .tai.
     ( run_cell tai_taf "\$N" "\$TIME_BUDGET" \\
-        "\$TAFFY" view -i "\$HG38" -r "\${REF_CHROM}:0-\${N}"    -T "\$TAFFY_T" \\
+        "\$TAFFY" view -i "\$HG38" -r "\${REF_CHROM}:\${START}-\${END}"    -T "\$TAFFY_T" \\
       ) > "\${rowfiles[tai_taf]}" &
     pids[tai_taf]=\$!
 
     ( run_cell tai_maf "\$N" "\$TIME_BUDGET" \\
-        "\$TAFFY" view -i "\$HG38" -r "\${REF_CHROM}:0-\${N}" -m -T "\$TAFFY_T" \\
+        "\$TAFFY" view -i "\$HG38" -r "\${REF_CHROM}:\${START}-\${END}" -m -T "\$TAFFY_T" \\
       ) > "\${rowfiles[tai_maf]}" &
     pids[tai_maf]=\$!
 
@@ -399,7 +419,7 @@ for N in "\${SIZES[@]}"; do
     if [[ -n "\$HAL2MAF" ]]; then
         ( run_cell hal "\$N" "\$HAL_TIME_BUDGET" \\
             "\$HAL2MAF" --refGenome "\$HAL_GENOME" --refSequence "\$HAL_SEQ" \\
-                       --start 0 --length "\$N" "\$HAL" /dev/stdout \\
+                       --start "\$START" --length "\$N" "\$HAL" /dev/stdout \\
           ) > "\${rowfiles[hal]}" &
         pids[hal]=\$!
     fi
@@ -410,7 +430,7 @@ for N in "\${SIZES[@]}"; do
     # builds had isn't there in v1 (kent/src/utils/bigBedToBed.c).
     if [[ -n "\$BIGBED2BED" ]]; then
         ( run_cell bb "\$N" "\$TIME_BUDGET" \\
-            "\$BIGBED2BED" -chrom="\$BB_CHROM" -start=0 -end="\$N" "\$BB" stdout \\
+            "\$BIGBED2BED" -chrom="\$BB_CHROM" -start="\$START" -end="\$END" "\$BB" stdout \\
           ) > "\${rowfiles[bb]}" &
         pids[bb]=\$!
     fi
