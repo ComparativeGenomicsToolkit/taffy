@@ -259,7 +259,10 @@ mkdir -p "\$LOGDIR"
 # Trap-cleanup so an aborted job doesn't leave TB of leftover scratch.
 if [[ "\$STAGE_LOCAL" -eq 1 ]]; then
     SCRATCH="\${TMPDIR:-/tmp/taffy_view_bench_\${SLURM_JOB_ID:-\$\$}}"
-    STAGE_DIR="\$SCRATCH/taffy_stage"
+    # Per-job subdir under SCRATCH so multiple jobs sharing a node-local
+    # \$TMPDIR (e.g. /data/tmp without a per-task suffix) don't race on
+    # the stage path.
+    STAGE_DIR="\$SCRATCH/taffy_view_bench_stage_\${SLURM_JOB_ID:-\$\$}"
     mkdir -p "\$STAGE_DIR"
     trap 'rm -rf "\$STAGE_DIR" 2>/dev/null || true' EXIT
     # stage_one prints the destination path on stdout (for command

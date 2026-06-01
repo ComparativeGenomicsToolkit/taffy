@@ -223,12 +223,18 @@ fi
 # (running outside SLURM, or unusual cluster), make our own under /tmp.
 SCRATCH="\${TMPDIR:-/tmp/taffy_gerp_\${SLURM_JOB_ID:-\$\$}_\${K}}"
 mkdir -p "\$SCRATCH"
+# Per-task subdir so colocated array shards on the same node (shared
+# node-local \$TMPDIR, common on clusters where TMPDIR is /data/tmp
+# without a per-task suffix) don't race on the stage path.  Job id +
+# array task id is unique across the whole cluster lifetime.
+STAGE_DIR="\$SCRATCH/taffy_stage_\${SLURM_JOB_ID:-\$\$}_\${K}"
 # Clean up our scratch on exit -- SLURM's prolog usually does this too,
 # but be explicit so failure modes don't leave 1.5 TB lying around.
-trap 'rm -rf "\$SCRATCH/taffy_stage" 2>/dev/null || true' EXIT
+# IMPORTANT: only rm OUR per-task subdir, not the entire SCRATCH (which
+# is shared with sibling tasks on the same node in the colocated case).
+trap 'rm -rf "\$STAGE_DIR" 2>/dev/null || true' EXIT
 
 if [[ "\$STAGE_LOCAL" -eq 1 ]]; then
-    STAGE_DIR="\$SCRATCH/taffy_stage"
     mkdir -p "\$STAGE_DIR"
     BASENAME=\$(basename "\$INPUT")
     LOCAL_INPUT="\$STAGE_DIR/\$BASENAME"

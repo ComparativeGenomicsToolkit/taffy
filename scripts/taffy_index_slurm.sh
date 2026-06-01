@@ -142,8 +142,10 @@ GENOME_NAMES="$GENOME_NAMES"
 
 # Resolve scratch.  SLURM sets \$TMPDIR per task; if not set (running
 # outside SLURM), use the override or fall back to /tmp.
+# Per-job subdir under SCRATCH so concurrent index jobs on the same
+# node (or another taffy script's stage) don't race on the stage path.
 SCRATCH="${TMPDIR_OVERRIDE:-\${TMPDIR:-/tmp/taffy_index_\${SLURM_JOB_ID:-\$\$}}}"
-STAGE_DIR="\$SCRATCH/taffy_index_stage"
+STAGE_DIR="\$SCRATCH/taffy_index_stage_\${SLURM_JOB_ID:-\$\$}"
 mkdir -p "\$STAGE_DIR"
 # Trap-cleanup on exit (success OR failure).  Phase-1 spill files alone
 # can be TB-class; leaving them on shared scratch is rude.
