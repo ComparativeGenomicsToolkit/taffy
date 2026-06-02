@@ -41,30 +41,44 @@
 // coordinate-bearing block starts.  Stored like R as a SoA delta+varint blob.
 // The query-time extractor binary-searches it to seek the underlying stream
 // to the nearest anchor <= the queried universal column.
+// On-disk format version, carried in the `t` record (field 1).  Bumped when
+// the C/S record semantics change in a way the field count alone cannot
+// disambiguate.  The reader branches on it (tui->format_version):
+//
+//   v0  (legacy)  t = {T}                            (1 INT, no version field)
+//                 S = {seqName, seqLen}
+//                 C = {g_min, g_max, parentS-ord, self-c-ord [, t_min, t_max]}
+//                     (6 INTs with the per-chunk t-range skip; older still: 4)
+//   v1  (this)    t = {T, format_version}
+//                 S = {seqName, seqLen, first_c_ord, n_chunks}
+//                 C = {g_min, g_span, t_min, t_span}  (4 INTs)
+//
+// v1 moves the per-chunk file-addressing fields (parentS-ord + self-c-ord) up
+// to per-sequence S fields (first_c_ord + n_chunks): the lift addresses a
+// sequence's chunks as the file ordinals [first_c_ord, first_c_ord+n_chunks)
+// via oneGoto(C, ..), so the only-ever-used purpose of the old per-chunk
+// ordinals is served once per sequence instead of once per chunk.  It also
+// stores g_max/t_max as spans off g_min/t_min (smaller absolute magnitude ->
+// fewer ltf8 bytes; g_span is bounded by TUI_CHUNK_G_MAX).  The new 4-field C
+// collides by field count with the oldest 4-field legacy C but has different
+// semantics, hence the explicit version (field count is not enough).
+#define TUI_FORMAT_VERSION 1
+
 static const char *TUI_SCHEMA =
     "P 3 tui\n"
-    "D t 1 3 INT\n"                          // total columns T (global)
+    "D t 2 3 INT 3 INT\n"                    // total columns T (global), format_version
     "D X 3 3 INT 3 INT 6 STRING\n"           // univ-col index: inflatedLen, nRec, deflate(SoA)
     "O d 3 6 STRING 3 INT 3 INT\n"           // dir: seqName, S-ordinal, seqLen -- O so oneGoto works
-    "O S 2 6 STRING 3 INT\n"                 // sequence object: seqName, seqLen
-    "O C 6 3 INT 3 INT 3 INT 3 INT 3 INT 3 INT\n"  // chunk header:
-                                                   //   field 0 g_min, 1 g_max,
-                                                   //   2 parent S-ord (1-based),
-                                                   //   3 self c_ord  (1-based),
-                                                   //   4 t_min,  5 t_max
-                                                   // t_min/t_max are the per-source-seq
-                                                   // coordinate bounds covered by this
-                                                   // chunk's runs -- the reader uses
-                                                   // them to skip chunks that don't
-                                                   // overlap a source-side query
-                                                   // range, avoiding the zlib decode
-                                                   // of irrelevant R blobs.  Old .tui
-                                                   // files written before this field
-                                                   // existed only have 4 INTs on C;
-                                                   // the reader checks the schema's
-                                                   // field count at open and falls
-                                                   // back to "decode every chunk" in
-                                                   // that case.
+    "O S 4 6 STRING 3 INT 3 INT 3 INT\n"     // sequence object: seqName, seqLen, first_c_ord, n_chunks
+    "O C 4 3 INT 3 INT 3 INT 3 INT\n"        // chunk header: g_min, g_span(=g_max-g_min),
+                                             //   t_min, t_span(=t_max-t_min).  g_span is bounded
+                                             //   by TUI_CHUNK_G_MAX; t_min/t_max(=t_min+t_span)
+                                             //   are the per-source-seq coordinate bounds, used
+                                             //   to skip chunks that don't overlap a source-side
+                                             //   query without the zlib decode of the R blob.
+                                             //   The chunk's file ordinal and its parent S are
+                                             //   NOT stored here in v1 -- the lift derives them
+                                             //   from S's first_c_ord + n_chunks.
     "D R 2 3 INT 6 STRING\n";                // runs (one per chunk): inflatedLen, deflate(blob)
 
 // Writer-side chunk caps.  A chunk closes when EITHER trigger fires:
@@ -1113,25 +1127,26 @@ static Phase2Genome *phase2_genome_work(const P2GenomeRange *gr,
 
 // Writer: drain one genome's worker result into the OneFile.  Single-
 // threaded by construction (the OpenMP `ordered` region in the loop).
-// c_ord_emit is the file-position C ordinal counter; we stamp it INTO each
-// C record (4th field) so the reader doesn't depend on ONElib's
-// oneObject(C) accumulator (off-by-one across cross-type oneGoto in this
-// lib version).
+// c_ord_emit is the file-position C ordinal counter.  v1 records, per
+// sequence S, the ordinal of its first chunk (first_c_ord = next C to be
+// written) plus its chunk count, so the lift addresses chunks by file
+// ordinal via oneGoto(C, first_c_ord+k) -- the per-chunk parent-S-ord and
+// self-c-ord of v0 are gone (and with them the dependence on ONElib's
+// unreliable oneObject(C) accumulator across cross-type oneGoto).
 static void phase2_genome_write(OneFile *of, Phase2Genome *g, int64_t *c_ord_emit) {
     for (int64_t i = 0; i < g->n_seqs; i++) {
         Phase2Seq *ps = &g->seqs[i];
         oneInt(of, 1) = ps->slen;
+        oneInt(of, 2) = (*c_ord_emit) + 1;   // first_c_ord: this seq's 1st chunk (1-based)
+        oneInt(of, 3) = ps->n_chunks;        // n_chunks for this sequence
         oneWriteLine(of, 'S', strlen(ps->seq_name), (void *)ps->seq_name);
-        int64_t s_ord = ps->seqks_idx + 1;
         for (int64_t k = 0; k < ps->n_chunks; k++) {
             Phase2Chunk *c = &ps->chunks[k];
             ++(*c_ord_emit);
             oneInt(of, 0) = c->g_min;
-            oneInt(of, 1) = c->g_max;
-            oneInt(of, 2) = s_ord;
-            oneInt(of, 3) = *c_ord_emit;
-            oneInt(of, 4) = c->t_min;
-            oneInt(of, 5) = c->t_max;
+            oneInt(of, 1) = c->g_max - c->g_min;   // g_span >= 0 (<= TUI_CHUNK_G_MAX)
+            oneInt(of, 2) = c->t_min;
+            oneInt(of, 3) = c->t_max - c->t_min;   // t_span >= 0
             oneWriteLine(of, 'C', 0, NULL);
             oneInt(of, 0) = c->raw_len;
             oneWriteLine(of, 'R', c->def_len, c->def);
@@ -1347,8 +1362,9 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
     tui_atexit_track_tui(out_path);
     oneAddProvenance(of, "taffy", "tui", "universal column index", 0);
 
-    // t: total columns
+    // t: total columns + on-disk format version (readers branch on field 1).
     oneInt(of, 0) = p1.T;
+    oneInt(of, 1) = TUI_FORMAT_VERSION;
     oneWriteLine(of, 't', 0, NULL);
 
     // X: universal-column -> file_pos index (the .tai-equivalent).  Read the
@@ -1527,6 +1543,7 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
 struct _Tui {
     char   *path;       // .tui path (re-opened per query)
     int64_t T;          // total universal columns
+    int     format_version;  // 0 = legacy (absolute C, no version field); >=1 = compact C
     int64_t n_d;        // number of d-lines (binary-search upper bound)
     // Universal-column -> file_pos index (X track); both strictly increasing.
     int64_t *idxCol, *idxFpos;
@@ -1546,6 +1563,11 @@ Tui *tui_load(const char *tui_path) {
     while (!(seen_t && seen_x) && (c = oneReadLine(of)) != 0) {
         if (c == 't') {
             tui->T = oneInt(of, 0);
+            // v1+ carries the format version in field 1; a legacy 1-field `t`
+            // record (no version) is format_version 0.
+            tui->format_version = (of->info[(int)'t'] != NULL &&
+                                   of->info[(int)'t']->nField >= 2)
+                                  ? (int)oneInt(of, 1) : 0;
             seen_t = 1;
         } else if (c == 'X') {
             int64_t x_raw = oneInt(of, 0);
@@ -1647,14 +1669,19 @@ TuiInterval *tui_query(Tui *tui, const char *seq_name,
     // Backward-compat: old .tui without the extra fields has nField == 4 on
     // C; we treat that as "no skip info, decode every chunk" -- same wall
     // as before this change.
-    int c_has_t_range = (of->info[(int)'C'] != NULL &&
-                         of->info[(int)'C']->nField >= 6);
+    // v1: C is {g_min, g_span, t_min, t_span} -> t-range always present at
+    // fields 2/3 (t_max = t_min + t_span).  Legacy v0: t-range only if C has
+    // the 6-field shape, at fields 4/5; the oldest 4-field C has no t-range.
+    int v1 = (tui->format_version >= 1);
+    int c_has_t_range = v1 || (of->info[(int)'C'] != NULL &&
+                               of->info[(int)'C']->nField >= 6);
     int64_t total = 0, cap = 0;
     while ((c = oneReadLine(of)) == 'C') {
         int skip = 0;
         if (c_has_t_range) {
-            int64_t t_min = oneInt(of, 4);
-            int64_t t_max = oneInt(of, 5);
+            int64_t t_min, t_max;
+            if (v1) { t_min = oneInt(of, 2); t_max = t_min + oneInt(of, 3); }
+            else    { t_min = oneInt(of, 4); t_max = oneInt(of, 5); }
             if (t_max <= start || t_min >= end) skip = 1;
         }
         if (oneReadLine(of) != 'R') break;
@@ -1918,43 +1945,66 @@ TuiGenomeLift *tui_genome_lift_load(Tui *tui, const char *genome_name) {
     if (n == 0) { free(ents); oneFileClose(of); return NULL; }
 
     // Pass 2: per-S walk -- for each of our target's sequences, oneGoto its
-    // S, then iterate (C, R)+ pairs reading only the C (oneGoto past R via
-    // its next-C ordinal).  Bypasses the global C list (which can be
-    // ~hundreds of thousands at vertebrate scale -- this targets only our
-    // few-tens to few-thousand seqs).  R blobs stay on disk; chunk_decode
-    // pulls them lazily on first column-query hit.
+    // S, then collect that seq's chunk metadata (C only, never the R blob; R
+    // is decoded lazily on first column-query hit).  Bypasses the global C
+    // list (which can be ~hundreds of thousands at vertebrate scale -- this
+    // targets only our few-tens to few-thousand seqs).
+    //
+    // v1: S carries (first_c_ord, n_chunks); chunks are the file ordinals
+    // [first_c_ord, first_c_ord+n_chunks), addressed directly via oneGoto(C).
+    // C is {g_min, g_span, ...} so g_max = g_min + g_span.
+    // v0 (legacy): walk (C,R)+ pairs sequentially, using the per-chunk
+    // parent-S-ord (field 2) to detect the next seq's boundary and the
+    // stamped self-c-ord (field 3) to oneGoto past each R.
+    int v1 = (tui->format_version >= 1);
     int64_t cap_c = 1024, nc = 0;
     TGLChunk *chunks = st_malloc(cap_c * sizeof(TGLChunk));
     for (int64_t k_seq = 0; k_seq < n; k_seq++) {
         int64_t s_ord = ents[k_seq].ord + 1;
         if (!oneGoto(of, 'S', s_ord)) continue;
         if (oneReadLine(of) != 'S') continue;
-        char c;
-        while ((c = oneReadLine(of)) == 'C') {
-            // The writer always pairs each C with the same seq's R+ chunks,
-            // so the parent S-ord on a C should match the seq we jumped to.
-            // A mismatch means we've walked into the next seq's chunks --
-            // bail to the next outer iteration.  c_ord (the 4th field) is
-            // the writer-stamped file-order ordinal; we use it instead of
-            // ONElib's oneObject() since the accumulator is unreliable
-            // after a cross-type oneGoto in this lib version.
-            if (oneInt(of, 2) != s_ord) break;
-            int64_t cur_c_ord = oneInt(of, 3);
-            if (nc == cap_c) { cap_c *= 2; chunks = st_realloc(chunks, cap_c * sizeof(TGLChunk)); }
-            chunks[nc].g_min          = oneInt(of, 0);
-            chunks[nc].g_max          = oneInt(of, 1);
-            chunks[nc].c_ord          = cur_c_ord;
-            chunks[nc].seq_idx        = k_seq;
-            chunks[nc].runs           = NULL;
-            chunks[nc].n_runs         = 0;
-            chunks[nc].max_end_prefix = NULL;
-            nc++;
-            // Skip the paired R by oneGoto-ing to the next C in the file.
-            // Avoids reading R's deflated bytes -- only the C metadata
-            // crosses the disk at open; R waits for the first column hit.
-            if (!oneGoto(of, 'C', cur_c_ord + 1)) break;
+        if (v1) {
+            int64_t first_c_ord = oneInt(of, 2);
+            int64_t n_chunks    = oneInt(of, 3);
+            for (int64_t k = 0; k < n_chunks; k++) {
+                int64_t cur_c_ord = first_c_ord + k;
+                if (!oneGoto(of, 'C', cur_c_ord)) break;
+                if (oneReadLine(of) != 'C') break;
+                if (nc == cap_c) { cap_c *= 2; chunks = st_realloc(chunks, cap_c * sizeof(TGLChunk)); }
+                int64_t g_min             = oneInt(of, 0);
+                chunks[nc].g_min          = g_min;
+                chunks[nc].g_max          = g_min + oneInt(of, 1);  // g_span -> g_max
+                chunks[nc].c_ord          = cur_c_ord;
+                chunks[nc].seq_idx        = k_seq;
+                chunks[nc].runs           = NULL;
+                chunks[nc].n_runs         = 0;
+                chunks[nc].max_end_prefix = NULL;
+                nc++;
+            }
+        } else {
+            char c;
+            while ((c = oneReadLine(of)) == 'C') {
+                // A parent-S-ord mismatch means we've walked into the next
+                // seq's chunks (the R-skip oneGoto below jumps over the
+                // intervening S).  c_ord (field 3) is the writer-stamped
+                // file ordinal; ONElib's oneObject() accumulator is
+                // unreliable after a cross-type oneGoto in this lib version.
+                if (oneInt(of, 2) != s_ord) break;
+                int64_t cur_c_ord = oneInt(of, 3);
+                if (nc == cap_c) { cap_c *= 2; chunks = st_realloc(chunks, cap_c * sizeof(TGLChunk)); }
+                chunks[nc].g_min          = oneInt(of, 0);
+                chunks[nc].g_max          = oneInt(of, 1);
+                chunks[nc].c_ord          = cur_c_ord;
+                chunks[nc].seq_idx        = k_seq;
+                chunks[nc].runs           = NULL;
+                chunks[nc].n_runs         = 0;
+                chunks[nc].max_end_prefix = NULL;
+                nc++;
+                // Skip the paired R by oneGoto-ing to the next C in the file.
+                if (!oneGoto(of, 'C', cur_c_ord + 1)) break;
+            }
+            (void)c;
         }
-        (void)c;
     }
 
     if (nc == 0) {
