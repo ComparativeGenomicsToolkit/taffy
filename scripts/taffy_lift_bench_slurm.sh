@@ -160,8 +160,9 @@ mkdir -p "$OUTDIR" "$OUTDIR/logs" "$OUTDIR/beds"
 # --- Resolve species panel ----------------------------------------------
 SPECIES_TSV="$OUTDIR/species.tsv"
 if [[ -n "$SPECIES_FILE" ]]; then
-    # Strip '#' comments + blank lines; canonicalize to 3 columns.
-    awk -F'\t' '!/^#/ && NF >= 3 {print $1"\t"$2"\t"$3}' "$SPECIES_FILE" > "$SPECIES_TSV"
+    # Strip '#' comments + blank lines; canonicalize to tab-separated.
+    # Default awk FS = whitespace, so tab- AND space-separated input both work.
+    awk '!/^#/ && NF >= 3 {print $1"\t"$2"\t"$3}' "$SPECIES_FILE" > "$SPECIES_TSV"
 else
     printf "%s\n" "$DEFAULT_SPECIES_TSV" > "$SPECIES_TSV"
 fi
