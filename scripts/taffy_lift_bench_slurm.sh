@@ -458,10 +458,16 @@ for N in "\${SIZES[@]}"; do
         # fewer than 95% of bases can be mapped.  At cross-species + multi-
         # megabase scale that drops EVERY interval at sizes >= 100 kb.
         # taffy/halLiftover have no analogous threshold (they preserve any
-        # mapping, even partial), so for an apples-to-apples comparison we
-        # neutralise liftOver's threshold by lifting at threshold=0.
+        # mapping, even partial).
+        # -multiple: keep all output regions when an interval maps to more
+        # than one place in the target (paralogs / chain duplicates).
+        # Default rejects the whole interval as "Duplicated in new" -- a
+        # serious undercount at Mb scale, where most chicken regions have
+        # at least one paralog hit in a close target.  taffy lift and
+        # halLiftover both emit one row per paralog x per gap-free run, so
+        # -multiple aligns liftover's semantics with theirs.
         ( run_cell liftover "\$sid" "\$sci" "\$common" "\$N" "\$TIME_BUDGET" \\
-            "\$LIFTOVER" -minMatch=0 "\$BED_NATIVE" "\$chain" "\$out_lo" "\$unm_lo" \\
+            "\$LIFTOVER" -minMatch=0 -multiple "\$BED_NATIVE" "\$chain" "\$out_lo" "\$unm_lo" \\
           ) > "\${rowfiles[\$stem_lo]}" &
         pids[\$stem_lo]=\$!
 
