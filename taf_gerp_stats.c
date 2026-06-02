@@ -193,32 +193,51 @@ static void joint_close(JointWig *j) {
 static bool advance_depth_to(JointWig *j, const char *chrom, int64_t pos,
                              int64_t *out_depth) {
     if (j->depth == NULL) { *out_depth = 0; return true; }
-    // Cap the number of cross-chrom skips so a corrupted depth wig
-    // with millions of extra chroms doesn't spin silently here.  The
-    // expected ratio is 1:1 same-chrom and ~K extra cross-chrom skips
-    // at each chrom boundary (where K = chrom count of depth wig); a
-    // 1 M cap catches truly garbage input without false-positives on
-    // legitimate wigs.
-    int64_t skipped = 0;
-    const int64_t kSkipCap = 1000000;
+    // Track cross-chrom skipping.  The previous fixed 1 M cap was too tight
+    // for taffy gerp's emission asymmetry: when an entire block has zero
+    // scored columns (< min_leaves surviving non-gap leaves), depth-without-
+    // RS emits the whole block's depth records on the block's row-0 chrom,
+    // and ancestor blocks routinely have multi-million-column reach.  Scope
+    // the cap to "consecutive depth records on ONE chrom" instead -- a
+    // single chrom never legitimately exceeds 1 B columns (typical bird /
+    // mammal max chrom ~250 M), and any per-chrom desync caps out there.
+    // EOF stays the all-paths abort.
+    int64_t per_chrom_skipped = 0;
+    char *prev_depth_chrom = NULL;
+    const int64_t kPerChromCap = 1000000000LL;   // 1 B records on one chrom
     while (1) {
         if (!j->depth->have_pending && !wig_stream_next(j->depth)) {
+            free(prev_depth_chrom);
             fprintf(stderr, "taffy gerp-stats: depth wig EOF before RS position "
                             "%s:%" PRIi64 "\n", chrom, pos);
             return false;
         }
         if (strcmp(j->depth->pending_chrom, chrom) != 0) {
             // Different chrom: discard this depth tuple, keep advancing.
+            // Reset the per-chrom counter when depth transitions to a new
+            // chrom (we walked past a whole unmatched chrom -- normal under
+            // taffy gerp's depth-only-block emission, not corruption).
+            if (prev_depth_chrom == NULL ||
+                strcmp(prev_depth_chrom, j->depth->pending_chrom) != 0) {
+                free(prev_depth_chrom);
+                prev_depth_chrom = stString_copy(j->depth->pending_chrom);
+                per_chrom_skipped = 0;
+            }
             j->depth->have_pending = false;
-            if (++skipped >= kSkipCap) {
-                fprintf(stderr, "taffy gerp-stats: depth wig: %" PRIi64 " consecutive "
-                                "cross-chrom records without finding %s:%" PRIi64 " -- "
-                                "input likely corrupt or mismatched.\n",
-                        skipped, chrom, pos);
+            if (++per_chrom_skipped >= kPerChromCap) {
+                fprintf(stderr, "taffy gerp-stats: depth wig: %" PRIi64 " records "
+                                "on chrom %s without finding %s:%" PRIi64 " -- "
+                                "input likely corrupt.\n",
+                        per_chrom_skipped, prev_depth_chrom, chrom, pos);
+                free(prev_depth_chrom);
                 return false;
             }
             continue;
         }
+        // Reset on entering the wanted chrom too -- prev_depth_chrom is for
+        // tracking unmatched-chrom skips only.
+        free(prev_depth_chrom);
+        prev_depth_chrom = NULL;
         if (j->depth->pending_pos < pos) {
             j->depth->have_pending = false;
             continue;

@@ -196,9 +196,13 @@ static void score_one_block(const GerpTree *gt, GerpThreadState *ts,
             if (want_depth) gerpbuf_put_score(&res->depth, wig_pos,
                                               (double)depth, 0);
             res->cols_scored++;
-        } else if (want_depth) {
-            gerpbuf_put_score(&res->depth, wig_pos, (double)depth, 0);
         }
+        // No depth-only emit when !scored: that asymmetry caused gerp-stats
+        // to desync after whole-block depth-only runs (e.g. ancestor blocks
+        // with < min_leaves surviving non-gap leaves -- RS emitted nothing
+        // but depth emitted every column).  Per-column depth at unscored
+        // sites is also not useful to the gerp-stats z-score normalisation,
+        // which keys on (chrom, pos) tuples that exist in BOTH wigs.
         anchor++;
     }
 }
