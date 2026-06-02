@@ -524,6 +524,29 @@ def _read_bed(path):
     return out
 
 
+def _assert_no_abutting_bed_rows(path):
+    """taffy lift's pending-merge buffer should collapse any two output
+    rows on the same (chrom, strand) where one's end == the other's start.
+    A failure here used to manifest as 6-30x fragmentation on close
+    species when the universal MAF has duplicate anchor coverage of a
+    source region (one 'main' anchor + one 'patch' anchor filling 1-4 bp
+    gaps).  See pending_cascade() in taf_lift.c."""
+    recs = _read_bed(path)
+    key  = lambda r: (r['chrom'], r.get('strand', ''))
+    by_key = {}
+    for r in recs:
+        by_key.setdefault(key(r), []).append(r)
+    abuts = []
+    for k, rs in by_key.items():
+        rs.sort(key=lambda r: (r['start'], r['end']))
+        for a, b in zip(rs, rs[1:]):
+            if a['end'] == b['start']:
+                abuts.append((k, a, b))
+    assert not abuts, (
+        f"output bed has {len(abuts)} abutting row pair(s) that should have "
+        f"merged; first: {abuts[0]}")
+
+
 def test_lift_bed_equivalent_to_wig(tmp_path):
     """A BED interval covering [s,e) should produce target intervals whose
     base set matches what the same range gives via per-position wig lift.
@@ -548,6 +571,7 @@ def test_lift_bed_equivalent_to_wig(tmp_path):
     assert bed_set == wig_set, (
         f"bed vs wig base set differs: only-in-bed={len(bed_set - wig_set)} "
         f"only-in-wig={len(wig_set - bed_set)}")
+    _assert_no_abutting_bed_rows(out_bed)
 
 
 def test_lift_bed_strand_xor(tmp_path):

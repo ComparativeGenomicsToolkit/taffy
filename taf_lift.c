@@ -546,6 +546,39 @@ static void emit_pending(FILE *fh, PendingBed *pe, const char *name,
 // is bounded by PENDING_MAX × sizeof(PendingBed) ≈ 16 KB; correctness is
 // preserved (an LRU slot that goes idle was about to be flushed at
 // end-of-line anyway -- its content writes out the same).
+// Cascade: after extending slot `hit`, keep absorbing any other slot
+// whose edge now abuts hit's edge.  Required because the universal MAF
+// can emit the SAME source region from two anchor blocks (one "main" +
+// one "patch" covering 1-4 bp gaps between main's runs).  Without
+// cascading, the main rows get pushed first (forming non-abutting slots
+// in the pending buffer), then the patch rows extend each slot's end to
+// abut the NEXT slot's start -- but no further merge fires, so the
+// output keeps the per-block fragmentation the user shouldn't see.
+static void pending_cascade(PendingBed *pending, int cap, int hit,
+                            int emit_strand) {
+    int merged;
+    do {
+        merged = 0;
+        for (int j = 0; j < cap; j++) {
+            if (j == hit || !pending[j].active) continue;
+            if (pending[j].seq != pending[hit].seq) continue;
+            if (emit_strand && pending[j].out_strand != pending[hit].out_strand) continue;
+            if (pending[hit].end == pending[j].start) {
+                pending[hit].end = pending[j].end;
+                pending[j].active = 0;
+                merged = 1;
+                break;
+            }
+            if (pending[j].end == pending[hit].start) {
+                pending[hit].start = pending[j].start;
+                pending[j].active = 0;
+                merged = 1;
+                break;
+            }
+        }
+    } while (merged);
+}
+
 static PendingBed *pending_push(FILE *fh, PendingBed *pending, int *p_cap,
                                 int64_t *p_touch,
                                 const char *seq, int64_t start, int64_t end,
@@ -553,14 +586,21 @@ static PendingBed *pending_push(FILE *fh, PendingBed *pending, int *p_cap,
                                 const char *name, const char *score,
                                 int64_t *n_out_p) {
     int64_t now = ++(*p_touch);
-    // 1. extend-on-abut
+    // 1. extend-on-abut, both directions; cascade-merge after.
     for (int i = 0; i < *p_cap; i++) {
         if (!pending[i].active) continue;
         if (pending[i].seq != seq) continue;
         if (emit_strand && pending[i].out_strand != out_strand) continue;
-        if (pending[i].end == start) {                // abuts -> extend
+        if (pending[i].end == start) {                // forward abut
             pending[i].end = end;
             pending[i].touched = now;
+            pending_cascade(pending, *p_cap, i, emit_strand);
+            return pending;
+        }
+        if (pending[i].start == end) {                // reverse abut
+            pending[i].start = start;
+            pending[i].touched = now;
+            pending_cascade(pending, *p_cap, i, emit_strand);
             return pending;
         }
     }
