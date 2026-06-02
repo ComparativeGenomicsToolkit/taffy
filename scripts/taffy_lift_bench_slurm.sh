@@ -44,6 +44,7 @@
 set -euo pipefail
 
 UNI=""
+HAL=""
 CHAINS_DIR=""
 TREE=""
 OUTDIR=""
@@ -63,6 +64,7 @@ ACCOUNT=""
 DRY_RUN=0
 WAIT=1
 LIFTOVER="${LIFTOVER:-$(command -v liftOver || true)}"
+HALLIFTOVER="${HALLIFTOVER:-$(command -v halLiftover || true)}"
 TAFFY="${TAFFY:-$(command -v taffy || true)}"
 
 # Default 10-species panel, baked here so the script is one-file portable.
@@ -88,6 +90,7 @@ taffy_lift_bench_slurm.sh -- liftover vs taffy lift benchmark across a
 
 Required:
   -u FILE       Universal MAF (.uni.maf.gz; only its .tui sibling is read)
+  -H FILE       HAL file (for halLiftover)
   -c DIR        Directory of chain files named <REF>_vs_<GENOME_ID>.chain.gz
   -t FILE       Species tree (.nwk) -- used by the plot script for divergence
   -o DIR        Output directory
@@ -114,7 +117,7 @@ Optional:
   --dry-run     Print sbatch; do not submit
   -h            Help
 
-Override binary paths via env: TAFFY, LIFTOVER
+Override binary paths via env: TAFFY, LIFTOVER, HALLIFTOVER
 EOF
     exit "${1:-0}"
 }
@@ -122,6 +125,7 @@ EOF
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -u)             UNI="$2"; shift 2;;
+        -H)             HAL="$2"; shift 2;;
         -c)             CHAINS_DIR="$2"; shift 2;;
         -t)             TREE="$2"; shift 2;;
         -o)             OUTDIR="$2"; shift 2;;
@@ -145,13 +149,15 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-for v in UNI CHAINS_DIR TREE OUTDIR; do
+for v in UNI HAL CHAINS_DIR TREE OUTDIR; do
     [[ -n "${!v}" ]] || { echo "ERROR: -$(echo $v | cut -c1) required" >&2; usage 1; }
 done
-[[ -n "$TAFFY"    ]] || { echo "ERROR: taffy not on PATH (set \$TAFFY)" >&2; exit 1; }
-[[ -n "$LIFTOVER" ]] || { echo "ERROR: liftOver not on PATH (set \$LIFTOVER)" >&2; exit 1; }
-[[ -f "$UNI"      ]] || { echo "ERROR: $UNI not found" >&2; exit 1; }
-[[ -f "${UNI}.tui" ]] || { echo "ERROR: $UNI has no .tui sibling" >&2; exit 1; }
+[[ -n "$TAFFY"       ]] || { echo "ERROR: taffy not on PATH (set \$TAFFY)" >&2; exit 1; }
+[[ -n "$LIFTOVER"    ]] || { echo "ERROR: liftOver not on PATH (set \$LIFTOVER)" >&2; exit 1; }
+[[ -n "$HALLIFTOVER" ]] || { echo "ERROR: halLiftover not on PATH (set \$HALLIFTOVER)" >&2; exit 1; }
+[[ -f "$UNI"         ]] || { echo "ERROR: $UNI not found" >&2; exit 1; }
+[[ -f "${UNI}.tui"   ]] || { echo "ERROR: $UNI has no .tui sibling" >&2; exit 1; }
+[[ -f "$HAL"         ]] || { echo "ERROR: $HAL not found" >&2; exit 1; }
 [[ -d "$CHAINS_DIR" ]] || { echo "ERROR: $CHAINS_DIR not found" >&2; exit 1; }
 [[ -f "$TREE"     ]] || { echo "ERROR: $TREE not found" >&2; exit 1; }
 
@@ -293,7 +299,9 @@ PY
 echo ">> output dir:    $OUTDIR"
 echo ">> taffy:         $TAFFY"
 echo ">> liftOver:      $LIFTOVER"
+echo ">> halLiftover:   $HALLIFTOVER"
 echo ">> uni:           $UNI  (using \$UNI.tui only)"
+echo ">> hal:           $HAL"
 echo ">> chains dir:    $CHAINS_DIR"
 echo ">> tree:          $TREE"
 echo ">> reference:     $REF"
@@ -312,6 +320,7 @@ cat > "$RUNNER" <<EOF
 set -uo pipefail
 
 UNI="$UNI"
+HAL="$HAL"
 CHAINS_DIR="$CHAINS_DIR"
 OUTDIR="$OUTDIR"
 REF="$REF"
@@ -321,6 +330,7 @@ TIME_BUDGET=$TIME_BUDGET
 STAGE_LOCAL=$STAGE_LOCAL
 TAFFY="$TAFFY"
 LIFTOVER="$LIFTOVER"
+HALLIFTOVER="$HALLIFTOVER"
 SPECIES_TSV="$OUTDIR/species.tsv"
 SIZES=( ${SIZE_ARR[*]} )
 
@@ -354,6 +364,9 @@ if [[ "\$STAGE_LOCAL" -eq 1 ]]; then
     : > "\$LOCAL_UNI"
     UNI="\$LOCAL_UNI"
 
+    # HAL file for halLiftover.
+    HAL=\$(stage_one "\$HAL")
+
     # Stage every chain in the panel into a local mirror directory.
     LOCAL_CHAINS="\$STAGE_DIR/chains"
     mkdir -p "\$LOCAL_CHAINS"
@@ -372,12 +385,15 @@ fi
 
 # Write header if file is empty.
 if [[ ! -s "\$BENCH_TSV" ]]; then
-    printf "tool\tgenome_id\tsci_name\tcommon_name\tsize_bp\tn_intervals\twall_s\tpeak_rss_kb\texit\ttimed_out\tn_mapped\tn_unmapped\n" > "\$BENCH_TSV"
+    printf "tool\tgenome_id\tsci_name\tcommon_name\tsize_bp\tn_intervals\twall_s\tpeak_rss_kb\texit\ttimed_out\tn_mapped\tn_mapped_bp\tn_unmapped\n" > "\$BENCH_TSV"
 fi
 
 # run_cell tool species_id sci common size budget cmd...
-# Writes one TSV row to stdout.  n_mapped / n_unmapped come from line
-# counts of the cell's output beds (kept around for sanity-checking).
+# Writes one TSV row to stdout.  n_mapped = output bed row count;
+# n_mapped_bp = sum of (end - start) over all output rows; n_unmapped =
+# count of input intervals that left no output (liftOver writes them to
+# unmapped.bed; taffy/halLiftover never do, so for those tools n_unmapped
+# is reported as 0 -- prefer n_mapped vs n_intervals to gauge coverage).
 run_cell() {
     local tool="\$1" sid="\$2" sci="\$3" common="\$4" N="\$5" budget="\$6"
     shift 6
@@ -404,18 +420,21 @@ run_cell() {
     fi
     (( rc == 137 || rc == 124 )) && timed_out=1
 
-    local n_mapped=0 n_unmapped=0
-    [[ -s "\$out_bed" ]] && n_mapped=\$(wc -l < "\$out_bed")
+    local n_mapped=0 n_mapped_bp=0 n_unmapped=0
+    if [[ -s "\$out_bed" ]]; then
+        # Single awk pass for both row count and total bp.
+        read -r n_mapped n_mapped_bp < <(awk '{n++; bp += \$3 - \$2} END {print n+0, bp+0}' "\$out_bed")
+    fi
     [[ -s "\$unm_bed" ]] && n_unmapped=\$(grep -v '^#' "\$unm_bed" | wc -l)
 
-    printf "%s\t%s\t%s\t%s\t%d\t\$N_INTERVALS_INNER\t%s\t%s\t%d\t%d\t%d\t%d\n" \\
-        "\$tool" "\$sid" "\$sci" "\$common" "\$N" "\$wall" "\$rss" "\$rc" "\$timed_out" "\$n_mapped" "\$n_unmapped"
+    printf "%s\t%s\t%s\t%s\t%d\t\$N_INTERVALS_INNER\t%s\t%s\t%d\t%d\t%d\t%d\t%d\n" \\
+        "\$tool" "\$sid" "\$sci" "\$common" "\$N" "\$wall" "\$rss" "\$rc" "\$timed_out" "\$n_mapped" "\$n_mapped_bp" "\$n_unmapped"
 }
 
 # Per cell N_intervals is fixed across the run (constant from driver).
 N_INTERVALS_INNER=$N_INTERVALS
 
-# --- Outer loop: size waves; inner = species x 2 tools in parallel. ----
+# --- Outer loop: size waves; inner = species x 3 tools in parallel. ----
 for N in "\${SIZES[@]}"; do
     BED_NATIVE="\$BEDS/intervals_\${N}.bed"
     [[ -s "\$BED_NATIVE" ]] || { echo "skip wave N=\$N: empty bed"; continue; }
@@ -439,6 +458,18 @@ for N in "\${SIZES[@]}"; do
             "\$LIFTOVER" "\$BED_NATIVE" "\$chain" "\$out_lo" "\$unm_lo" \\
           ) > "\${rowfiles[\$stem_lo]}" &
         pids[\$stem_lo]=\$!
+
+        # ---- halLiftover cell ----
+        # halLiftover's input bed uses chain-native chrom names (no
+        # <REF>. prefix), same as UCSC liftOver.  Argument order:
+        # halLiftover HAL SRC_GENOME SRC_BED TGT_GENOME TGT_BED.
+        stem_hl="halLiftover_\${sid}_\${N}"
+        rowfiles[\$stem_hl]="\$LOGDIR/row_\${stem_hl}.tsv"
+        out_hl="\$LOGDIR/mapped_\${stem_hl}.bed"
+        ( run_cell halLiftover "\$sid" "\$sci" "\$common" "\$N" "\$TIME_BUDGET" \\
+            "\$HALLIFTOVER" "\$HAL" "\$REF" "\$BED_NATIVE" "\$sid" "\$out_hl" \\
+          ) > "\${rowfiles[\$stem_hl]}" &
+        pids[\$stem_hl]=\$!
 
         # ---- taffy lift cell ----
         stem_tf="taffy_\${sid}_\${N}"
@@ -588,7 +619,7 @@ species_order = sorted({(r["dist"], r["genome_id"], r["common_name"]) for r in r
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
 fig.subplots_adjust(left=0.08, right=0.97, top=0.90, bottom=0.20, wspace=0.27)
 
-tool_color = {"liftover": "#d62728", "taffy": "#1f77b4"}
+tool_color = {"liftover": "#d62728", "halLiftover": "#2ca02c", "taffy": "#1f77b4"}
 size_marker = {sz: m for sz, m in zip(sizes, ["o", "s", "^", "D", "v", "*"])}
 
 def by_tool_size(tool, size):
@@ -602,7 +633,7 @@ def by_tool_size(tool, size):
     out.sort()
     return out
 
-for tool in ("liftover", "taffy"):
+for tool in ("liftover", "halLiftover", "taffy"):
     for sz in sizes:
         pts = by_tool_size(tool, sz)
         if not pts: continue
