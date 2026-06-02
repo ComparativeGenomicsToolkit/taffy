@@ -156,6 +156,7 @@ done
 [[ -f "$TREE"     ]] || { echo "ERROR: $TREE not found" >&2; exit 1; }
 
 mkdir -p "$OUTDIR" "$OUTDIR/logs" "$OUTDIR/beds"
+echo ">> driver starting (output dir: $OUTDIR)" >&2
 
 # --- Resolve species panel ----------------------------------------------
 SPECIES_TSV="$OUTDIR/species.tsv"
@@ -168,6 +169,7 @@ else
 fi
 N_SPECIES=$(wc -l < "$SPECIES_TSV")
 [[ "$N_SPECIES" -gt 0 ]] || { echo "ERROR: empty species panel" >&2; exit 1; }
+echo ">> species panel: $N_SPECIES entries" >&2
 
 # --- Resolve & validate chains for every species ------------------------
 declare -A CHAIN_OF       # species_id -> chain.gz path
@@ -193,7 +195,11 @@ done < "$SPECIES_TSV"
 # naming conventions in VGP cactus (UCSC chr1 for mm39, NCBI accessions
 # like NC_051216.1 for VGP species), so we cannot guess.
 REF_SIZES="$OUTDIR/ref.sizes"
-"$TAFFY" stats -i "$UNI" -s 2>/dev/null \
+echo ">> querying .tui for ${REF}.* chroms via taffy stats -s ..." >&2
+# Don't pipe-redirect stderr -- we want any taffy errors to surface.
+# `set -e` + `pipefail` will still abort the script if anything failed,
+# but with a visible cause.
+"$TAFFY" stats -i "$UNI" -s \
     | awk -v p="${REF}." 'index($1, p) == 1 {sub(p, "", $1); print $1"\t"$2}' \
     | sort -k2,2nr > "$REF_SIZES"
 [[ -s "$REF_SIZES" ]] || {
@@ -201,6 +207,7 @@ REF_SIZES="$OUTDIR/ref.sizes"
     echo "       Check that -r matches the genome prefix used in the universal MAF." >&2
     exit 1
 }
+echo ">>   found $(wc -l < "$REF_SIZES") chroms matching ${REF}.*" >&2
 
 # Quick cross-check: does at least one chain header tName match one of
 # our REF_SIZES chroms?  Catches the bench-killing case where chain
