@@ -214,10 +214,17 @@ echo ">>   found $(wc -l < "$REF_SIZES") chroms matching ${REF}.*" >&2
 # names disagree with .tui names (e.g., chr1 vs NC_006088.5) BEFORE the
 # job runs.  Loop over chains since the first one may legitimately have
 # 0 chrom intersection (an alt-only chrom pair) if we're unlucky.
+#
+# Subshell with pipefail off + `|| true`: `zcat | awk | head -200` early-
+# closes the pipe, which SIGPIPEs zcat (exit 141).  With outer pipefail+
+# set -e, that would silently abort the whole driver.  Disabling pipefail
+# inside the substitution scopes the relaxation to this one check.
+echo ">> validating chain tName ↔ .tui chrom intersection ..." >&2
 INTERSECT_OK=0
 for ch in "${CHAIN_OF[@]}"; do
-    # Sample first 200 chain headers (cheap enough on a multi-GB chain.gz).
-    CHAIN_TNAMES=$(zcat "$ch" | awk '/^chain/ {print $3}' | head -200 | sort -u)
+    CHAIN_TNAMES=$(set +o pipefail; \
+        zcat "$ch" 2>/dev/null | awk '/^chain/ {print $3}' | head -200 | sort -u; \
+        true)
     if [[ -n "$CHAIN_TNAMES" ]] \
        && awk 'NR==FNR{t[$0]=1; next} ($1 in t)' \
               <(echo "$CHAIN_TNAMES") "$REF_SIZES" \
@@ -229,11 +236,16 @@ done
 if [[ "$INTERSECT_OK" -ne 1 ]]; then
     echo "WARN: no overlap between chain tNames and ${REF}.* in .tui." >&2
     echo "      First chain head chroms (sample):" >&2
-    zcat "$(echo "${CHAIN_OF[@]}" | awk '{print $1}')" \
-        | awk '/^chain/ {print "       "$3}' | head -5 >&2
+    first_chain=$(printf '%s\n' "${CHAIN_OF[@]}" | head -1)
+    ( set +o pipefail; \
+        zcat "$first_chain" 2>/dev/null \
+            | awk '/^chain/ {print "       "$3}' | head -5 >&2; \
+        true )
     echo "      .tui ${REF}.* chroms (sample):" >&2
     head -5 "$REF_SIZES" | awk '{print "       "$1}' >&2
     echo "      liftOver cells will likely fail; taffy cells should still work." >&2
+else
+    echo ">>   chain ↔ .tui chrom naming OK" >&2
 fi
 
 # --- Generate the bed files (one per size; shared across species) -------
