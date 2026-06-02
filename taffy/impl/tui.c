@@ -1525,12 +1525,20 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
 /////////////////////////////////////////////////////////////////////////////
 
 struct _Tui {
-    char   *path;       // .tui path (re-opened per query)
+    char   *path;       // .tui path
     int64_t T;          // total universal columns
     int64_t n_d;        // number of d-lines (binary-search upper bound)
     // Universal-column -> file_pos index (X track); both strictly increasing.
     int64_t *idxCol, *idxFpos;
     int64_t  idxN;
+    // Cached OneFile handle, reused across tui_query / tui_load_seq_runs /
+    // tui_genome_lift_load.  oneFileOpenRead on a multi-GB .tui parses the
+    // embedded schema + reads the full footer index for every object type
+    // (S / C / R / d / X / t) -- ~1-2 s on a 92 GB cluster .tui.  Previously
+    // we re-opened on every call, so an N-bed-line lift paid N+3 opens.
+    // Cached, the cost is paid once at tui_load.  Single-threaded by
+    // design; a parallel lift would need a mutex or per-thread copies.
+    OneFile *of;
 };
 
 Tui *tui_load(const char *tui_path) {
@@ -1565,12 +1573,15 @@ Tui *tui_load(const char *tui_path) {
     I64 nd = 0;
     oneStats(of, 'd', &nd, NULL, NULL);
     tui->n_d = nd;
-    oneFileClose(of);
+    // Keep the handle around for the lift hot path -- closing here and
+    // re-opening per query was costing ~1-2 s per call on multi-GB .tui's.
+    tui->of = of;
     return tui;
 }
 
 void tui_destruct(Tui *tui) {
     if (tui == NULL) return;
+    if (tui->of != NULL) oneFileClose(tui->of);
     free(tui->idxCol); free(tui->idxFpos);
     free(tui->path);
     free(tui);
@@ -1620,24 +1631,23 @@ TuiInterval *tui_query(Tui *tui, const char *seq_name,
     *n_out = 0;
     if (start >= end) return NULL;
 
-    OneFile *of = oneFileOpenRead(tui->path, NULL, "tui", 1);
+    OneFile *of = tui->of;
     if (of == NULL) return NULL;
 
     // Resolve name -> S-ordinal by binary-searching the (name-sorted) d-lines
     // via oneGoto; O(log n_d) seeks, no preloaded directory hashes.
     int64_t ord = tui_find_d(of, tui->n_d, seq_name, NULL);
-    if (ord < 0) { oneFileClose(of); return NULL; }
+    if (ord < 0) return NULL;
 
     // Jump to the (ord+1)-th S object via the ONElib footer index; after the
     // goto, oneReadLine() returns S then (C, R)+ chunk pairs.
-    if (!oneGoto(of, 'S', ord + 1)) { oneFileClose(of); return NULL; }
+    if (!oneGoto(of, 'S', ord + 1)) return NULL;
     int64_t *runs = NULL;
     char c = oneReadLine(of);
-    if (c != 'S') { oneFileClose(of); return NULL; }
+    if (c != 'S') return NULL;
     int64_t sn = oneLen(of);
     if (sn != (int64_t)strlen(seq_name) ||
         memcmp(oneString(of), seq_name, sn) != 0) {
-        oneFileClose(of);
         return NULL;
     }
     // Per-chunk t-range skip.  C records added t_min / t_max in field 4/5 to
@@ -1670,7 +1680,6 @@ TuiInterval *tui_query(Tui *tui, const char *seq_name,
         int64_t cm = decode_runs(def, def_len, raw_len, runs + total, raw_len + 3);
         total += 3 * cm;
     }
-    oneFileClose(of);
     int64_t m = total / 3;
     if (m == 0) { free(runs); return NULL; }
 
@@ -1712,18 +1721,17 @@ int64_t *tui_load_seq_runs(Tui *tui, const char *seq_name, int64_t *n_out) {
     *n_out = 0;
     if (tui == NULL || seq_name == NULL) return NULL;
 
-    OneFile *of = oneFileOpenRead(tui->path, NULL, "tui", 1);
+    OneFile *of = tui->of;
     if (of == NULL) return NULL;
 
     int64_t ord = tui_find_d(of, tui->n_d, seq_name, NULL);
-    if (ord < 0) { oneFileClose(of); return NULL; }
-    if (!oneGoto(of, 'S', ord + 1)) { oneFileClose(of); return NULL; }
+    if (ord < 0) return NULL;
+    if (!oneGoto(of, 'S', ord + 1)) return NULL;
     char c = oneReadLine(of);
-    if (c != 'S') { oneFileClose(of); return NULL; }
+    if (c != 'S') return NULL;
     int64_t sn = oneLen(of);
     if (sn != (int64_t)strlen(seq_name) ||
         memcmp(oneString(of), seq_name, sn) != 0) {
-        oneFileClose(of);
         return NULL;
     }
     // Walk (C, R)+ chunk pairs and concat decoded triples into one flat
@@ -1747,7 +1755,6 @@ int64_t *tui_load_seq_runs(Tui *tui, const char *seq_name, int64_t *n_out) {
         int64_t cm = decode_runs(def, def_len, raw_len, runs + total, raw_len + 3);
         total += 3 * cm;
     }
-    oneFileClose(of);
     if (total == 0) { free(runs); return NULL; }
     int64_t n = total / 3;
     // Writer pre-sorts each chunk's runs by g_start for the column-keyed
@@ -1874,6 +1881,10 @@ stHash *tui_sequence_lengths(const char *tui_path) {
 TuiGenomeLift *tui_genome_lift_load(Tui *tui, const char *genome_name) {
     if (tui == NULL || genome_name == NULL || *genome_name == 0) return NULL;
 
+    // Use a dedicated OneFile handle (not tui->of): this one persists on the
+    // returned gl for lazy chunk_decode on first column-query hit, and would
+    // otherwise have its file position clobbered by interleaved tui_query
+    // calls in the source-side path.  Closed in tui_genome_lift_destruct.
     OneFile *of = oneFileOpenRead(tui->path, NULL, "tui", 1);
     if (of == NULL) return NULL;
 
