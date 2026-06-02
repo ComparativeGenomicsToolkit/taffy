@@ -454,8 +454,14 @@ for N in "\${SIZES[@]}"; do
         rowfiles[\$stem_lo]="\$LOGDIR/row_\${stem_lo}.tsv"
         out_lo="\$LOGDIR/mapped_\${stem_lo}.bed"
         unm_lo="\$LOGDIR/unmapped_\${stem_lo}.bed"
+        # -minMatch=0: liftOver's default 0.95 rejects any interval where
+        # fewer than 95% of bases can be mapped.  At cross-species + multi-
+        # megabase scale that drops EVERY interval at sizes >= 100 kb.
+        # taffy/halLiftover have no analogous threshold (they preserve any
+        # mapping, even partial), so for an apples-to-apples comparison we
+        # neutralise liftOver's threshold by lifting at threshold=0.
         ( run_cell liftover "\$sid" "\$sci" "\$common" "\$N" "\$TIME_BUDGET" \\
-            "\$LIFTOVER" "\$BED_NATIVE" "\$chain" "\$out_lo" "\$unm_lo" \\
+            "\$LIFTOVER" -minMatch=0 "\$BED_NATIVE" "\$chain" "\$out_lo" "\$unm_lo" \\
           ) > "\${rowfiles[\$stem_lo]}" &
         pids[\$stem_lo]=\$!
 
