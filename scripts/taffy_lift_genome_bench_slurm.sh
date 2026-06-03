@@ -35,6 +35,7 @@ UNI=""
 UNI_TAF=""
 HAL=""
 TREE=""
+FAST_MODE=0                          # --fast: add chunk-walk variant cells alongside default
 OUTDIR=""
 REF="GCA_000001405.15"              # hg38
 T_TOTAL=32                          # cpus-per-task; ≥ 2 × n_species
@@ -82,11 +83,20 @@ Required (at least one of -u / --uniTaf must be set):
 Optional:
   -r ID         Reference genome ID (default $REF; must match the genome
                 prefix in the universal MAF / HAL)
-  -T INT        cpus-per-task (default $T_TOTAL; needs ≥ 2 × n_species
-                for parallel cells)
+  -T INT        cpus-per-task (default $T_TOTAL).  Needs ≥ N_SPECIES *
+                (1 + N_SOURCES * N_MODES) for full parallelism, where
+                N_SOURCES = (-u set) + (--uniTaf set) and N_MODES = 2 if
+                --fast else 1.  E.g. 9 species + both sources + --fast =
+                45 cells; lower T_TOTAL queues them.
   -L FILE       Override species panel.  Format: 3 whitespace-separated
                 cols per line: <genome_id> <scientific> <english>.
                 '#' = comment.
+  --fast        For each taffy cell, also launch a --fast variant using
+                the chunk-iteration lift path (10-50x faster on whole-
+                chromosome / whole-genome queries).  Tool name in
+                bench.tsv gets a '_fast' suffix: 'maf.tui_fast' /
+                'taf.tui_fast'.  Default cells are still emitted so the
+                bench can compare default-vs-fast wall + verify parity.
   --timeBudget SEC  Per-cell wall cap (timeout) (default $TIME_BUDGET)
   --time HRS    sbatch wall (default $SBATCH_TIME)
   --mem GB      sbatch mem (default $SBATCH_MEM)
@@ -110,6 +120,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         -u)             UNI="$2"; shift 2;;
         --uniTaf)       UNI_TAF="$2"; shift 2;;
+        --fast)         FAST_MODE=1; shift;;
         -H)             HAL="$2"; shift 2;;
         -t)             TREE="$2"; shift 2;;
         -o)             OUTDIR="$2"; shift 2;;
@@ -199,9 +210,19 @@ echo ">> tree:          $TREE"
 echo ">> reference:     $REF"
 echo ">> species:       $N_SPECIES"
 awk -F'\t' '{printf("                  %-18s %-32s %s\n", $1, $2, $3)}' "$SPECIES_TSV"
-echo ">> cpus/task:     $T_TOTAL  (need ≥ $((N_SPECIES * 2)) for full parallel)"
-(( T_TOTAL >= N_SPECIES * 2 )) || \
-    echo ">> WARN: T_TOTAL=$T_TOTAL < 2 × N_SPECIES=$((N_SPECIES * 2)); cells will queue" >&2
+# Cells per species: 1 halLiftover + (one taffy cell per .tui source) x
+# (1 mode if --fast off, 2 modes if --fast on).  This drives the T_TOTAL
+# sizing recommendation.
+N_SOURCES=0
+[[ -n "$UNI"     ]] && N_SOURCES=$((N_SOURCES + 1))
+[[ -n "$UNI_TAF" ]] && N_SOURCES=$((N_SOURCES + 1))
+N_MODES=$([[ "$FAST_MODE" -eq 1 ]] && echo 2 || echo 1)
+CELLS_PER_SPECIES=$(( 1 + N_SOURCES * N_MODES ))
+TOTAL_CELLS=$(( N_SPECIES * CELLS_PER_SPECIES ))
+echo ">> cpus/task:     $T_TOTAL  (need ≥ $TOTAL_CELLS for full parallel: $N_SPECIES species × $CELLS_PER_SPECIES cells)"
+echo ">> --fast mode:   $([[ $FAST_MODE -eq 1 ]] && echo "ON (adds _fast variant per taffy cell)" || echo "OFF (default column-walk only)")"
+(( T_TOTAL >= TOTAL_CELLS )) || \
+    echo ">> WARN: T_TOTAL=$T_TOTAL < TOTAL_CELLS=$TOTAL_CELLS; cells will queue" >&2
 echo ">> time budget:   $TIME_BUDGET s per cell"
 echo ">> local-stage:   $([[ $STAGE_LOCAL -eq 1 ]] && echo "ON (copies to \$TMPDIR)" || echo "OFF (reads from network)")"
 [[ -n "$TMP_GB" ]] && echo ">> --tmp request: ${TMP_GB} GB per task"
@@ -220,6 +241,7 @@ REF="$REF"
 TREE="$TREE"     # for plot.py: divergence-from-ref x-axis
 TIME_BUDGET=$TIME_BUDGET
 STAGE_LOCAL=$STAGE_LOCAL
+FAST_MODE=$FAST_MODE
 TAFFY="$TAFFY"
 HALLIFTOVER="$HALLIFTOVER"
 SPECIES_TSV="$OUTDIR/species.tsv"
@@ -235,7 +257,7 @@ mkdir -p "\$LOGDIR"
 # --- Stage inputs to local scratch (\$TMPDIR or /tmp fallback). -----
 # .tui (taffy never opens the MAF itself) + HAL.  Both are large so
 # this is the dominant pre-bench cost; staging just once amortises it
-# across the 18 cells that follow.
+# across the N_SPECIES * cells_per_species cells that follow.
 if [[ "\$STAGE_LOCAL" -eq 1 ]]; then
     SCRATCH="\${TMPDIR:-/tmp/taffy_lift_genome_bench_\${SLURM_JOB_ID:-\$\$}}"
     STAGE_DIR="\$SCRATCH/taffy_lift_genome_stage_\${SLURM_JOB_ID:-\$\$}"
@@ -334,26 +356,44 @@ while IFS=\$'\t' read -r sid sci common; do
       ) > "\${rowfiles[\$stem_hl]}" &
     pids[\$stem_hl]=\$!
 
-    # ---- taffy lift cells (one per provided .tui source) ----
+    # ---- taffy lift cells: one per (.tui source) x (mode) ----
+    # Mode loop: 'default' = column-walk (existing); 'fast' = chunk-walk
+    # via --fast.  FAST_MODE=1 adds the _fast variant alongside; default
+    # cells are still emitted so the bench compares both.  Tool name:
+    #   default -> 'maf.tui' / 'taf.tui'           (existing names)
+    #   fast    -> 'maf.tui_fast' / 'taf.tui_fast'
     # Prefixed bed -- taffy lift -b expects "<genome>.<chrom>".
-    if [[ -n "\$UNI" ]]; then
-        stem_tm="maf.tui_\${sid}"
-        rowfiles[\$stem_tm]="\$LOGDIR/row_\${stem_tm}.tsv"
-        ( run_cell maf.tui "\$sid" "\$sci" "\$common" \\
-            "\$TAFFY" lift -i "\$UNI" -b "\$PREFIXED_BED" -g "\$sid" \\
-            -o "\$LOGDIR/mapped_\${stem_tm}.bed" \\
-          ) > "\${rowfiles[\$stem_tm]}" &
-        pids[\$stem_tm]=\$!
-    fi
-    if [[ -n "\$UNI_TAF" ]]; then
-        stem_tt="taf.tui_\${sid}"
-        rowfiles[\$stem_tt]="\$LOGDIR/row_\${stem_tt}.tsv"
-        ( run_cell taf.tui "\$sid" "\$sci" "\$common" \\
-            "\$TAFFY" lift -i "\$UNI_TAF" -b "\$PREFIXED_BED" -g "\$sid" \\
-            -o "\$LOGDIR/mapped_\${stem_tt}.bed" \\
-          ) > "\${rowfiles[\$stem_tt]}" &
-        pids[\$stem_tt]=\$!
-    fi
+    modes=( default )
+    [[ "\$FAST_MODE" -eq 1 ]] && modes+=( fast )
+    for mode in "\${modes[@]}"; do
+        if [[ "\$mode" == "fast" ]]; then
+            ftag="_fast"; ffl=( --fast )
+        else
+            ftag=""; ffl=()
+        fi
+        if [[ -n "\$UNI" ]]; then
+            tool="maf.tui\${ftag}"
+            stem="\${tool}_\${sid}"
+            rowfiles[\$stem]="\$LOGDIR/row_\${stem}.tsv"
+            ( run_cell "\$tool" "\$sid" "\$sci" "\$common" \\
+                "\$TAFFY" lift -i "\$UNI" -b "\$PREFIXED_BED" -g "\$sid" \\
+                              "\${ffl[@]}" \\
+                              -o "\$LOGDIR/mapped_\${stem}.bed" \\
+              ) > "\${rowfiles[\$stem]}" &
+            pids[\$stem]=\$!
+        fi
+        if [[ -n "\$UNI_TAF" ]]; then
+            tool="taf.tui\${ftag}"
+            stem="\${tool}_\${sid}"
+            rowfiles[\$stem]="\$LOGDIR/row_\${stem}.tsv"
+            ( run_cell "\$tool" "\$sid" "\$sci" "\$common" \\
+                "\$TAFFY" lift -i "\$UNI_TAF" -b "\$PREFIXED_BED" -g "\$sid" \\
+                              "\${ffl[@]}" \\
+                              -o "\$LOGDIR/mapped_\${stem}.bed" \\
+              ) > "\${rowfiles[\$stem]}" &
+            pids[\$stem]=\$!
+        fi
+    done
 done < "\$SPECIES_TSV"
 
 # Wait for all cells, append rows in stable order.
@@ -467,15 +507,28 @@ fig, axes = plt.subplots(3, 1, figsize=(14, 14))
 ax_wall, ax_rss, ax_bp = axes
 fig.subplots_adjust(left=0.10, right=0.97, top=0.95, bottom=0.10, hspace=0.40)
 
-tool_color = {
+BASE_COLOR = {
     "halLiftover": "#2ca02c",
     "maf.tui":     "#1f77b4",
     "taf.tui":     "#9467bd",
 }
-# Show only the tools present in the data (so e.g. only one .tui source
-# doesn't leave a blank slot).
-present = sorted(set(r["tool"] for r in rows), key=lambda t: ["halLiftover","maf.tui","taf.tui"].index(t) if t in ("halLiftover","maf.tui","taf.tui") else 99)
-tools = present
+def parse_tool(tool):
+    """Return (family, is_fast).  Strips the '_fast' suffix if present so
+    --fast variants render in the same colour family as the column-walk."""
+    is_fast = tool.endswith("_fast")
+    base = tool[:-len("_fast")] if is_fast else tool
+    return base, is_fast
+def tool_color(tool):
+    fam, _ = parse_tool(tool)
+    return BASE_COLOR.get(fam, "#888888")
+# Order: halLiftover, maf.tui (column-walk + fast paired), taf.tui (same),
+# anything else.  Pair fast right after its default sibling so legends
+# read naturally.
+def tool_sort_key(t):
+    fam, is_fast = parse_tool(t)
+    fam_order = {"halLiftover": 0, "maf.tui": 1, "taf.tui": 2}.get(fam, 9)
+    return (fam_order, int(is_fast))
+tools = sorted(set(r["tool"] for r in rows), key=tool_sort_key)
 
 xs = np.arange(len(species_order))
 n_tools = max(len(tools), 1)
@@ -497,17 +550,31 @@ for ti, tool in enumerate(tools):
             wt_done[i] = r["wall_s"]; rs_done[i] = r["peak_rss_kb"]/1024.0; bp_done[i] = bp_clamped
     z = lambda lst: [v if v is not None else 0 for v in lst]
     off = (ti - (n_tools - 1) / 2) * width
-    color = tool_color.get(tool, "#888888")
-    ax_wall.bar(xs + off, z(wt_done), width=width, color=color, label=tool)
-    ax_wall.bar(xs + off, z(wt_to),   width=width, color=color,
-                hatch="//", edgecolor="black", linewidth=0.5,
-                alpha=0.55, label=f"{tool} (timed out)")
-    ax_rss.bar (xs + off, z(rs_done), width=width, color=color, label=tool)
-    ax_rss.bar (xs + off, z(rs_to),   width=width, color=color,
-                hatch="//", edgecolor="black", linewidth=0.5, alpha=0.55)
-    ax_bp.bar  (xs + off, z(bp_done), width=width, color=color, label=tool)
-    ax_bp.bar  (xs + off, z(bp_to),   width=width, color=color,
-                hatch="//", edgecolor="black", linewidth=0.5, alpha=0.55)
+    color = tool_color(tool)
+    _, is_fast = parse_tool(tool)
+    # --fast variants share the family colour but render hollow (no fill,
+    # coloured edge) so the pair is obviously paired but visually distinct
+    # from its column-walk sibling.  Timed-out overlay keeps the same
+    # fill/hollow rule so a timed-out fast bar still looks fast.
+    if is_fast:
+        bar_kw = dict(facecolor="none", edgecolor=color, linewidth=1.5)
+        to_kw  = dict(facecolor="none", edgecolor=color,
+                      hatch="//", linewidth=1.5, alpha=0.85)
+    else:
+        bar_kw = dict(color=color)
+        to_kw  = dict(color=color, hatch="//", edgecolor="black",
+                      linewidth=0.5, alpha=0.55)
+    # Suppress the "(timed out)" legend entry when no cell actually
+    # timed out for this tool -- otherwise the legend doubles in length.
+    # Use the same label on all three axes so per-panel legends agree.
+    has_to = any(v is not None for v in wt_to)
+    to_label = f"{tool} (timed out)" if has_to else "_nolegend_"
+    ax_wall.bar(xs + off, z(wt_done), width=width, label=tool, **bar_kw)
+    ax_wall.bar(xs + off, z(wt_to),   width=width, label=to_label, **to_kw)
+    ax_rss.bar (xs + off, z(rs_done), width=width, label=tool, **bar_kw)
+    ax_rss.bar (xs + off, z(rs_to),   width=width, label=to_label, **to_kw)
+    ax_bp.bar  (xs + off, z(bp_done), width=width, label=tool, **bar_kw)
+    ax_bp.bar  (xs + off, z(bp_to),   width=width, label=to_label, **to_kw)
 
 xlabels = [f"{c}\n({d:.2f})" for d, _, c in species_order]
 for ax, title, ylab, yscale in [
