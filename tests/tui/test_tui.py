@@ -815,3 +815,153 @@ def test_view_tai_vs_tui_row0_same_maf(seq, start, end, tmp_path):
         f"  in .tui only ({len(only_tui)}): {sorted(only_tui)[:5]}")
 
 
+# ---------------------------------------------------------------------------
+# --maxGap / --minSize -- post-lift gap-collapsing and size-filter flags
+# ---------------------------------------------------------------------------
+#
+# On the bundled fixture, simHuman.chr6:10000-11000 lifted to simMouse_chr6
+# produces 7 rows on '-' strand at default with consecutive-row gaps:
+#       1, 1, 18, 5, 4, 1  bp
+# This gives a clean ladder to test --maxGap thresholds:
+#   maxGap=0  -> 7 rows  (no merging)
+#   maxGap=1  -> 4 rows  (collapse the three 1bp gaps)
+#   maxGap=5  -> 2 rows  (collapse 1/1/5/4/1 -- 18 stays a break)
+#   maxGap=20 -> 1 row   (collapse everything)
+# And gives a small-row to test --minSize:
+#   the row at 51742-51752 has length 10; --minSize=11 should drop it.
+
+_MAXGAP_REGION = (10000, 11000)
+_MAXGAP_TARGET = 'simMouse_chr6'
+
+
+def _lift_bed(tmp_path, start, end, target, *extra_flags):
+    """Lift one BED line and return the parsed output rows.  Helper used
+    by the --maxGap / --minSize tests below.  Output filename keys on the
+    flag string so multiple lifts inside one tmp_path don't collide."""
+    in_bed  = str(tmp_path / 'in.bed')
+    stem    = "_".join(map(str, extra_flags)) or "default"
+    out_bed = str(tmp_path / f'out_{stem}.bed')
+    with open(in_bed, 'w') as f:
+        f.write(f'{REF_SEQ_FULL}\t{start}\t{end}\tiv0\t0\t+\n')
+    run(TAFFY, 'lift', '-i', UNI_MAF, '-b', in_bed, '-g', target, '-o', out_bed,
+        *extra_flags)
+    return _read_bed(out_bed)
+
+
+def test_lift_maxgap_default_matches_zero(tmp_path):
+    """--maxGap 0 (explicit) is identical to the implicit default."""
+    s, e = _MAXGAP_REGION
+    default  = _lift_bed(tmp_path, s, e, _MAXGAP_TARGET)
+    explicit = _lift_bed(tmp_path, s, e, _MAXGAP_TARGET, '--maxGap', '0')
+    assert default == explicit, (
+        "explicit --maxGap 0 must match implicit default")
+
+
+@pytest.mark.parametrize("max_gap,expected_rows", [
+    (0,   7),    # no merging
+    (1,   4),    # collapse the three 1bp gaps
+    (5,   2),    # 1+1+5+4+1 collapse; 18 stays a break
+    (20,  1),    # collapse everything
+])
+def test_lift_maxgap_collapses_small_gaps(tmp_path, max_gap, expected_rows):
+    """--maxGap K should collapse rows whose target-side gap is <= K,
+    monotonically reducing row count as K grows."""
+    s, e = _MAXGAP_REGION
+    rows = _lift_bed(tmp_path, s, e, _MAXGAP_TARGET, '--maxGap', str(max_gap))
+    assert len(rows) == expected_rows, (
+        f"--maxGap={max_gap} produced {len(rows)} rows, expected {expected_rows}: {rows}")
+    # Every output row must respect the gap threshold: any pair of rows
+    # on the same chrom must be > max_gap apart (or one of them must
+    # have been merged, which means we wouldn't see two rows).
+    by_chrom = {}
+    for r in rows:
+        by_chrom.setdefault(r['chrom'], []).append(r)
+    for c, rs in by_chrom.items():
+        rs.sort(key=lambda r: r['start'])
+        for a, b in zip(rs, rs[1:]):
+            gap = b['start'] - a['end']
+            assert gap > max_gap, (
+                f"adjacent rows within maxGap on {c}: {a} -> {b} gap={gap}")
+
+
+@pytest.mark.parametrize("min_size,expected_rows", [
+    (1,   7),    # no filter
+    (11,  6),    # drop the 10-bp row at 51742-51752
+    (50,  3),    # also drop the 15-bp / 16-bp / 26-bp rows
+    (1000, 0),   # drop everything (no row is 1kb)
+])
+def test_lift_minsize_drops_small_rows(tmp_path, min_size, expected_rows):
+    """--minSize M drops output rows whose length < M.  Row count
+    decreases monotonically as M grows."""
+    s, e = _MAXGAP_REGION
+    rows = _lift_bed(tmp_path, s, e, _MAXGAP_TARGET, '--minSize', str(min_size))
+    assert len(rows) == expected_rows, (
+        f"--minSize={min_size} produced {len(rows)} rows, expected {expected_rows}: {rows}")
+    for r in rows:
+        assert r['end'] - r['start'] >= min_size, (
+            f"row {r} below --minSize={min_size}")
+
+
+def test_lift_maxgap_rejected_in_wig_mode(tmp_path):
+    """--maxGap / --minSize are BED-only.  Using them with -w must error."""
+    in_wig  = str(tmp_path / 'in.wig')
+    out_wig = str(tmp_path / 'out.wig')
+    _write_wig(in_wig, REF_SEQ_FULL, range(10000, 10010))
+    # Don't use run() -- it asserts exit=0; we expect failure here.
+    p = subprocess.run([TAFFY, 'lift', '-i', UNI_MAF, '-w', in_wig,
+                        '-g', _MAXGAP_TARGET, '-o', out_wig, '--maxGap', '5'],
+                       capture_output=True, text=True)
+    assert p.returncode != 0, "expected non-zero exit when --maxGap used with -w"
+    assert 'BED-mode only' in p.stderr, f"expected 'BED-mode only' in stderr, got: {p.stderr}"
+
+
+@pytest.mark.parametrize("flag,value", [
+    ('--maxGap',  '-1'),                          # negative
+    ('--maxGap',  '9999999999999999999'),         # > INT64_MAX (strtoll ERANGE)
+    ('--maxGap',  '1152921504606846977'),         # 2^60 + 1, just past the cap
+    ('--maxGap',  'abc'),                         # garbage
+    ('--maxGap',  '5xyz'),                        # trailing garbage
+    ('--minSize', '0'),                           # < 1
+    ('--minSize', '-3'),                          # negative
+    ('--minSize', 'abc'),                         # garbage
+])
+def test_lift_maxgap_minsize_reject_garbage_cli(tmp_path, flag, value):
+    """Out-of-range, overflowing, or non-integer CLI values must reject
+    with a non-zero exit before any lift work happens."""
+    in_bed = str(tmp_path / 'in.bed')
+    out_bed = str(tmp_path / 'out.bed')
+    s, e = _MAXGAP_REGION
+    with open(in_bed, 'w') as f:
+        f.write(f'{REF_SEQ_FULL}\t{s}\t{e}\tiv0\n')
+    p = subprocess.run([TAFFY, 'lift', '-i', UNI_MAF, '-b', in_bed,
+                        '-g', _MAXGAP_TARGET, '-o', out_bed, flag, value],
+                       capture_output=True, text=True)
+    assert p.returncode != 0, (
+        f"expected non-zero exit for {flag} {value!r}, got {p.returncode}; stderr={p.stderr}")
+
+
+def test_lift_minsize_reports_filtered_count(tmp_path):
+    """The summary log distinguishes 'unmapped' from 'dropped < --minSize'
+    so a sparse output isn't mistakenly read as 'nothing mapped'."""
+    in_bed = str(tmp_path / 'in.bed')
+    out_bed = str(tmp_path / 'out.bed')
+    s, e = _MAXGAP_REGION
+    with open(in_bed, 'w') as f:
+        f.write(f'{REF_SEQ_FULL}\t{s}\t{e}\tiv0\n')
+    p = subprocess.run([TAFFY, 'lift', '-i', UNI_MAF, '-b', in_bed,
+                        '-g', _MAXGAP_TARGET, '-o', out_bed,
+                        '--minSize', '50', '-l', 'INFO'],
+                       capture_output=True, text=True)
+    assert p.returncode == 0, p.stderr
+    # The fixture region produces 7 rows at default; --minSize=50 keeps 3
+    # (the 191, 210, 127 bp rows), so 4 should be reported as dropped.
+    assert "dropped < --minSize" in p.stderr, (
+        f"summary log should mention 'dropped < --minSize'; got: {p.stderr}")
+    # The integer just before "dropped" must be >= 1 (we know it's 4
+    # here, but accept any positive value -- robust to fixture changes).
+    import re
+    m = re.search(r'(\d+) dropped < --minSize', p.stderr)
+    assert m and int(m.group(1)) >= 1, (
+        f"expected a positive dropped count in stderr: {p.stderr}")
+
+

@@ -31,6 +31,8 @@ static void usage(void) {
     fprintf(stderr, "-g --genome    [STRING]    : REQUIRED Target genome name (e.g. hg38)\n");
     fprintf(stderr, "-o --outputFile [FILE_NAME] : Output (wig if input was wig, BED if input was BED; default stdout)\n");
     fprintf(stderr, "-m --memCap    [SIZE]      : (wig mode) Max in-memory output buffer before spilling to disk; suffix K/M/G allowed (default 2G).  Env TAFFY_LIFT_BUDGET_MB also honored (CLI wins).\n");
+    fprintf(stderr, "-G --maxGap    [INT]       : (bed mode) Merge two adjacent target rows when the gap between them is <= INT bp.  Default 0 (touch / overlap only).  Max 2^60.  The merged interval spans the un-lifted gap region (no UCSC liftOver / halLiftover analogue).  Downstream tools that count target coverage will overcount by up to INT * number-of-merges.\n");
+    fprintf(stderr, "-S --minSize   [INT]       : (bed mode) Drop output rows whose target length is < INT bp.  Default 1 (no filter).  Applied AFTER --maxGap so small fragments that would coalesce don't get filtered prematurely; reported in the summary log as 'dropped < --minSize'.\n");
     fprintf(stderr, "-l --logLevel  : Set log level\n");
     fprintf(stderr, "-h --help      : Print this help\n");
 }
@@ -511,9 +513,26 @@ typedef struct {
 #define PENDING_MAX 256
 
 // Flush one pending row to disk.  Caller clears `pe->active` after.
-static void emit_pending(FILE *fh, PendingBed *pe, const char *name,
-                         const char *score, int64_t *n_out_p) {
+// `min_size` (>=1) drops rows whose length is below threshold without
+// emitting; the drop is counted in *n_filtered_p (if non-NULL) so the
+// final summary log can report how many rows the user's --minSize cap
+// suppressed (otherwise a low output count looks like 'nothing mapped'
+// when in fact it 'mapped but was filtered').
+//
+// Caller must decide whether min_size should fire here: the LRU-evict
+// path in pending_push passes min_size=1 (i.e. emit unconditionally),
+// because mid-line eviction is forced by capacity pressure, not by an
+// actual end-of-merge-window event.  Only flush_pending at end-of-bed-
+// line passes the user's min_size, because by then no further merges
+// are possible.
+static void emit_pending(FILE *fh, PendingBed *pe, int64_t min_size,
+                         const char *name, const char *score,
+                         int64_t *n_out_p, int64_t *n_filtered_p) {
     if (!pe->active) return;
+    if ((pe->end - pe->start) < min_size) {
+        if (n_filtered_p) (*n_filtered_p)++;
+        return;
+    }
     fprintf(fh, "%s\t%" PRIi64 "\t%" PRIi64, pe->seq, pe->start, pe->end);
     if (name) {
         fprintf(fh, "\t%s", name);
@@ -533,10 +552,12 @@ static void emit_pending(FILE *fh, PendingBed *pe, const char *name,
 // *p_cap.
 //
 // Three passes:
-//   1. find an *abutting* slot (same seq + matching strand, end == start)
-//      and extend it -- this is the merge fast-path; bumps the slot's
-//      `touched` serial so it survives the next eviction.
-//   2. if no abutting slot exists and pending[] has an inactive slot or
+//   1. find a slot whose interval overlaps or is within max_gap bp of
+//      the new tile on the same (seq, strand), via pending_overlap_or_
+//      gap.  On match, extend the slot to the span union and cascade
+//      to absorb other slots that now connect.  Bumps `touched` so
+//      the slot survives the next eviction.
+//   2. if no slot connected and pending[] has an inactive slot or
 //      capacity to grow (cap < PENDING_MAX), allocate a fresh one.
 //   3. if pending[] is at PENDING_MAX and all slots are active, find the
 //      slot with the smallest `touched` (the LRU), flush it to disk, and
@@ -554,8 +575,41 @@ static void emit_pending(FILE *fh, PendingBed *pe, const char *name,
 // in the pending buffer), then the patch rows extend each slot's end to
 // abut the NEXT slot's start -- but no further merge fires, so the
 // output keeps the per-block fragmentation the user shouldn't see.
+// Unified merge predicate: a's interval and [b_start, b_end) overlap,
+// touch, or have a between-edges gap <= max_gap (both directions).
+// max_gap=0 reduces to "touch or overlap" -- one bp wider than strict
+// equality, but in practice the lift never pushes two intervals that
+// overlap on the same (seq, strand) at max_gap=0 (open[] tracks
+// non-overlapping runs per paralog), so default behavior is byte-
+// identical to the pre-patch strict-abut version.  With max_gap > 0
+// the predicate also catches the "contained bridge" case: a bridge
+// that arrives AFTER its containing slot has grown across a gap will
+// be absorbed instead of emitted as a phantom sub-row.
+//
+// The merged interval is [min(a.start, b_start), max(a.end, b_end));
+// at max_gap > 0 it spans the un-lifted gap region as if it were
+// lifted -- this is the design choice of "collapse to syntenic block."
+// (No UCSC liftOver / halLiftover analogue: liftOver gates at the
+// chain-block level via -minBlocks; halLiftover has no --maxGap.)
+// Downstream tools that count target-side coverage will overcount by
+// up to max_gap × (number-of-merges); --minSize applies to the merged
+// row, not the originals.
+static int pending_overlap_or_gap(const PendingBed *a, int64_t b_start,
+                                  int64_t b_end, int64_t max_gap) {
+    // max_gap is CLI-bounded at parse time so b_end + max_gap and
+    // a->end + max_gap cannot overflow int64 (chromosome coords are
+    // sub-Tb; max_gap is capped at 1<<60).
+    return b_end + max_gap >= a->start && a->end + max_gap >= b_start;
+}
+
+// Cascade: after a slot extends, absorb any other slot it now
+// overlaps-or-gaps with.  Order-independent: the predicate is
+// symmetric and the merge op (min start, max end) is monotone, so
+// pending[]'s final state is independent of slot-scan order.
+// Terminates: each merged=1 iteration deactivates one slot (j) and
+// hit is never deactivated, so cascade runs <= cap iterations.
 static void pending_cascade(PendingBed *pending, int cap, int hit,
-                            int emit_strand) {
+                            int emit_strand, int64_t max_gap) {
     int merged;
     do {
         merged = 0;
@@ -563,14 +617,10 @@ static void pending_cascade(PendingBed *pending, int cap, int hit,
             if (j == hit || !pending[j].active) continue;
             if (pending[j].seq != pending[hit].seq) continue;
             if (emit_strand && pending[j].out_strand != pending[hit].out_strand) continue;
-            if (pending[hit].end == pending[j].start) {
-                pending[hit].end = pending[j].end;
-                pending[j].active = 0;
-                merged = 1;
-                break;
-            }
-            if (pending[j].end == pending[hit].start) {
-                pending[hit].start = pending[j].start;
+            if (pending_overlap_or_gap(&pending[hit], pending[j].start,
+                                       pending[j].end, max_gap)) {
+                if (pending[j].start < pending[hit].start) pending[hit].start = pending[j].start;
+                if (pending[j].end   > pending[hit].end)   pending[hit].end   = pending[j].end;
                 pending[j].active = 0;
                 merged = 1;
                 break;
@@ -583,24 +633,25 @@ static PendingBed *pending_push(FILE *fh, PendingBed *pending, int *p_cap,
                                 int64_t *p_touch,
                                 const char *seq, int64_t start, int64_t end,
                                 char out_strand, int emit_strand,
+                                int64_t max_gap, int64_t min_size,
                                 const char *name, const char *score,
                                 int64_t *n_out_p) {
     int64_t now = ++(*p_touch);
-    // 1. extend-on-abut, both directions; cascade-merge after.
+    // 1. extend-on-abut (or overlap, or within max_gap, both directions);
+    //    cascade-merge after.  At max_gap=0 this matches strict-abut for
+    //    non-overlapping intervals; with max_gap > 0 a previously-extended
+    //    slot can also absorb a CONTAINED bridge that arrives later
+    //    (otherwise the bridge would emit as a phantom sub-row inside the
+    //    merged region).  See pending_overlap_or_gap above.
     for (int i = 0; i < *p_cap; i++) {
         if (!pending[i].active) continue;
         if (pending[i].seq != seq) continue;
         if (emit_strand && pending[i].out_strand != out_strand) continue;
-        if (pending[i].end == start) {                // forward abut
-            pending[i].end = end;
+        if (pending_overlap_or_gap(&pending[i], start, end, max_gap)) {
+            if (start < pending[i].start) pending[i].start = start;
+            if (end   > pending[i].end)   pending[i].end   = end;
             pending[i].touched = now;
-            pending_cascade(pending, *p_cap, i, emit_strand);
-            return pending;
-        }
-        if (pending[i].start == end) {                // reverse abut
-            pending[i].start = start;
-            pending[i].touched = now;
-            pending_cascade(pending, *p_cap, i, emit_strand);
+            pending_cascade(pending, *p_cap, i, emit_strand, max_gap);
             return pending;
         }
     }
@@ -628,7 +679,12 @@ static PendingBed *pending_push(FILE *fh, PendingBed *pending, int *p_cap,
                 victim = i;
             }
         }
-        emit_pending(fh, &pending[victim], name, score, n_out_p);
+        // LRU eviction is forced by PENDING_MAX capacity, not by an
+        // actual end-of-merge-window.  Emit unconditionally (min_size=1)
+        // so a small fragment that hasn't yet had the chance to grow
+        // isn't silently dropped by the size filter.  The user-visible
+        // --minSize filter applies only at flush_pending below.
+        emit_pending(fh, &pending[victim], 1, name, score, n_out_p, NULL);
         slot = victim;
     }
     pending[slot] = (PendingBed){ .seq = seq, .start = start, .end = end,
@@ -649,6 +705,7 @@ static void close_opens(FILE *fh, OpenBedInterval *open, int n_open,
                         const int *used_this_col, int input_strand_sign,
                         int emit_strand,
                         PendingBed **p_pending, int *p_cap, int64_t *p_touch,
+                        int64_t max_gap, int64_t min_size,
                         const char *name, const char *score,
                         int64_t *n_out_p) {
     for (int s = 0; s < n_open; s++) {
@@ -662,24 +719,33 @@ static void close_opens(FILE *fh, OpenBedInterval *open, int n_open,
         *p_pending = pending_push(fh, *p_pending, p_cap, p_touch,
                                   open[s].seq, open[s].start, open[s].end,
                                   out_strand, emit_strand,
+                                  max_gap, min_size,
                                   name, score, n_out_p);
         open[s].active = 0;
     }
 }
 
-// Drain all pending rows to disk (end-of-bed-line, or any point where the
-// caller has no more tiles to add).  Leaves `pending[]` empty.
+// Drain all pending rows to disk (end-of-bed-line, or any point where
+// the caller has no more tiles to add).  Leaves `pending[]` empty.
+// `min_size` (>=1) filters at emit; rows whose length < min_size are
+// counted into *n_filtered_p instead of emitted, so the BED summary
+// log can distinguish "filtered" from "unmapped".  This is the only
+// site where --minSize fires -- the LRU-evict path in pending_push
+// bypasses it (see comment there).
 static void flush_pending(FILE *fh, PendingBed *pending, int n_pending,
+                          int64_t min_size,
                           const char *name, const char *score,
-                          int64_t *n_out_p) {
+                          int64_t *n_out_p, int64_t *n_filtered_p) {
     for (int i = 0; i < n_pending; i++) {
-        emit_pending(fh, &pending[i], name, score, n_out_p);
+        emit_pending(fh, &pending[i], min_size, name, score,
+                     n_out_p, n_filtered_p);
         pending[i].active = 0;
     }
 }
 
 static int bed_lift_main_impl(Tui *tui, TuiGenomeLift *gl,
-                              const char *bed_file, const char *output_file) {
+                              const char *bed_file, const char *output_file,
+                              int64_t max_gap, int64_t min_size) {
     FILE *bf = fopen(bed_file, "r");
     if (bf == NULL) {
         fprintf(stderr, "ERROR: failed to open bed %s: %s\n", bed_file, strerror(errno));
@@ -704,7 +770,7 @@ static int bed_lift_main_impl(Tui *tui, TuiGenomeLift *gl,
     int64_t pending_touch = 0;          // monotone serial for LRU eviction
     char *line = NULL;
     size_t cap = 0;
-    int64_t lineno = 0, n_in = 0, n_out = 0, n_unmapped = 0;
+    int64_t lineno = 0, n_in = 0, n_out = 0, n_unmapped = 0, n_filtered = 0;
     time_t t0 = time(NULL);
 
     ssize_t got;
@@ -793,6 +859,7 @@ static int bed_lift_main_impl(Tui *tui, TuiGenomeLift *gl,
                     close_opens(fh, open, open_cap, NULL,
                                 input_strand_sign, emit_strand,
                                 &pending, &pending_cap, &pending_touch,
+                                max_gap, min_size,
                                 name, score, &n_out);
                     continue;
                 }
@@ -875,6 +942,7 @@ static int bed_lift_main_impl(Tui *tui, TuiGenomeLift *gl,
                 close_opens(fh, open, open_cap, used_this_col,
                             input_strand_sign, emit_strand,
                             &pending, &pending_cap, &pending_touch,
+                            max_gap, min_size,
                             name, score, &n_out);
             }
             // No close_opens at iv[k]/iv[k+1] boundary: opens carry over so
@@ -897,8 +965,10 @@ static int bed_lift_main_impl(Tui *tui, TuiGenomeLift *gl,
         close_opens(fh, open, open_cap, NULL,
                     input_strand_sign, emit_strand,
                     &pending, &pending_cap, &pending_touch,
+                    max_gap, min_size,
                     name, score, &n_out);
-        flush_pending(fh, pending, pending_cap, name, score, &n_out);
+        flush_pending(fh, pending, pending_cap, min_size,
+                      name, score, &n_out, &n_filtered);
         // Reset the touch counter between BED input lines so we don't drift
         // toward int64 overflow on million-line inputs (mod-arithmetic LRU
         // would also work but reset is simpler -- per-line scope is fine
@@ -913,8 +983,10 @@ static int bed_lift_main_impl(Tui *tui, TuiGenomeLift *gl,
     if (output_file) fclose(fh);
 
     st_logInfo("BED lift: %" PRIi64 " input -> %" PRIi64 " output intervals "
-               "(%" PRIi64 " unmapped) in %" PRIi64 " s\n",
-               n_in, n_out, n_unmapped, (int64_t)(time(NULL) - t0));
+               "(%" PRIi64 " unmapped, %" PRIi64 " dropped < --minSize) "
+               "in %" PRIi64 " s\n",
+               n_in, n_out, n_unmapped, n_filtered,
+               (int64_t)(time(NULL) - t0));
     return 0;
 }
 
@@ -927,6 +999,8 @@ int taf_lift_main(int argc, char *argv[]) {
     char *target_genome  = NULL;
     char *output_file    = NULL;
     int64_t mem_cap_cli  = -1;     // -1 sentinel = "not set on CLI"
+    int64_t max_gap      = 0;      // --maxGap (bed mode), 0 = strict abut
+    int64_t min_size     = 1;      // --minSize (bed mode), 1 = no filter
 
     while (1) {
         static struct option long_options[] = {
@@ -937,11 +1011,13 @@ int taf_lift_main(int argc, char *argv[]) {
             { "genome",     required_argument, 0, 'g' },
             { "outputFile", required_argument, 0, 'o' },
             { "memCap",     required_argument, 0, 'm' },
+            { "maxGap",     required_argument, 0, 'G' },
+            { "minSize",    required_argument, 0, 'S' },
             { "help",       no_argument,       0, 'h' },
             { 0, 0, 0, 0 }
         };
         int idx = 0;
-        int key = getopt_long(argc, argv, "l:i:w:b:g:o:m:h", long_options, &idx);
+        int key = getopt_long(argc, argv, "l:i:w:b:g:o:m:G:S:h", long_options, &idx);
         if (key == -1) break;
         switch (key) {
             case 'l': logLevelString = optarg; break;
@@ -957,6 +1033,36 @@ int taf_lift_main(int argc, char *argv[]) {
                     return 1;
                 }
                 break;
+            case 'G': {
+                // strtoll instead of atoll: detect garbage / overflow.
+                // Upper-bound cap so `end + max_gap` cannot wrap int64
+                // (chrom coords are sub-Tb, 1<<60 is well clear of any
+                // realistic sum).
+                errno = 0;
+                char *end_p = NULL;
+                long long v = strtoll(optarg, &end_p, 10);
+                if (errno == ERANGE || end_p == optarg || *end_p != 0 ||
+                    v < 0 || v > ((long long)1 << 60)) {
+                    fprintf(stderr, "ERROR: --maxGap must be in [0, 2^60] "
+                                    "(got '%s')\n", optarg);
+                    return 1;
+                }
+                max_gap = (int64_t)v;
+                break;
+            }
+            case 'S': {
+                errno = 0;
+                char *end_p = NULL;
+                long long v = strtoll(optarg, &end_p, 10);
+                if (errno == ERANGE || end_p == optarg || *end_p != 0 ||
+                    v < 1) {
+                    fprintf(stderr, "ERROR: --minSize must be >= 1 "
+                                    "(got '%s')\n", optarg);
+                    return 1;
+                }
+                min_size = (int64_t)v;
+                break;
+            }
             case 'h': usage(); return 0;
             default:  usage(); return 1;
         }
@@ -971,6 +1077,13 @@ int taf_lift_main(int argc, char *argv[]) {
     if ((wig_file == NULL) == (bed_file == NULL)) {
         fprintf(stderr, "ERROR: exactly one of -w/--wig or -b/--bed must be specified\n");
         usage();
+        return 1;
+    }
+    // --maxGap / --minSize only apply to BED output (rows can merge / drop);
+    // wig is per-position, no "row" to operate on.
+    if (wig_file != NULL && (max_gap != 0 || min_size != 1)) {
+        fprintf(stderr, "ERROR: --maxGap / --minSize are BED-mode only "
+                        "(use with -b/--bed, not -w/--wig)\n");
         return 1;
     }
 
@@ -1001,7 +1114,8 @@ int taf_lift_main(int argc, char *argv[]) {
     // BED inputs are intervals, not per-base, so output volume is
     // manageable in O(open paralog count) memory).
     if (bed_file != NULL) {
-        int rc = bed_lift_main_impl(tui, gl, bed_file, output_file);
+        int rc = bed_lift_main_impl(tui, gl, bed_file, output_file,
+                                    max_gap, min_size);
         tui_genome_lift_destruct(gl);
         tui_destruct(tui);
         free(tui_p);
