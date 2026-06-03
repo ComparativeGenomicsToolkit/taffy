@@ -52,6 +52,7 @@ OUTDIR=""
 T_TOTAL=24                          # cpus-per-task; one core per concurrent cell
 REF="GCF_016700215.2"               # chicken
 MAX_GAPS_CSV=""                     # --maxGap CSV: e.g. "0,1000,10000".  Empty = single taffy cell (K=0).
+FAST_MODE=0                         # --fast: add a --fast variant cell next to each taffy cell.
 SIZES="1000,100000,1000000"
 N_INTERVALS=100                     # random intervals per (species, size) cell
 SEED=42                             # RNG seed for the random-interval generator
@@ -119,6 +120,12 @@ Optional:
                 K=0 (preserves existing names); 'maf.tui_g<K>' /
                 'taf.tui_g<K>' for K > 0.  Example: --maxGap 0,1000,10000
                 runs 3 taffy variants per cell.
+  --fast        For each taffy cell (default + per-K variant if --maxGap is
+                set), also launch a --fast variant using the chunk-iteration
+                lift path (10-50x faster on multi-Mb queries).  Tool name
+                in bench.tsv gets a '_fast' suffix: e.g. 'maf.tui_fast',
+                'maf.tui_g1000_fast'.  Lets you compare default-vs-fast
+                wall + verify output parity in one job.
   --timeBudget SEC  Per-cell wall cap (timeout) (default $TIME_BUDGET)
   --time HRS    sbatch wall (default $SBATCH_TIME)
   --mem GB      sbatch mem (default $SBATCH_MEM)
@@ -152,6 +159,7 @@ while [[ $# -gt 0 ]]; do
         --seed)         SEED="$2"; shift 2;;
         -L)             SPECIES_FILE="$2"; shift 2;;
         --maxGap)       MAX_GAPS_CSV="$2"; shift 2;;
+        --fast)         FAST_MODE=1; shift;;
         --timeBudget)   TIME_BUDGET="$2"; shift 2;;
         --time)         SBATCH_TIME="$2"; shift 2;;
         --mem)          SBATCH_MEM="$2"; shift 2;;
@@ -349,6 +357,7 @@ echo ">> species:       $N_SPECIES"
 awk -F'\t' '{printf("                  %-18s %-30s %s\n", $1, $2, $3)}' "$SPECIES_TSV"
 echo ">> sizes:         ${SIZE_ARR[*]}  ($N_INTERVALS intervals each, seed=$SEED)"
 echo ">> --maxGap vals: ${MAX_GAPS_ARR[*]}  (taffy cells per source per (species, size))"
+echo ">> --fast mode:   $([[ $FAST_MODE -eq 1 ]] && echo "ON (adds _fast variant per taffy cell)" || echo "OFF (default column-walk only)")"
 echo ">> cpus/task:     $T_TOTAL  (one core per concurrent cell)"
 echo ">> time budget:   $TIME_BUDGET s per cell"
 echo ">> local-stage:   $([[ $STAGE_LOCAL -eq 1 ]] && echo "ON (copies to \$TMPDIR)" || echo "OFF (reads from network)")"
@@ -376,6 +385,7 @@ HALLIFTOVER="$HALLIFTOVER"
 SPECIES_TSV="$OUTDIR/species.tsv"
 SIZES=( ${SIZE_ARR[*]} )
 MAX_GAPS=( ${MAX_GAPS_ARR[*]} )
+FAST_MODE=$FAST_MODE
 
 BENCH_TSV="\$OUTDIR/bench.tsv"
 LOGDIR="\$OUTDIR/logs"
@@ -535,35 +545,48 @@ for N in "\${SIZES[@]}"; do
           ) > "\${rowfiles[\$stem_hl]}" &
         pids[\$stem_hl]=\$!
 
-        # ---- taffy lift cells: one per (.tui source) x (--maxGap K) ----
-        # Tool naming: "maf.tui" / "taf.tui" for K=0 (preserves existing
-        # bench.tsv column values).  K>0 cells get a "_g<K>" suffix.
+        # ---- taffy lift cells: one per (.tui source) x (--maxGap K) x (mode) -
+        # Mode loop: 'default' = column-walk, 'fast' = chunk-walk (--fast).
+        # When FAST_MODE=0 we only run 'default'; when 1 we run both so the
+        # bench can compare side-by-side.  Tool name suffix:
+        #   K=0, default      : "maf.tui"                  (existing name)
+        #   K>0, default      : "maf.tui_g<K>"
+        #   K=0, fast         : "maf.tui_fast"
+        #   K>0, fast         : "maf.tui_g<K>_fast"
+        # (Same scheme for taf.tui.)
+        modes=( default )
+        [[ "\$FAST_MODE" -eq 1 ]] && modes+=( fast )
         for K in "\${MAX_GAPS[@]}"; do
-            if [[ "\$K" == "0" ]]; then
-                gtag=""
-            else
-                gtag="_g\${K}"
-            fi
-            if [[ -n "\$UNI" ]]; then
-                tool="maf.tui\${gtag}"
-                stem="\${tool}_\${sid}_\${N}"
-                rowfiles[\$stem]="\$LOGDIR/row_\${stem}.tsv"
-                ( run_cell "\$tool" "\$sid" "\$sci" "\$common" "\$N" "\$TIME_BUDGET" \\
-                    "\$TAFFY" lift -i "\$UNI" -b "\$BED_PREFIXED" -g "\$sid" \\
-                                  --maxGap "\$K" -o "\$LOGDIR/mapped_\${stem}.bed" \\
-                  ) > "\${rowfiles[\$stem]}" &
-                pids[\$stem]=\$!
-            fi
-            if [[ -n "\$UNI_TAF" ]]; then
-                tool="taf.tui\${gtag}"
-                stem="\${tool}_\${sid}_\${N}"
-                rowfiles[\$stem]="\$LOGDIR/row_\${stem}.tsv"
-                ( run_cell "\$tool" "\$sid" "\$sci" "\$common" "\$N" "\$TIME_BUDGET" \\
-                    "\$TAFFY" lift -i "\$UNI_TAF" -b "\$BED_PREFIXED" -g "\$sid" \\
-                                  --maxGap "\$K" -o "\$LOGDIR/mapped_\${stem}.bed" \\
-                  ) > "\${rowfiles[\$stem]}" &
-                pids[\$stem]=\$!
-            fi
+            if [[ "\$K" == "0" ]]; then gtag=""; else gtag="_g\${K}"; fi
+            for mode in "\${modes[@]}"; do
+                if [[ "\$mode" == "fast" ]]; then
+                    ftag="_fast"; ffl=( --fast )
+                else
+                    ftag=""; ffl=()
+                fi
+                if [[ -n "\$UNI" ]]; then
+                    tool="maf.tui\${gtag}\${ftag}"
+                    stem="\${tool}_\${sid}_\${N}"
+                    rowfiles[\$stem]="\$LOGDIR/row_\${stem}.tsv"
+                    ( run_cell "\$tool" "\$sid" "\$sci" "\$common" "\$N" "\$TIME_BUDGET" \\
+                        "\$TAFFY" lift -i "\$UNI" -b "\$BED_PREFIXED" -g "\$sid" \\
+                                      --maxGap "\$K" "\${ffl[@]}" \\
+                                      -o "\$LOGDIR/mapped_\${stem}.bed" \\
+                      ) > "\${rowfiles[\$stem]}" &
+                    pids[\$stem]=\$!
+                fi
+                if [[ -n "\$UNI_TAF" ]]; then
+                    tool="taf.tui\${gtag}\${ftag}"
+                    stem="\${tool}_\${sid}_\${N}"
+                    rowfiles[\$stem]="\$LOGDIR/row_\${stem}.tsv"
+                    ( run_cell "\$tool" "\$sid" "\$sci" "\$common" "\$N" "\$TIME_BUDGET" \\
+                        "\$TAFFY" lift -i "\$UNI_TAF" -b "\$BED_PREFIXED" -g "\$sid" \\
+                                      --maxGap "\$K" "\${ffl[@]}" \\
+                                      -o "\$LOGDIR/mapped_\${stem}.bed" \\
+                      ) > "\${rowfiles[\$stem]}" &
+                    pids[\$stem]=\$!
+                fi
+            done
         done
     done < "\$SPECIES_TSV"
 
@@ -717,18 +740,21 @@ BASE_COLOR = {
 import matplotlib.colors as mcolors
 
 def parse_tool(tool):
-    """Return (family, gap) for tool names like 'maf.tui_g1000', or
-    (tool, None) for non-tui tools / K=0 cells."""
+    """Return (family, gap, is_fast) for taffy variants like
+    'maf.tui_g1000_fast' / 'maf.tui_g1000' / 'maf.tui_fast' / 'maf.tui'.
+    Non-tui tools return (tool, None, False)."""
+    is_fast = tool.endswith("_fast")
+    base = tool[:-len("_fast")] if is_fast else tool
     for fam in ("maf.tui", "taf.tui"):
-        if tool == fam:           return fam, 0
+        if base == fam:           return fam, 0, is_fast
         prefix = fam + "_g"
-        if tool.startswith(prefix):
-            try: return fam, int(tool[len(prefix):])
+        if base.startswith(prefix):
+            try: return fam, int(base[len(prefix):]), is_fast
             except ValueError: pass
-    return tool, None
+    return tool, None, False
 
 def tool_color(tool):
-    fam, gap = parse_tool(tool)
+    fam, gap, _ = parse_tool(tool)
     base = BASE_COLOR.get(fam, "#666666")
     if gap is None or gap == 0:
         return base
@@ -744,9 +770,9 @@ size_marker = {sz: m for sz, m in zip(sizes, ["o", "s", "^", "D", "v", "*"])}
 # Tools present in the data, ordered: non-tui first, then tui families
 # sorted within by K.
 def tool_sort_key(t):
-    fam, gap = parse_tool(t)
+    fam, gap, is_fast = parse_tool(t)
     fam_order = {"liftover": 0, "halLiftover": 1, "maf.tui": 2, "taf.tui": 3}.get(fam, 9)
-    return (fam_order, gap if gap is not None else -1)
+    return (fam_order, gap if gap is not None else -1, int(is_fast))
 tools = sorted({r["tool"] for r in rows}, key=tool_sort_key)
 
 def by_tool_size(tool, size):
@@ -760,6 +786,12 @@ def by_tool_size(tool, size):
 
 for tool in tools:
     color = tool_color(tool)
+    _, _, is_fast = parse_tool(tool)
+    # --fast variants render with dashed line + open marker so they
+    # overlay cleanly on top of their column-walk counterpart (same
+    # color/marker family).
+    linestyle = "--" if is_fast else "-"
+    markerfacecolor = "none" if is_fast else None
     for sz in sizes:
         pts = by_tool_size(tool, sz)
         if not pts: continue
@@ -767,8 +799,11 @@ for tool in tools:
         wt = [p[1] for p in pts]
         rs = [p[2] / 1024.0 for p in pts]  # MB
         label = f"{tool} N={sz:,}"
-        ax1.plot(xs, wt, marker=size_marker[sz], linestyle="-", color=color, label=label)
-        ax2.plot(xs, rs, marker=size_marker[sz], linestyle="-", color=color, label=label)
+        kw = dict(marker=size_marker[sz], linestyle=linestyle, color=color, label=label)
+        if markerfacecolor is not None:
+            kw["markerfacecolor"] = markerfacecolor
+        ax1.plot(xs, wt, **kw)
+        ax2.plot(xs, rs, **kw)
 
 # X-axis labels = species common names at their divergence positions.
 xticks = [d for d, _, _ in species_order]
