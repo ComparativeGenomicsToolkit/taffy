@@ -456,7 +456,13 @@ chmod +x "$RUNNER"
 PLOT="$OUTDIR/plot.py"
 cat > "$PLOT" <<'PY'
 #!/usr/bin/env python3
-"""Plot wall + peak RSS vs query size for each tool (log-log)."""
+"""Plot wall + peak RSS vs query size for each tool (log-log).
+
+Timed-out cells get a hollow 'X' at the budget value -- communicates
+"killed at budget" instead of silently dropping the point.  Cells with
+non-zero exit and zero output (bigBedToBed range failures at large N)
+are dropped: they are not real measurements.
+"""
 import csv, sys, os
 import matplotlib
 matplotlib.use("Agg")
@@ -471,11 +477,14 @@ with open(os.path.join(bench_dir, "bench.tsv")) as f:
             r["wall_s"]     = float(r["wall_s"]) if r["wall_s"] != "NA" else None
             r["peak_rss_kb"]= float(r["peak_rss_kb"]) if r["peak_rss_kb"] != "NA" else None
             r["timed_out"]  = int(r["timed_out"])
+            r["exit"]       = int(r["exit"])
+            r["out_bytes"]  = int(r["out_bytes"])
             rows.append(r)
-        except ValueError:
+        except (ValueError, KeyError):
             continue
 
-tools = sorted({r["tool"] for r in rows})
+tools = ["tui_taf", "tui_maf", "tui_taf_norm", "tui_maf_norm",
+         "tai_taf", "tai_maf", "hal", "bb"]
 colors = {
     "tui_taf":      "#1f77b4", "tui_maf":      "#aec7e8",
     "tui_taf_norm": "#17becf", "tui_maf_norm": "#9edae5",
@@ -483,21 +492,31 @@ colors = {
     "hal":          "#d62728", "bb":           "#ff7f0e",
 }
 
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5.5))
-fig.subplots_adjust(left=0.07, right=0.97, top=0.92, bottom=0.13, wspace=0.25)
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+fig.subplots_adjust(left=0.06, right=0.97, top=0.92, bottom=0.12, wspace=0.22)
 
 for tool in tools:
-    xs, ys_t, ys_m = [], [], []
-    for r in rows:
-        if r["tool"] != tool: continue
-        if r["timed_out"]: continue
-        if r["wall_s"] is None or r["peak_rss_kb"] is None: continue
-        xs.append(r["size_bp"])
-        ys_t.append(r["wall_s"])
-        ys_m.append(r["peak_rss_kb"] / 1024.0)  # KB -> MB
-    if xs:
-        ax1.plot(xs, ys_t, "o-", label=tool, color=colors.get(tool))
-        ax2.plot(xs, ys_m, "o-", label=tool, color=colors.get(tool))
+    rs = [r for r in rows if r["tool"] == tool
+          and r["wall_s"] is not None and r["peak_rss_kb"] is not None]
+    rs.sort(key=lambda r: r["size_bp"])
+    ok_x, ok_w, ok_r = [], [], []
+    to_x, to_w        = [], []
+    for r in rs:
+        x = r["size_bp"]; w = r["wall_s"]; m = r["peak_rss_kb"] / 1024.0
+        if r["timed_out"]:
+            to_x.append(x); to_w.append(w)
+        elif r["exit"] != 0 or (r["out_bytes"] == 0 and x > 0):
+            # bigBedToBed range fail / other no-output -- not a measurement.
+            continue
+        else:
+            ok_x.append(x); ok_w.append(w); ok_r.append(m)
+    color = colors.get(tool)
+    if ok_x:
+        ax1.plot(ok_x, ok_w, "o-", label=tool, color=color)
+        ax2.plot(ok_x, ok_r, "o-", label=tool, color=color)
+    if to_x:
+        ax1.plot(to_x, to_w, "X", color=color, markerfacecolor="none",
+                 markeredgewidth=2, markersize=11, label=f"{tool} (timed out)")
 
 for ax, title, ylab in [(ax1, "wall time", "seconds"),
                          (ax2, "peak RSS", "MB")]:
@@ -506,7 +525,7 @@ for ax, title, ylab in [(ax1, "wall time", "seconds"),
     ax.set_ylabel(ylab)
     ax.set_title(title)
     ax.grid(True, which="both", alpha=0.3)
-    ax.legend()
+    ax.legend(fontsize=8, ncol=2)
 
 out = os.path.join(bench_dir, "bench.png")
 fig.savefig(out, dpi=140)
