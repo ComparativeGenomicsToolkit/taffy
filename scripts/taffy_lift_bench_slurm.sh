@@ -51,6 +51,7 @@ TREE=""
 OUTDIR=""
 T_TOTAL=24                          # cpus-per-task; one core per concurrent cell
 REF="GCF_016700215.2"               # chicken
+MAX_GAPS_CSV=""                     # --maxGap CSV: e.g. "0,1000,10000".  Empty = single taffy cell (K=0).
 SIZES="1000,100000,1000000"
 N_INTERVALS=100                     # random intervals per (species, size) cell
 SEED=42                             # RNG seed for the random-interval generator
@@ -111,6 +112,13 @@ Optional:
   -L FILE       Override species panel.  Format: 3 tab-separated cols per line:
                 <genome_id>\\t<scientific>\\t<english>.  '#' = comment.
                 Useful for smoke tests: pass a file with just 1-2 species.
+  --maxGap CSV  taffy lift --maxGap values to bench side-by-side.  Default
+                empty = one taffy cell at K=0 (current behaviour).  Each K
+                in the CSV becomes its own taffy cell per (species, size,
+                source).  Tool name in bench.tsv: 'maf.tui' / 'taf.tui' for
+                K=0 (preserves existing names); 'maf.tui_g<K>' /
+                'taf.tui_g<K>' for K > 0.  Example: --maxGap 0,1000,10000
+                runs 3 taffy variants per cell.
   --timeBudget SEC  Per-cell wall cap (timeout) (default $TIME_BUDGET)
   --time HRS    sbatch wall (default $SBATCH_TIME)
   --mem GB      sbatch mem (default $SBATCH_MEM)
@@ -143,6 +151,7 @@ while [[ $# -gt 0 ]]; do
         -N)             N_INTERVALS="$2"; shift 2;;
         --seed)         SEED="$2"; shift 2;;
         -L)             SPECIES_FILE="$2"; shift 2;;
+        --maxGap)       MAX_GAPS_CSV="$2"; shift 2;;
         --timeBudget)   TIME_BUDGET="$2"; shift 2;;
         --time)         SBATCH_TIME="$2"; shift 2;;
         --mem)          SBATCH_MEM="$2"; shift 2;;
@@ -279,6 +288,19 @@ fi
 # size, then offsets uniformly inside.
 IFS=',' read -r -a SIZE_ARR <<< "$SIZES"
 
+# --- Resolve --maxGap CSV.  Default empty -> a single taffy cell at K=0
+# named 'maf.tui' / 'taf.tui' (existing behaviour).  Non-empty CSV: each
+# K becomes its own taffy cell suffixed '_g<K>' (K=0 keeps the
+# unsuffixed name for compat).
+if [[ -z "$MAX_GAPS_CSV" ]]; then
+    MAX_GAPS_ARR=( 0 )
+else
+    IFS=',' read -r -a MAX_GAPS_ARR <<< "$MAX_GAPS_CSV"
+    for K in "${MAX_GAPS_ARR[@]}"; do
+        [[ "$K" =~ ^[0-9]+$ ]] || { echo "ERROR: --maxGap values must be non-negative integers (got '$K')" >&2; exit 1; }
+    done
+fi
+
 python3 - "$REF_SIZES" "$OUTDIR/beds" "$SEED" "$N_INTERVALS" "${SIZE_ARR[@]}" <<'PY'
 import os, random, sys
 sizes_path, beds_dir, seed, n_intervals, *sizes = sys.argv[1:]
@@ -326,6 +348,7 @@ echo ">> reference:     $REF"
 echo ">> species:       $N_SPECIES"
 awk -F'\t' '{printf("                  %-18s %-30s %s\n", $1, $2, $3)}' "$SPECIES_TSV"
 echo ">> sizes:         ${SIZE_ARR[*]}  ($N_INTERVALS intervals each, seed=$SEED)"
+echo ">> --maxGap vals: ${MAX_GAPS_ARR[*]}  (taffy cells per source per (species, size))"
 echo ">> cpus/task:     $T_TOTAL  (one core per concurrent cell)"
 echo ">> time budget:   $TIME_BUDGET s per cell"
 echo ">> local-stage:   $([[ $STAGE_LOCAL -eq 1 ]] && echo "ON (copies to \$TMPDIR)" || echo "OFF (reads from network)")"
@@ -352,6 +375,7 @@ LIFTOVER="$LIFTOVER"
 HALLIFTOVER="$HALLIFTOVER"
 SPECIES_TSV="$OUTDIR/species.tsv"
 SIZES=( ${SIZE_ARR[*]} )
+MAX_GAPS=( ${MAX_GAPS_ARR[*]} )
 
 BENCH_TSV="\$OUTDIR/bench.tsv"
 LOGDIR="\$OUTDIR/logs"
@@ -511,27 +535,36 @@ for N in "\${SIZES[@]}"; do
           ) > "\${rowfiles[\$stem_hl]}" &
         pids[\$stem_hl]=\$!
 
-        # ---- taffy lift cells (one per provided .tui source) ----
-        # taffy lift against the MAF-anchored .tui ("maf.tui" on plots).
-        if [[ -n "\$UNI" ]]; then
-            stem_tm="maf.tui_\${sid}_\${N}"
-            rowfiles[\$stem_tm]="\$LOGDIR/row_\${stem_tm}.tsv"
-            out_tm="\$LOGDIR/mapped_\${stem_tm}.bed"
-            ( run_cell maf.tui "\$sid" "\$sci" "\$common" "\$N" "\$TIME_BUDGET" \\
-                "\$TAFFY" lift -i "\$UNI" -b "\$BED_PREFIXED" -g "\$sid" -o "\$out_tm" \\
-              ) > "\${rowfiles[\$stem_tm]}" &
-            pids[\$stem_tm]=\$!
-        fi
-        # taffy lift against the TAF-anchored .tui ("taf.tui" on plots).
-        if [[ -n "\$UNI_TAF" ]]; then
-            stem_tt="taf.tui_\${sid}_\${N}"
-            rowfiles[\$stem_tt]="\$LOGDIR/row_\${stem_tt}.tsv"
-            out_tt="\$LOGDIR/mapped_\${stem_tt}.bed"
-            ( run_cell taf.tui "\$sid" "\$sci" "\$common" "\$N" "\$TIME_BUDGET" \\
-                "\$TAFFY" lift -i "\$UNI_TAF" -b "\$BED_PREFIXED" -g "\$sid" -o "\$out_tt" \\
-              ) > "\${rowfiles[\$stem_tt]}" &
-            pids[\$stem_tt]=\$!
-        fi
+        # ---- taffy lift cells: one per (.tui source) x (--maxGap K) ----
+        # Tool naming: "maf.tui" / "taf.tui" for K=0 (preserves existing
+        # bench.tsv column values).  K>0 cells get a "_g<K>" suffix.
+        for K in "\${MAX_GAPS[@]}"; do
+            if [[ "\$K" == "0" ]]; then
+                gtag=""
+            else
+                gtag="_g\${K}"
+            fi
+            if [[ -n "\$UNI" ]]; then
+                tool="maf.tui\${gtag}"
+                stem="\${tool}_\${sid}_\${N}"
+                rowfiles[\$stem]="\$LOGDIR/row_\${stem}.tsv"
+                ( run_cell "\$tool" "\$sid" "\$sci" "\$common" "\$N" "\$TIME_BUDGET" \\
+                    "\$TAFFY" lift -i "\$UNI" -b "\$BED_PREFIXED" -g "\$sid" \\
+                                  --maxGap "\$K" -o "\$LOGDIR/mapped_\${stem}.bed" \\
+                  ) > "\${rowfiles[\$stem]}" &
+                pids[\$stem]=\$!
+            fi
+            if [[ -n "\$UNI_TAF" ]]; then
+                tool="taf.tui\${gtag}"
+                stem="\${tool}_\${sid}_\${N}"
+                rowfiles[\$stem]="\$LOGDIR/row_\${stem}.tsv"
+                ( run_cell "\$tool" "\$sid" "\$sci" "\$common" "\$N" "\$TIME_BUDGET" \\
+                    "\$TAFFY" lift -i "\$UNI_TAF" -b "\$BED_PREFIXED" -g "\$sid" \\
+                                  --maxGap "\$K" -o "\$LOGDIR/mapped_\${stem}.bed" \\
+                  ) > "\${rowfiles[\$stem]}" &
+                pids[\$stem]=\$!
+            fi
+        done
     done < "\$SPECIES_TSV"
 
     # Wait on all cells, append rows.
@@ -672,18 +705,52 @@ species_order = sorted({(r["dist"], r["genome_id"], r["common_name"]) for r in r
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
 fig.subplots_adjust(left=0.08, right=0.97, top=0.90, bottom=0.20, wspace=0.27)
 
-tool_color = {
+# Base palette per tool family.  --maxGap variants (maf.tui_gK / taf.tui_gK)
+# inherit the family colour but shift hue/lightness by K so K=0 is the
+# saturated base and larger K is paler / brighter.
+BASE_COLOR = {
     "liftover":    "#d62728",
     "halLiftover": "#2ca02c",
-    "maf.tui":     "#1f77b4",   # taffy lift against MAF-anchored .tui
-    "taf.tui":     "#9467bd",   # taffy lift against TAF-anchored .tui
+    "maf.tui":     "#1f77b4",
+    "taf.tui":     "#9467bd",
 }
+import matplotlib.colors as mcolors
+
+def parse_tool(tool):
+    """Return (family, gap) for tool names like 'maf.tui_g1000', or
+    (tool, None) for non-tui tools / K=0 cells."""
+    for fam in ("maf.tui", "taf.tui"):
+        if tool == fam:           return fam, 0
+        prefix = fam + "_g"
+        if tool.startswith(prefix):
+            try: return fam, int(tool[len(prefix):])
+            except ValueError: pass
+    return tool, None
+
+def tool_color(tool):
+    fam, gap = parse_tool(tool)
+    base = BASE_COLOR.get(fam, "#666666")
+    if gap is None or gap == 0:
+        return base
+    # Lighten toward white as log10(K) grows.  K=10 -> small shift,
+    # K=10000 -> ~60% toward white.  Caps at 75% lightness shift.
+    import math
+    t = min(0.75, 0.20 * math.log10(max(gap, 1)))
+    r, g, b = mcolors.to_rgb(base)
+    return (r + (1 - r) * t, g + (1 - g) * t, b + (1 - b) * t)
+
 size_marker = {sz: m for sz, m in zip(sizes, ["o", "s", "^", "D", "v", "*"])}
+
+# Tools present in the data, ordered: non-tui first, then tui families
+# sorted within by K.
+def tool_sort_key(t):
+    fam, gap = parse_tool(t)
+    fam_order = {"liftover": 0, "halLiftover": 1, "maf.tui": 2, "taf.tui": 3}.get(fam, 9)
+    return (fam_order, gap if gap is not None else -1)
+tools = sorted({r["tool"] for r in rows}, key=tool_sort_key)
 
 def by_tool_size(tool, size):
     # Wall-time data point = mean per-interval seconds (wall_s / n_intervals).
-    # Lets the three size lines be compared directly across an axis where the
-    # cell-totals would otherwise be dominated by N.
     out = [(r["dist"], r["wall_s"] / max(r["n_intervals"], 1), r["peak_rss_kb"])
            for r in rows
            if r["tool"] == tool and r["size_bp"] == size
@@ -691,7 +758,8 @@ def by_tool_size(tool, size):
     out.sort()
     return out
 
-for tool in ("liftover", "halLiftover", "maf.tui", "taf.tui"):
+for tool in tools:
+    color = tool_color(tool)
     for sz in sizes:
         pts = by_tool_size(tool, sz)
         if not pts: continue
@@ -699,8 +767,8 @@ for tool in ("liftover", "halLiftover", "maf.tui", "taf.tui"):
         wt = [p[1] for p in pts]
         rs = [p[2] / 1024.0 for p in pts]  # MB
         label = f"{tool} N={sz:,}"
-        ax1.plot(xs, wt, marker=size_marker[sz], linestyle="-", color=tool_color[tool], label=label)
-        ax2.plot(xs, rs, marker=size_marker[sz], linestyle="-", color=tool_color[tool], label=label)
+        ax1.plot(xs, wt, marker=size_marker[sz], linestyle="-", color=color, label=label)
+        ax2.plot(xs, rs, marker=size_marker[sz], linestyle="-", color=color, label=label)
 
 # X-axis labels = species common names at their divergence positions.
 xticks = [d for d, _, _ in species_order]
