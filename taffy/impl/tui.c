@@ -2131,6 +2131,52 @@ int64_t tui_genome_lift_n_chunks(const TuiGenomeLift *gl) {
     return gl == NULL ? 0 : gl->n_chunks;
 }
 
+void tui_genome_lift_visit_runs(TuiGenomeLift *gl, int64_t c_lo, int64_t c_hi,
+                                void (*cb)(const TuiRun *run, void *user),
+                                void *user) {
+    if (gl == NULL || cb == NULL || c_lo >= c_hi) return;
+    TGLChunk *cs = gl->chunks;
+    // Chunks are sorted by g_min.  Iterate forward; skip chunks whose
+    // g_max <= c_lo (chunk ends before iv) and break when g_min >= c_hi
+    // (chunk and all later ones start past iv).
+    for (int64_t ci = 0; ci < gl->n_chunks; ci++) {
+        TGLChunk *ch = &cs[ci];
+        if (ch->g_max <= c_lo) continue;
+        if (ch->g_min >= c_hi) break;
+        if (ch->runs == NULL) chunk_decode(ch, gl->of);
+        if (ch->n_runs == 0) continue;
+        // Within the chunk: binary-search for the first run with
+        // g_start >= c_lo, then walk backward (catching earlier runs
+        // whose length extends past c_lo via max_end_prefix) and forward
+        // (until g_start >= c_hi).
+        int64_t lo = 0, hi = ch->n_runs;
+        while (lo < hi) {
+            int64_t m = lo + (hi - lo) / 2;
+            if (ch->runs[m].g_start < c_lo) lo = m + 1; else hi = m;
+        }
+        // Backward pass: catch earlier runs that extend into [c_lo, c_hi).
+        for (int64_t j = lo - 1; j >= 0; j--) {
+            const GLRun *r = &ch->runs[j];
+            int64_t r_end = r->g_start + r->length;
+            if (r_end > c_lo && r->g_start < c_hi) {
+                TuiRun out = { gl->seq_names[r->seq_idx],
+                               r->g_start, r->length, r->t_start, r->strand };
+                cb(&out, user);
+            }
+            if (j == 0) break;
+            if (ch->max_end_prefix[j - 1] <= c_lo) break;
+        }
+        // Forward pass: g_start >= c_lo by binary-search result.
+        for (int64_t j = lo; j < ch->n_runs; j++) {
+            const GLRun *r = &ch->runs[j];
+            if (r->g_start >= c_hi) break;
+            TuiRun out = { gl->seq_names[r->seq_idx],
+                           r->g_start, r->length, r->t_start, r->strand };
+            cb(&out, user);
+        }
+    }
+}
+
 /////////////////////////////////////////////////////////////////////////////
 // Universal-column block extractor.  Single forward scan in column order from
 // the X-index anchor; reuses tai's seek/resync/read primitives.  No per-

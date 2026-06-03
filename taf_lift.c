@@ -33,6 +33,7 @@ static void usage(void) {
     fprintf(stderr, "-m --memCap    [SIZE]      : (wig mode) Max in-memory output buffer before spilling to disk; suffix K/M/G allowed (default 2G).  Env TAFFY_LIFT_BUDGET_MB also honored (CLI wins).\n");
     fprintf(stderr, "-G --maxGap    [INT]       : (bed mode) Merge two adjacent target rows when the gap between them is <= INT bp.  Default 0 (touch / overlap only).  Max 2^60.  The merged interval spans the un-lifted gap region (no UCSC liftOver / halLiftover analogue).  Downstream tools that count target coverage will overcount by up to INT * number-of-merges.\n");
     fprintf(stderr, "-S --minSize   [INT]       : (bed mode) Drop output rows whose target length is < INT bp.  Default 1 (no filter).  Applied AFTER --maxGap so small fragments that would coalesce don't get filtered prematurely; reported in the summary log as 'dropped < --minSize'.\n");
+    fprintf(stderr, "-F --fast                  : (bed mode) Use chunk-iteration lift instead of per-column open/close.  O(runs_in_range) vs O(columns_in_range); 10-1000x faster on chromosome-scale queries.  Output is equivalent modulo merge order (use with --maxGap N for browser-style block collapse).\n");
     fprintf(stderr, "-l --logLevel  : Set log level\n");
     fprintf(stderr, "-h --help      : Print this help\n");
 }
@@ -743,6 +744,178 @@ static void flush_pending(FILE *fh, PendingBed *pending, int n_pending,
     }
 }
 
+// --- Chunk-iteration BED lift (--fast) ----------------------------------
+//
+// The default bed_lift_main_impl below walks every source column in the
+// query range, asking "which run(s) cover this column?" via the per-column
+// open/close machinery.  For a whole-chromosome query (~10^8 columns)
+// that's the dominant cost.
+//
+// This variant inverts the loop: for each col_iv returned by tui_query,
+// walk the chunks whose [g_min, g_max) intersects the col_iv, decode each
+// (once, cached), and emit each contained run as a target-coord row
+// directly.  Cost is O(n_runs_in_range) instead of O(n_columns_in_range),
+// typically 10^3-10^5x fewer iterations on chromosome-scale queries.
+//
+// The pending_push/cascade/flush_pending machinery is reused so --maxGap
+// / --minSize work the same.  Output rows should be equivalent to the
+// column-walk modulo merge order: every chunk-walk emit is exactly one
+// gap-free target run, which is what an open/close cycle produces in
+// the column-walk -- the two paths agree on the set of pre-merge rows,
+// then pending_push collapses them identically.
+//
+// Strand math (clip a run to col_iv [c_lo, c_hi)):
+//   clip_start = max(g_start, c_lo);  clip_end = min(g_start+length, c_hi);
+//   '+' strand: t_out = [t_start + (clip_start - g_start),
+//                        t_start + (clip_end   - g_start))
+//   '-' strand: t_out = [t_start + length - (clip_end   - g_start),
+//                        t_start + length - (clip_start - g_start))
+// Output BED strand: (run.strand=='+' XOR input.strand=='-').
+
+// Context passed through the tui visitor callback for the chunk lift.
+typedef struct {
+    FILE       *fh;
+    PendingBed *pending;
+    int         pending_cap;
+    int64_t     pending_touch;
+    int64_t     c_lo, c_hi;
+    int         input_strand_sign;
+    int         emit_strand;
+    int64_t     max_gap, min_size;
+    const char *name;
+    const char *score;
+    int64_t    *n_out_p;
+} ChunkLiftCtx;
+
+// Visitor callback: clip the run to [c_lo, c_hi), map to target coords
+// honouring strand, and push the (target_seq, t_start, t_end) interval
+// through pending_push (so --maxGap merging + --minSize filter still
+// fire at flush time).  Strand math:
+//   '+': target advances with source.  Output [t + (cs - gs), t + (ce - gs))
+//   '-': target advances inverse.       Output [t + len - (ce - gs),
+//                                                t + len - (cs - gs))
+// Output strand bit = run.strand XOR input.strand sign (matches the
+// open/close path's per-column derivation exactly).
+static void chunk_lift_visit_cb(const TuiRun *r, void *user) {
+    ChunkLiftCtx *cx = (ChunkLiftCtx *)user;
+    int64_t r_end = r->g_start + r->length;
+    int64_t cs = r->g_start > cx->c_lo ? r->g_start : cx->c_lo;
+    int64_t ce = r_end < cx->c_hi     ? r_end     : cx->c_hi;
+    if (cs >= ce) return;                          // no overlap (defensive)
+    int64_t t_out_start, t_out_end;
+    if (r->strand) {
+        t_out_start = r->t_start + (cs - r->g_start);
+        t_out_end   = r->t_start + (ce - r->g_start);
+    } else {
+        t_out_start = r->t_start + r->length - (ce - r->g_start);
+        t_out_end   = r->t_start + r->length - (cs - r->g_start);
+    }
+    char out_strand = 0;
+    if (cx->emit_strand) {
+        int sign = (r->strand ? +1 : -1) * cx->input_strand_sign;
+        out_strand = (sign >= 0) ? '+' : '-';
+    }
+    cx->pending = pending_push(cx->fh, cx->pending, &cx->pending_cap,
+                               &cx->pending_touch,
+                               r->seq, t_out_start, t_out_end,
+                               out_strand, cx->emit_strand,
+                               cx->max_gap, cx->min_size,
+                               cx->name, cx->score, cx->n_out_p);
+}
+
+static int bed_lift_chunk_impl(Tui *tui, TuiGenomeLift *gl,
+                               const char *bed_file, const char *output_file,
+                               int64_t max_gap, int64_t min_size) {
+    FILE *bf = fopen(bed_file, "r");
+    if (bf == NULL) {
+        fprintf(stderr, "ERROR: failed to open bed %s: %s\n", bed_file, strerror(errno));
+        return 1;
+    }
+    FILE *fh = output_file ? fopen(output_file, "w") : stdout;
+    if (fh == NULL) {
+        fprintf(stderr, "ERROR: failed to open output %s: %s\n", output_file, strerror(errno));
+        fclose(bf);
+        return 1;
+    }
+
+    char *line = NULL;
+    size_t cap = 0;
+    int64_t lineno = 0, n_in = 0, n_out = 0, n_unmapped = 0, n_filtered = 0;
+    time_t t0 = time(NULL);
+    ChunkLiftCtx cx;
+    memset(&cx, 0, sizeof(cx));
+    cx.fh = fh;
+    cx.max_gap = max_gap;
+    cx.min_size = min_size;
+    cx.n_out_p = &n_out;
+
+    ssize_t got;
+    while ((got = getline(&line, &cap, bf)) > 0) {
+        lineno++;
+        if (line[0] == '#' || line[0] == '\n' || line[0] == 0) continue;
+        while (got > 0 && (line[got-1] == '\n' || line[got-1] == '\r')) line[--got] = 0;
+        char *fields[6] = {0};
+        int n_fields = 0;
+        char *p = line;
+        while (n_fields < 6 && p) {
+            fields[n_fields++] = p;
+            char *t = strchr(p, '\t');
+            if (t) { *t = 0; p = t + 1; } else p = NULL;
+        }
+        if (n_fields < 3) {
+            fprintf(stderr, "WARN: skipping bed line %" PRIi64 " (need >=3 cols, got %d)\n",
+                    lineno, n_fields);
+            continue;
+        }
+        const char *chrom  = fields[0];
+        int64_t start = atoll(fields[1]);
+        int64_t end   = atoll(fields[2]);
+        const char *name   = (n_fields >= 4) ? fields[3] : NULL;
+        const char *score  = (n_fields >= 5) ? fields[4] : NULL;
+        const char *strand = (n_fields >= 6) ? fields[5] : NULL;
+        cx.input_strand_sign = (strand && strand[0] == '-') ? -1 : +1;
+        cx.emit_strand = (strand != NULL && strand[0] != '.');
+        cx.name = name;
+        cx.score = score;
+
+        n_in++;
+        int64_t n_iv = 0;
+        TuiInterval *iv = tui_query(tui, chrom, start, end, &n_iv);
+        if (iv == NULL || n_iv == 0) {
+            free(iv);
+            n_unmapped++;
+            continue;
+        }
+        if (cx.pending_cap == 0) {
+            cx.pending_cap = BED_MAX_OPEN;
+            cx.pending = st_calloc((size_t)cx.pending_cap, sizeof(PendingBed));
+        }
+        for (int s = 0; s < cx.pending_cap; s++) cx.pending[s].active = 0;
+
+        for (int64_t k = 0; k < n_iv; k++) {
+            cx.c_lo = iv[k].start;
+            cx.c_hi = iv[k].end;
+            tui_genome_lift_visit_runs(gl, cx.c_lo, cx.c_hi,
+                                       chunk_lift_visit_cb, &cx);
+        }
+        flush_pending(cx.fh, cx.pending, cx.pending_cap, min_size,
+                      name, score, &n_out, &n_filtered);
+        cx.pending_touch = 0;
+        free(iv);
+    }
+    free(cx.pending);
+    free(line);
+    fclose(bf);
+    if (output_file) fclose(fh);
+
+    st_logInfo("BED lift (--fast): %" PRIi64 " input -> %" PRIi64 " output intervals "
+               "(%" PRIi64 " unmapped, %" PRIi64 " dropped < --minSize) "
+               "in %" PRIi64 " s\n",
+               n_in, n_out, n_unmapped, n_filtered,
+               (int64_t)(time(NULL) - t0));
+    return 0;
+}
+
 static int bed_lift_main_impl(Tui *tui, TuiGenomeLift *gl,
                               const char *bed_file, const char *output_file,
                               int64_t max_gap, int64_t min_size) {
@@ -1001,6 +1174,7 @@ int taf_lift_main(int argc, char *argv[]) {
     int64_t mem_cap_cli  = -1;     // -1 sentinel = "not set on CLI"
     int64_t max_gap      = 0;      // --maxGap (bed mode), 0 = strict abut
     int64_t min_size     = 1;      // --minSize (bed mode), 1 = no filter
+    int     fast_mode    = 0;      // --fast (bed mode), 0 = legacy column walk
 
     while (1) {
         static struct option long_options[] = {
@@ -1013,11 +1187,12 @@ int taf_lift_main(int argc, char *argv[]) {
             { "memCap",     required_argument, 0, 'm' },
             { "maxGap",     required_argument, 0, 'G' },
             { "minSize",    required_argument, 0, 'S' },
+            { "fast",       no_argument,       0, 'F' },
             { "help",       no_argument,       0, 'h' },
             { 0, 0, 0, 0 }
         };
         int idx = 0;
-        int key = getopt_long(argc, argv, "l:i:w:b:g:o:m:G:S:h", long_options, &idx);
+        int key = getopt_long(argc, argv, "l:i:w:b:g:o:m:G:S:Fh", long_options, &idx);
         if (key == -1) break;
         switch (key) {
             case 'l': logLevelString = optarg; break;
@@ -1063,6 +1238,7 @@ int taf_lift_main(int argc, char *argv[]) {
                 min_size = (int64_t)v;
                 break;
             }
+            case 'F': fast_mode = 1; break;
             case 'h': usage(); return 0;
             default:  usage(); return 1;
         }
@@ -1079,10 +1255,10 @@ int taf_lift_main(int argc, char *argv[]) {
         usage();
         return 1;
     }
-    // --maxGap / --minSize only apply to BED output (rows can merge / drop);
-    // wig is per-position, no "row" to operate on.
-    if (wig_file != NULL && (max_gap != 0 || min_size != 1)) {
-        fprintf(stderr, "ERROR: --maxGap / --minSize are BED-mode only "
+    // --maxGap / --minSize / --fast only apply to BED output (rows can
+    // merge / drop / chunk-iterate); wig is per-position, no "row" concept.
+    if (wig_file != NULL && (max_gap != 0 || min_size != 1 || fast_mode)) {
+        fprintf(stderr, "ERROR: --maxGap / --minSize / --fast are BED-mode only "
                         "(use with -b/--bed, not -w/--wig)\n");
         return 1;
     }
@@ -1114,8 +1290,9 @@ int taf_lift_main(int argc, char *argv[]) {
     // BED inputs are intervals, not per-base, so output volume is
     // manageable in O(open paralog count) memory).
     if (bed_file != NULL) {
-        int rc = bed_lift_main_impl(tui, gl, bed_file, output_file,
-                                    max_gap, min_size);
+        int rc = fast_mode
+            ? bed_lift_chunk_impl(tui, gl, bed_file, output_file, max_gap, min_size)
+            : bed_lift_main_impl (tui, gl, bed_file, output_file, max_gap, min_size);
         tui_genome_lift_destruct(gl);
         tui_destruct(tui);
         free(tui_p);

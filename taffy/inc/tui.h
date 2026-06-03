@@ -222,6 +222,41 @@ int tui_genome_lift_column(const TuiGenomeLift *gl, int64_t column,
  * does NOT grow with lazy decodes).  Use for the startup diagnostic. */
 int64_t tui_genome_lift_n_chunks(const TuiGenomeLift *gl);
 
+/*
+ * One gap-free run of source-to-target alignment, as visited by
+ * tui_genome_lift_visit_runs.  `seq` is borrowed from gl (valid until
+ * tui_genome_lift_destruct).  Source columns covered by the run are
+ * [g_start, g_start + length); target coords are computed by the
+ * caller based on `strand` (1 = '+': target advances with source;
+ * 0 = '-': target advances inversely, target_pos(c) =
+ * t_start + length - 1 - (c - g_start)).  Range-precise target
+ * range covered by the full run is [t_start, t_start + length)
+ * regardless of strand.
+ */
+typedef struct {
+    const char *seq;
+    int64_t     g_start;
+    int64_t     length;
+    int64_t     t_start;
+    int         strand;
+} TuiRun;
+
+/*
+ * Visit every run in `gl` whose source-column range
+ * [g_start, g_start + length) intersects [c_lo, c_hi).  For each
+ * such run, calls cb(run, user).  Chunks are lazily decoded on
+ * demand (single-threaded).  Order: chunks visited in g_min order;
+ * within each chunk, runs in g_start order.
+ *
+ * Use this for the "lift a range" idiom (whole-chromosome browser
+ * views, bulk annotation transfer); it's O(n_runs_in_range) versus
+ * the O(n_columns_in_range) cost of repeated tui_genome_lift_column
+ * calls.
+ */
+void tui_genome_lift_visit_runs(TuiGenomeLift *gl, int64_t c_lo, int64_t c_hi,
+                                void (*cb)(const TuiRun *run, void *user),
+                                void *user);
+
 /////////////////////////////////////////////////////////////////////////////
 // Universal-column block extractor (replaces the .tai for the -U path).
 //

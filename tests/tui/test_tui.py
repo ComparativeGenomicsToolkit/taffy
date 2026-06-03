@@ -902,6 +902,54 @@ def test_lift_minsize_drops_small_rows(tmp_path, min_size, expected_rows):
             f"row {r} below --minSize={min_size}")
 
 
+# --- --fast (chunk-iteration lift) parity tests ---------------------------
+#
+# bed_lift_chunk_impl iterates chunks instead of source columns; output
+# should be byte-identical to the column-walk after sort (modulo row
+# order, which differs because chunk-walk visits chunks in g_min order
+# while column-walk visits source columns in source order).
+
+@pytest.mark.parametrize("case,start,end,target,max_gap", [
+    ('forward',           0,       4,       'simMouse_chr6', 0),
+    ('reverse_nonref',    7659,    7720,    'simMouse_chr6', 0),
+    ('forward_paralog',   187350,  187354,  'simCow_chr6',   0),
+    ('reverse_paralog',   477815,  477842,  'simMouse_chr6', 0),
+    ('maxgap_ladder',     10000,   11000,   'simMouse_chr6', 0),
+    ('maxgap_ladder',     10000,   11000,   'simMouse_chr6', 100),
+    ('maxgap_ladder',     10000,   11000,   'simMouse_chr6', 1000),
+])
+def test_lift_fast_parity(tmp_path, case, start, end, target, max_gap):
+    """--fast must produce output equivalent to the default column-walk
+    (after sorting): same row count, same coords, same name/score/strand."""
+    in_bed = str(tmp_path / 'in.bed')
+    with open(in_bed, 'w') as f:
+        f.write(f'{REF_SEQ_FULL}\t{start}\t{end}\tiv0\t0\t+\n')
+    out_default = str(tmp_path / 'out_default.bed')
+    out_fast    = str(tmp_path / 'out_fast.bed')
+    flags = ['--maxGap', str(max_gap)] if max_gap else []
+    run(TAFFY, 'lift', '-i', UNI_MAF, '-b', in_bed, '-g', target,
+        '-o', out_default, *flags)
+    run(TAFFY, 'lift', '-i', UNI_MAF, '-b', in_bed, '-g', target,
+        '-o', out_fast,    '--fast', *flags)
+    d = sorted(_read_bed(out_default), key=lambda r: (r['chrom'], r['start'], r['end']))
+    f = sorted(_read_bed(out_fast),    key=lambda r: (r['chrom'], r['start'], r['end']))
+    assert d == f, (
+        f"--fast vs default mismatch for {case} max_gap={max_gap}\n"
+        f"default ({len(d)}): {d}\nfast    ({len(f)}): {f}")
+
+
+def test_lift_fast_rejected_in_wig_mode(tmp_path):
+    """--fast is BED-only.  Using it with -w must error."""
+    in_wig  = str(tmp_path / 'in.wig')
+    out_wig = str(tmp_path / 'out.wig')
+    _write_wig(in_wig, REF_SEQ_FULL, range(10000, 10010))
+    p = subprocess.run([TAFFY, 'lift', '-i', UNI_MAF, '-w', in_wig,
+                        '-g', _MAXGAP_TARGET, '-o', out_wig, '--fast'],
+                       capture_output=True, text=True)
+    assert p.returncode != 0
+    assert 'BED-mode only' in p.stderr
+
+
 def test_lift_maxgap_rejected_in_wig_mode(tmp_path):
     """--maxGap / --minSize are BED-only.  Using them with -w must error."""
     in_wig  = str(tmp_path / 'in.wig')
