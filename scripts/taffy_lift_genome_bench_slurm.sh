@@ -32,6 +32,7 @@
 set -euo pipefail
 
 UNI=""
+UNI_TAF=""
 HAL=""
 TREE=""
 OUTDIR=""
@@ -67,8 +68,13 @@ usage() {
     cat >&2 <<EOF
 taffy_lift_genome_bench_slurm.sh -- whole-genome lift bench, taffy vs halLiftover
 
-Required:
-  -u FILE       Universal MAF (.uni.maf.gz; only its .tui sibling is read by taffy)
+Required (at least one of -u / --uniTaf must be set):
+  -u FILE       Universal MAF (.uni.maf.gz; only its .tui sibling is read).
+                If set, adds a "maf.tui" cell per species (taffy lift
+                against the MAF-anchored .tui).
+  --uniTaf FILE Universal TAF (.uni.taf.gz; only its .tui sibling is read).
+                If set, adds a "taf.tui" cell per species.  Both flags
+                can be set together to bench both .tui formats at once.
   -H FILE       HAL file (for halLiftover)
   -t FILE       Species tree (.nwk) -- used by the plot script for divergence
   -o DIR        Output directory
@@ -103,6 +109,7 @@ EOF
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -u)             UNI="$2"; shift 2;;
+        --uniTaf)       UNI_TAF="$2"; shift 2;;
         -H)             HAL="$2"; shift 2;;
         -t)             TREE="$2"; shift 2;;
         -o)             OUTDIR="$2"; shift 2;;
@@ -123,13 +130,22 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-for v in UNI HAL TREE OUTDIR; do
+for v in HAL TREE OUTDIR; do
     [[ -n "${!v}" ]] || { echo "ERROR: -$(echo $v | cut -c1) required" >&2; usage 1; }
 done
+[[ -n "$UNI" || -n "$UNI_TAF" ]] || {
+    echo "ERROR: at least one of -u / --uniTaf must be set" >&2; usage 1;
+}
 [[ -n "$TAFFY"       ]] || { echo "ERROR: taffy not on PATH (set \$TAFFY)" >&2; exit 1; }
 [[ -n "$HALLIFTOVER" ]] || { echo "ERROR: halLiftover not on PATH (set \$HALLIFTOVER)" >&2; exit 1; }
-[[ -f "$UNI"         ]] || { echo "ERROR: $UNI not found" >&2; exit 1; }
-[[ -f "${UNI}.tui"   ]] || { echo "ERROR: $UNI has no .tui sibling" >&2; exit 1; }
+if [[ -n "$UNI" ]]; then
+    [[ -f "$UNI"        ]] || { echo "ERROR: $UNI not found" >&2; exit 1; }
+    [[ -f "${UNI}.tui"  ]] || { echo "ERROR: $UNI has no .tui sibling" >&2; exit 1; }
+fi
+if [[ -n "$UNI_TAF" ]]; then
+    [[ -f "$UNI_TAF"        ]] || { echo "ERROR: $UNI_TAF not found" >&2; exit 1; }
+    [[ -f "${UNI_TAF}.tui"  ]] || { echo "ERROR: $UNI_TAF has no .tui sibling" >&2; exit 1; }
+fi
 [[ -f "$HAL"         ]] || { echo "ERROR: $HAL not found" >&2; exit 1; }
 [[ -f "$TREE"        ]] || { echo "ERROR: $TREE not found" >&2; exit 1; }
 
@@ -151,17 +167,20 @@ echo ">> species panel: $N_SPECIES entries" >&2
 # Both taffy and halLiftover get the SAME bed.  The .tui lists every
 # sequence in the universal MAF; filter to REF.* and emit one bed line
 # per chrom covering 0..seqLen.
-echo ">> querying .tui for ${REF}.* chroms via taffy stats -s ..." >&2
+# Pull chrom list from whichever .tui is set (both have the same chroms,
+# they're built from the same alignment).
+UNI_STATS_SRC="${UNI:-$UNI_TAF}"
+echo ">> querying .tui ($UNI_STATS_SRC) for ${REF}.* chroms via taffy stats -s ..." >&2
 NATIVE_BED="$OUTDIR/beds/genome.native.bed"
 PREFIXED_BED="$OUTDIR/beds/genome.prefixed.bed"
-"$TAFFY" stats -i "$UNI" -s \
+"$TAFFY" stats -i "$UNI_STATS_SRC" -s \
     | awk -v p="${REF}." 'index($1, p) == 1 {
         sub(p, "", $1);
         printf "%s\t0\t%d\n", $1, $2;
       }' \
     | sort -k1,1 > "$NATIVE_BED"
 [[ -s "$NATIVE_BED" ]] || {
-    echo "ERROR: no sequences matching ${REF}.* in $UNI's .tui." >&2
+    echo "ERROR: no sequences matching ${REF}.* in $UNI_STATS_SRC's .tui." >&2
     exit 1
 }
 # Prefixed bed for taffy lift (its --bed expects "<genome>.<chrom>"):
@@ -194,6 +213,7 @@ cat > "$RUNNER" <<EOF
 set -uo pipefail
 
 UNI="$UNI"
+UNI_TAF="$UNI_TAF"
 HAL="$HAL"
 OUTDIR="$OUTDIR"
 REF="$REF"
@@ -230,11 +250,21 @@ if [[ "\$STAGE_LOCAL" -eq 1 ]]; then
         echo "       done in \$((SECONDS - t0)) s" >&2
         echo "\$dst"
     }
-    # .tui (taffy lift never opens the MAF itself)
-    stage_one "\$UNI.tui" > /dev/null
-    LOCAL_UNI="\$STAGE_DIR/\$(basename "\$UNI")"
-    : > "\$LOCAL_UNI"   # stub <input> so taffy lift's tui_path() resolves
-    UNI="\$LOCAL_UNI"
+    # .tui (taffy lift never opens the source MAF/TAF itself).
+    # Each provided source (-u, --uniTaf) gets its .tui staged + a 0-byte
+    # stub at <input> so taffy's tui_path() resolves to the staged file.
+    if [[ -n "\$UNI" ]]; then
+        stage_one "\$UNI.tui" > /dev/null
+        LOCAL_UNI="\$STAGE_DIR/\$(basename "\$UNI")"
+        : > "\$LOCAL_UNI"
+        UNI="\$LOCAL_UNI"
+    fi
+    if [[ -n "\$UNI_TAF" ]]; then
+        stage_one "\$UNI_TAF.tui" > /dev/null
+        LOCAL_UNI_TAF="\$STAGE_DIR/\$(basename "\$UNI_TAF")"
+        : > "\$LOCAL_UNI_TAF"
+        UNI_TAF="\$LOCAL_UNI_TAF"
+    fi
 
     # HAL for halLiftover
     HAL=\$(stage_one "\$HAL")
@@ -284,8 +314,9 @@ run_cell() {
         "\$tool" "\$sid" "\$sci" "\$common" "\$wall" "\$rss" "\$rc" "\$timed_out" "\$n_mapped" "\$n_mapped_bp"
 }
 
-# --- Fire all (species x 2 tools) cells in parallel.  No waves. --------
-echo "=== launching \$(wc -l < "\$SPECIES_TSV") species x 2 tools in parallel ==="
+# --- Fire all cells in parallel.  No waves. ----------------------------
+# Cells per species: 1 halLiftover + 1 per provided .tui source (1-2).
+echo "=== launching cells: \$(wc -l < "\$SPECIES_TSV") species x (1 halLiftover + .tui sources) ==="
 t0=\$SECONDS
 declare -A pids rowfiles
 
@@ -303,15 +334,26 @@ while IFS=\$'\t' read -r sid sci common; do
       ) > "\${rowfiles[\$stem_hl]}" &
     pids[\$stem_hl]=\$!
 
-    # ---- taffy lift cell ----
+    # ---- taffy lift cells (one per provided .tui source) ----
     # Prefixed bed -- taffy lift -b expects "<genome>.<chrom>".
-    stem_tf="taffy_\${sid}"
-    rowfiles[\$stem_tf]="\$LOGDIR/row_\${stem_tf}.tsv"
-    ( run_cell taffy "\$sid" "\$sci" "\$common" \\
-        "\$TAFFY" lift -i "\$UNI" -b "\$PREFIXED_BED" -g "\$sid" \\
-        -o "\$LOGDIR/mapped_\${stem_tf}.bed" \\
-      ) > "\${rowfiles[\$stem_tf]}" &
-    pids[\$stem_tf]=\$!
+    if [[ -n "\$UNI" ]]; then
+        stem_tm="maf.tui_\${sid}"
+        rowfiles[\$stem_tm]="\$LOGDIR/row_\${stem_tm}.tsv"
+        ( run_cell maf.tui "\$sid" "\$sci" "\$common" \\
+            "\$TAFFY" lift -i "\$UNI" -b "\$PREFIXED_BED" -g "\$sid" \\
+            -o "\$LOGDIR/mapped_\${stem_tm}.bed" \\
+          ) > "\${rowfiles[\$stem_tm]}" &
+        pids[\$stem_tm]=\$!
+    fi
+    if [[ -n "\$UNI_TAF" ]]; then
+        stem_tt="taf.tui_\${sid}"
+        rowfiles[\$stem_tt]="\$LOGDIR/row_\${stem_tt}.tsv"
+        ( run_cell taf.tui "\$sid" "\$sci" "\$common" \\
+            "\$TAFFY" lift -i "\$UNI_TAF" -b "\$PREFIXED_BED" -g "\$sid" \\
+            -o "\$LOGDIR/mapped_\${stem_tt}.bed" \\
+          ) > "\${rowfiles[\$stem_tt]}" &
+        pids[\$stem_tt]=\$!
+    fi
 done < "\$SPECIES_TSV"
 
 # Wait for all cells, append rows in stable order.
@@ -425,24 +467,47 @@ fig, axes = plt.subplots(3, 1, figsize=(14, 14))
 ax_wall, ax_rss, ax_bp = axes
 fig.subplots_adjust(left=0.10, right=0.97, top=0.95, bottom=0.10, hspace=0.40)
 
-tool_color = {"halLiftover": "#2ca02c", "taffy": "#1f77b4"}
-tools = ["halLiftover", "taffy"]
+tool_color = {
+    "halLiftover": "#2ca02c",
+    "maf.tui":     "#1f77b4",
+    "taf.tui":     "#9467bd",
+}
+# Show only the tools present in the data (so e.g. only one .tui source
+# doesn't leave a blank slot).
+present = sorted(set(r["tool"] for r in rows), key=lambda t: ["halLiftover","maf.tui","taf.tui"].index(t) if t in ("halLiftover","maf.tui","taf.tui") else 99)
+tools = present
 
 xs = np.arange(len(species_order))
-width = 0.4
+n_tools = max(len(tools), 1)
+width = 0.8 / n_tools
 
 for ti, tool in enumerate(tools):
     by_rank = {rank[r["genome_id"]]: r for r in rows
-               if r["tool"] == tool and not r["timed_out"] and r["wall_s"] is not None}
-    wt = [by_rank.get(i, {}).get("wall_s") for i in xs]
-    rs = [by_rank.get(i, {}).get("peak_rss_kb") for i in xs]
-    bp = [by_rank.get(i, {}).get("n_mapped_bp", 0) for i in xs]
-    wt = [v if v is not None else 0 for v in wt]
-    rs = [(v/1024.0) if v is not None else 0 for v in rs]
-    off = (ti - 0.5) * width
-    ax_wall.bar(xs + off, wt, width=width, color=tool_color[tool], label=tool)
-    ax_rss.bar (xs + off, rs, width=width, color=tool_color[tool], label=tool)
-    ax_bp.bar  (xs + off, bp, width=width, color=tool_color[tool], label=tool)
+               if r["tool"] == tool and r["wall_s"] is not None}
+    wt_done = [None]*len(xs); wt_to = [None]*len(xs)
+    rs_done = [None]*len(xs); rs_to = [None]*len(xs)
+    bp_done = [None]*len(xs); bp_to = [None]*len(xs)
+    for i in xs:
+        r = by_rank.get(i)
+        if not r: continue
+        bp_clamped = max(r["n_mapped_bp"], 0)
+        if r["timed_out"]:
+            wt_to[i] = r["wall_s"]; rs_to[i] = r["peak_rss_kb"]/1024.0; bp_to[i] = bp_clamped
+        else:
+            wt_done[i] = r["wall_s"]; rs_done[i] = r["peak_rss_kb"]/1024.0; bp_done[i] = bp_clamped
+    z = lambda lst: [v if v is not None else 0 for v in lst]
+    off = (ti - (n_tools - 1) / 2) * width
+    color = tool_color.get(tool, "#888888")
+    ax_wall.bar(xs + off, z(wt_done), width=width, color=color, label=tool)
+    ax_wall.bar(xs + off, z(wt_to),   width=width, color=color,
+                hatch="//", edgecolor="black", linewidth=0.5,
+                alpha=0.55, label=f"{tool} (timed out)")
+    ax_rss.bar (xs + off, z(rs_done), width=width, color=color, label=tool)
+    ax_rss.bar (xs + off, z(rs_to),   width=width, color=color,
+                hatch="//", edgecolor="black", linewidth=0.5, alpha=0.55)
+    ax_bp.bar  (xs + off, z(bp_done), width=width, color=color, label=tool)
+    ax_bp.bar  (xs + off, z(bp_to),   width=width, color=color,
+                hatch="//", edgecolor="black", linewidth=0.5, alpha=0.55)
 
 xlabels = [f"{c}\n({d:.2f})" for d, _, c in species_order]
 for ax, title, ylab, yscale in [

@@ -44,6 +44,7 @@
 set -euo pipefail
 
 UNI=""
+UNI_TAF=""
 HAL=""
 CHAINS_DIR=""
 TREE=""
@@ -88,8 +89,14 @@ usage() {
 taffy_lift_bench_slurm.sh -- liftover vs taffy lift benchmark across a
                              panel of species at varying divergence
 
-Required:
-  -u FILE       Universal MAF (.uni.maf.gz; only its .tui sibling is read)
+Required (at least one of -u / --uniTaf must be set):
+  -u FILE       Universal MAF (.uni.maf.gz; only its .tui sibling is read).
+                If set, generates a "maf.tui" cell per species (taffy lift
+                against the MAF-anchored .tui).
+  --uniTaf FILE Universal TAF (.uni.taf.gz; only its .tui sibling is read).
+                If set, generates a "taf.tui" cell per species (taffy lift
+                against the TAF-anchored .tui).  Both flags can be set
+                together to bench both .tui formats side by side.
   -H FILE       HAL file (for halLiftover)
   -c DIR        Directory of chain files named <REF>_vs_<GENOME_ID>.chain.gz
   -t FILE       Species tree (.nwk) -- used by the plot script for divergence
@@ -125,6 +132,7 @@ EOF
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -u)             UNI="$2"; shift 2;;
+        --uniTaf)       UNI_TAF="$2"; shift 2;;
         -H)             HAL="$2"; shift 2;;
         -c)             CHAINS_DIR="$2"; shift 2;;
         -t)             TREE="$2"; shift 2;;
@@ -149,14 +157,23 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-for v in UNI HAL CHAINS_DIR TREE OUTDIR; do
+for v in HAL CHAINS_DIR TREE OUTDIR; do
     [[ -n "${!v}" ]] || { echo "ERROR: -$(echo $v | cut -c1) required" >&2; usage 1; }
 done
+[[ -n "$UNI" || -n "$UNI_TAF" ]] || {
+    echo "ERROR: at least one of -u / --uniTaf must be set" >&2; usage 1;
+}
 [[ -n "$TAFFY"       ]] || { echo "ERROR: taffy not on PATH (set \$TAFFY)" >&2; exit 1; }
 [[ -n "$LIFTOVER"    ]] || { echo "ERROR: liftOver not on PATH (set \$LIFTOVER)" >&2; exit 1; }
 [[ -n "$HALLIFTOVER" ]] || { echo "ERROR: halLiftover not on PATH (set \$HALLIFTOVER)" >&2; exit 1; }
-[[ -f "$UNI"         ]] || { echo "ERROR: $UNI not found" >&2; exit 1; }
-[[ -f "${UNI}.tui"   ]] || { echo "ERROR: $UNI has no .tui sibling" >&2; exit 1; }
+if [[ -n "$UNI" ]]; then
+    [[ -f "$UNI"        ]] || { echo "ERROR: $UNI not found" >&2; exit 1; }
+    [[ -f "${UNI}.tui"  ]] || { echo "ERROR: $UNI has no .tui sibling" >&2; exit 1; }
+fi
+if [[ -n "$UNI_TAF" ]]; then
+    [[ -f "$UNI_TAF"        ]] || { echo "ERROR: $UNI_TAF not found" >&2; exit 1; }
+    [[ -f "${UNI_TAF}.tui"  ]] || { echo "ERROR: $UNI_TAF has no .tui sibling" >&2; exit 1; }
+fi
 [[ -f "$HAL"         ]] || { echo "ERROR: $HAL not found" >&2; exit 1; }
 [[ -d "$CHAINS_DIR" ]] || { echo "ERROR: $CHAINS_DIR not found" >&2; exit 1; }
 [[ -f "$TREE"     ]] || { echo "ERROR: $TREE not found" >&2; exit 1; }
@@ -201,15 +218,16 @@ done < "$SPECIES_TSV"
 # naming conventions in VGP cactus (UCSC chr1 for mm39, NCBI accessions
 # like NC_051216.1 for VGP species), so we cannot guess.
 REF_SIZES="$OUTDIR/ref.sizes"
-echo ">> querying .tui for ${REF}.* chroms via taffy stats -s ..." >&2
-# Don't pipe-redirect stderr -- we want any taffy errors to surface.
-# `set -e` + `pipefail` will still abort the script if anything failed,
-# but with a visible cause.
-"$TAFFY" stats -i "$UNI" -s \
+# Prefer the MAF.tui if available; the chrom list is identical from either
+# (both .tui files were built from the same alignment), but we only need
+# to query one.
+UNI_STATS_SRC="${UNI:-$UNI_TAF}"
+echo ">> querying .tui ($UNI_STATS_SRC) for ${REF}.* chroms via taffy stats -s ..." >&2
+"$TAFFY" stats -i "$UNI_STATS_SRC" -s \
     | awk -v p="${REF}." 'index($1, p) == 1 {sub(p, "", $1); print $1"\t"$2}' \
     | sort -k2,2nr > "$REF_SIZES"
 [[ -s "$REF_SIZES" ]] || {
-    echo "ERROR: no sequences matching ${REF}.* in $UNI's .tui." >&2
+    echo "ERROR: no sequences matching ${REF}.* in $UNI_STATS_SRC's .tui." >&2
     echo "       Check that -r matches the genome prefix used in the universal MAF." >&2
     exit 1
 }
@@ -320,6 +338,7 @@ cat > "$RUNNER" <<EOF
 set -uo pipefail
 
 UNI="$UNI"
+UNI_TAF="$UNI_TAF"
 HAL="$HAL"
 CHAINS_DIR="$CHAINS_DIR"
 OUTDIR="$OUTDIR"
@@ -356,13 +375,22 @@ if [[ "\$STAGE_LOCAL" -eq 1 ]]; then
         echo "       done in \$((SECONDS - t0)) s" >&2
         echo "\$dst"
     }
-    # .tui only -- taffy lift never opens the MAF itself.
-    stage_one "\$UNI.tui" > /dev/null
-    LOCAL_UNI="\$STAGE_DIR/\$(basename "\$UNI")"
-    # taffy lift wants <input>.tui; create a stub <input> next to it so
-    # it can derive the .tui path.  Stub is 0 bytes, never read.
-    : > "\$LOCAL_UNI"
-    UNI="\$LOCAL_UNI"
+    # .tui only -- taffy lift never opens the source MAF/TAF itself.
+    # Each provided source (-u, --uniTaf) gets its .tui staged.  The
+    # input file itself isn't read; we just need a stub at <input> so
+    # taffy lift's tui_path() resolves to the staged .tui.
+    if [[ -n "\$UNI" ]]; then
+        stage_one "\$UNI.tui" > /dev/null
+        LOCAL_UNI="\$STAGE_DIR/\$(basename "\$UNI")"
+        : > "\$LOCAL_UNI"
+        UNI="\$LOCAL_UNI"
+    fi
+    if [[ -n "\$UNI_TAF" ]]; then
+        stage_one "\$UNI_TAF.tui" > /dev/null
+        LOCAL_UNI_TAF="\$STAGE_DIR/\$(basename "\$UNI_TAF")"
+        : > "\$LOCAL_UNI_TAF"
+        UNI_TAF="\$LOCAL_UNI_TAF"
+    fi
 
     # HAL file for halLiftover.
     HAL=\$(stage_one "\$HAL")
@@ -483,14 +511,27 @@ for N in "\${SIZES[@]}"; do
           ) > "\${rowfiles[\$stem_hl]}" &
         pids[\$stem_hl]=\$!
 
-        # ---- taffy lift cell ----
-        stem_tf="taffy_\${sid}_\${N}"
-        rowfiles[\$stem_tf]="\$LOGDIR/row_\${stem_tf}.tsv"
-        out_tf="\$LOGDIR/mapped_\${stem_tf}.bed"
-        ( run_cell taffy "\$sid" "\$sci" "\$common" "\$N" "\$TIME_BUDGET" \\
-            "\$TAFFY" lift -i "\$UNI" -b "\$BED_PREFIXED" -g "\$sid" -o "\$out_tf" \\
-          ) > "\${rowfiles[\$stem_tf]}" &
-        pids[\$stem_tf]=\$!
+        # ---- taffy lift cells (one per provided .tui source) ----
+        # taffy lift against the MAF-anchored .tui ("maf.tui" on plots).
+        if [[ -n "\$UNI" ]]; then
+            stem_tm="maf.tui_\${sid}_\${N}"
+            rowfiles[\$stem_tm]="\$LOGDIR/row_\${stem_tm}.tsv"
+            out_tm="\$LOGDIR/mapped_\${stem_tm}.bed"
+            ( run_cell maf.tui "\$sid" "\$sci" "\$common" "\$N" "\$TIME_BUDGET" \\
+                "\$TAFFY" lift -i "\$UNI" -b "\$BED_PREFIXED" -g "\$sid" -o "\$out_tm" \\
+              ) > "\${rowfiles[\$stem_tm]}" &
+            pids[\$stem_tm]=\$!
+        fi
+        # taffy lift against the TAF-anchored .tui ("taf.tui" on plots).
+        if [[ -n "\$UNI_TAF" ]]; then
+            stem_tt="taf.tui_\${sid}_\${N}"
+            rowfiles[\$stem_tt]="\$LOGDIR/row_\${stem_tt}.tsv"
+            out_tt="\$LOGDIR/mapped_\${stem_tt}.bed"
+            ( run_cell taf.tui "\$sid" "\$sci" "\$common" "\$N" "\$TIME_BUDGET" \\
+                "\$TAFFY" lift -i "\$UNI_TAF" -b "\$BED_PREFIXED" -g "\$sid" -o "\$out_tt" \\
+              ) > "\${rowfiles[\$stem_tt]}" &
+            pids[\$stem_tt]=\$!
+        fi
     done < "\$SPECIES_TSV"
 
     # Wait on all cells, append rows.
@@ -631,7 +672,12 @@ species_order = sorted({(r["dist"], r["genome_id"], r["common_name"]) for r in r
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
 fig.subplots_adjust(left=0.08, right=0.97, top=0.90, bottom=0.20, wspace=0.27)
 
-tool_color = {"liftover": "#d62728", "halLiftover": "#2ca02c", "taffy": "#1f77b4"}
+tool_color = {
+    "liftover":    "#d62728",
+    "halLiftover": "#2ca02c",
+    "maf.tui":     "#1f77b4",   # taffy lift against MAF-anchored .tui
+    "taf.tui":     "#9467bd",   # taffy lift against TAF-anchored .tui
+}
 size_marker = {sz: m for sz, m in zip(sizes, ["o", "s", "^", "D", "v", "*"])}
 
 def by_tool_size(tool, size):
@@ -645,7 +691,7 @@ def by_tool_size(tool, size):
     out.sort()
     return out
 
-for tool in ("liftover", "halLiftover", "taffy"):
+for tool in ("liftover", "halLiftover", "maf.tui", "taf.tui"):
     for sz in sizes:
         pts = by_tool_size(tool, sz)
         if not pts: continue

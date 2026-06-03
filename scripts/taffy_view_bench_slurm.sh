@@ -53,6 +53,7 @@
 set -euo pipefail
 
 UNI=""
+UNI_TAF=""
 HG38=""
 HAL=""
 BB=""
@@ -85,8 +86,13 @@ usage() {
 taffy_view_bench_slurm.sh -- bench 4 region-extract tools on a log-decade
                              ladder, 1 SLURM job, intra-size parallelism
 
-Required:
-  -u FILE       Universal MAF (.uni.maf.gz with .tui sibling)
+Required (at least one of -u / --uniTaf must be set):
+  -u FILE       Universal MAF (.uni.maf.gz with .tui sibling).  If set,
+                generates four maf.tui_* cells per size (taffy view -U query
+                against the MAF-anchored .tui, with each output format).
+  --uniTaf FILE Universal TAF (.uni.taf.gz with .tui sibling).  If set,
+                generates four taf.tui_* cells per size.  Both flags can
+                be combined to bench both .tui formats side by side.
   -m FILE       hg38-anchored MAF (.maf.gz with .tai sibling)
   -H FILE       HAL file (for hal2maf)
   -b FILE       BigBed (for bigBedToBed)
@@ -139,6 +145,7 @@ EOF
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -u)             UNI="$2"; shift 2;;
+        --uniTaf)       UNI_TAF="$2"; shift 2;;
         -m)             HG38="$2"; shift 2;;
         -H)             HAL="$2"; shift 2;;
         -b)             BB="$2"; shift 2;;
@@ -165,14 +172,23 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-for v in UNI HG38 HAL BB OUTDIR; do
+for v in HG38 HAL BB OUTDIR; do
     [[ -n "${!v}" ]] || { echo "ERROR: -$(echo $v | cut -c1) required" >&2; usage 1; }
 done
+[[ -n "$UNI" || -n "$UNI_TAF" ]] || {
+    echo "ERROR: at least one of -u / --uniTaf must be set" >&2; usage 1;
+}
 [[ -n "$TAFFY"      ]] || { echo "ERROR: taffy not on PATH (set \$TAFFY)" >&2; exit 1; }
 [[ -n "$HAL2MAF"    ]] || { echo "WARN: hal2maf not found; that tool will be skipped" >&2; }
 [[ -n "$BIGBED2BED" ]] || { echo "WARN: bigBedToBed not found; that tool will be skipped" >&2; }
-[[ -f "$UNI"        ]] || { echo "ERROR: $UNI not found" >&2; exit 1; }
-[[ -f "${UNI}.tui"  ]] || { echo "ERROR: $UNI has no .tui sibling" >&2; exit 1; }
+if [[ -n "$UNI" ]]; then
+    [[ -f "$UNI"        ]] || { echo "ERROR: $UNI not found" >&2; exit 1; }
+    [[ -f "${UNI}.tui"  ]] || { echo "ERROR: $UNI has no .tui sibling" >&2; exit 1; }
+fi
+if [[ -n "$UNI_TAF" ]]; then
+    [[ -f "$UNI_TAF"        ]] || { echo "ERROR: $UNI_TAF not found" >&2; exit 1; }
+    [[ -f "${UNI_TAF}.tui"  ]] || { echo "ERROR: $UNI_TAF has no .tui sibling" >&2; exit 1; }
+fi
 [[ -f "$HG38"       ]] || { echo "ERROR: $HG38 not found" >&2; exit 1; }
 [[ -f "${HG38}.tai" ]] || { echo "ERROR: $HG38 has no .tai sibling" >&2; exit 1; }
 [[ -f "$HAL"        ]] || { echo "ERROR: $HAL not found" >&2; exit 1; }
@@ -202,7 +218,8 @@ echo ">> output dir:    $OUTDIR"
 echo ">> taffy:         $TAFFY"
 echo ">> hal2maf:       ${HAL2MAF:-(skip)}"
 echo ">> bigBedToBed:   ${BIGBED2BED:-(skip)}"
-echo ">> uni MAF:       $UNI  (+.tui)"
+[[ -n "$UNI"     ]] && echo ">> uni MAF:       $UNI  (+.tui)"
+[[ -n "$UNI_TAF" ]] && echo ">> uni TAF:       $UNI_TAF  (+.tui)"
 echo ">> hg38 MAF:      $HG38 (+.tai)"
 echo ">> HAL:           $HAL"
 echo ">> BigBed:        $BB"
@@ -217,13 +234,17 @@ echo ">> local-stage:   $([[ $STAGE_LOCAL -eq 1 ]] && echo "ON (copies to \$TMPD
 # Belt-and-suspenders sizing hint when local-stage is on.
 if [[ "$STAGE_LOCAL" -eq 1 ]]; then
     STAGE_BYTES=0
-    for f in "$UNI" "${UNI}.tui" "$HG38" "${HG38}.tai" "$HAL" "$BB"; do
+    STAGE_LIST=()
+    [[ -n "$UNI"     ]] && STAGE_LIST+=( "$UNI" "${UNI}.tui" )
+    [[ -n "$UNI_TAF" ]] && STAGE_LIST+=( "$UNI_TAF" "${UNI_TAF}.tui" )
+    STAGE_LIST+=( "$HG38" "${HG38}.tai" "$HAL" "$BB" )
+    for f in "${STAGE_LIST[@]}"; do
         if [[ -f "$f" ]]; then
             STAGE_BYTES=$(( STAGE_BYTES + $(stat -c %s "$f" 2>/dev/null || stat -f %z "$f") ))
         fi
     done
     STAGE_GB=$(( STAGE_BYTES / (1024**3) ))
-    echo ">> stage-in size: ~${STAGE_GB} GB total (UNI + .tui + HG38 + .tai + HAL + BB)"
+    echo ">> stage-in size: ~${STAGE_GB} GB total"
     if [[ -z "$TMP_GB" ]]; then
         echo ">> hint:          if your cluster advertises --tmp, consider --tmp $(( STAGE_GB + 50 )); otherwise omit"
     fi
@@ -248,6 +269,7 @@ set -uo pipefail
 # Don't 'set -e': we want per-cell exits captured, not job aborted.
 
 UNI="$UNI"
+UNI_TAF="$UNI_TAF"
 HG38="$HG38"
 HAL="$HAL"
 BB="$BB"
@@ -296,11 +318,21 @@ if [[ "\$STAGE_LOCAL" -eq 1 ]]; then
         echo "       done in \$((SECONDS - t0)) s" >&2
         echo "\$dst"
     }
-    LOCAL_UNI=\$(stage_one "\$UNI");        stage_one "\$UNI.tui"  > /dev/null
+    # Universal MAF/.tui: each provided source is staged (source file +
+    # its .tui sidecar).  taffy view DOES open the source file (unlike
+    # taffy lift) to extract bases, so for view-bench we need the source
+    # itself staged.
+    if [[ -n "\$UNI" ]]; then
+        LOCAL_UNI=\$(stage_one "\$UNI");        stage_one "\$UNI.tui"  > /dev/null
+        UNI="\$LOCAL_UNI"
+    fi
+    if [[ -n "\$UNI_TAF" ]]; then
+        LOCAL_UNI_TAF=\$(stage_one "\$UNI_TAF");  stage_one "\$UNI_TAF.tui" > /dev/null
+        UNI_TAF="\$LOCAL_UNI_TAF"
+    fi
     LOCAL_HG38=\$(stage_one "\$HG38");      stage_one "\$HG38.tai" > /dev/null
     LOCAL_HAL=\$(stage_one "\$HAL")
     LOCAL_BB=\$(stage_one "\$BB")
-    UNI="\$LOCAL_UNI"
     HG38="\$LOCAL_HG38"
     HAL="\$LOCAL_HAL"
     BB="\$LOCAL_BB"
@@ -360,48 +392,53 @@ for N in "\${SIZES[@]}"; do
 
     declare -A pids
     declare -A rowfiles
-    # 8 cells per wave: 6 taffy (uni x (taf/maf/taf+norm/maf+norm) + hg38
-    # x (taf/maf)) + hal + bb.  Tool labels encode (index-path,
-    # output-format, normalized?) so a row's meaning is self-describing
-    # in bench.tsv.
-    for tool in tui_taf tui_maf tui_taf_norm tui_maf_norm tai_taf tai_maf hal bb; do
+    # Cells per wave: 4 per provided .tui source (1 or 2 sources) +
+    # 2 tai (taf / maf) + hal + bb.  With both .tui sources set this is
+    # up to 12 cells; with one source it's 8 (same as before this flag
+    # was added).
+    #
+    # tui-side cells re-orient onto the queried genome (-U query) so
+    # blocks come out hg38-anchored, comparable to the .tai path / bigBed.
+    # Without -U query the default is \`-U ancestor\` which emits every
+    # overlapping universal-column block (~12x larger, conflates bench
+    # question).  -m forces MAF, absence => TAF.  The _norm variants
+    # pipe through \`taffy norm\` to merge fragmented universal output;
+    # \`sh -c\` captures the pipe's RSS via wait4.
+    #
+    # prefix = "maf.tui" or "taf.tui" (matches the .tui source format).
+    launch_tui_cells() {
+        local prefix="\$1" input="\$2"
+        local cells=( "\${prefix}_taf" "\${prefix}_maf" "\${prefix}_taf_norm" "\${prefix}_maf_norm" )
+        for tool in "\${cells[@]}"; do
+            rowfiles[\$tool]="\$LOGDIR/row_\${tool}_\${N}.tsv"
+        done
+        ( run_cell "\${prefix}_taf"      "\$N" "\$TIME_BUDGET" \\
+            "\$TAFFY" view -i "\$input" -r "\${REF_CHROM}:\${START}-\${END}" -U query    -T "\$TAFFY_T" \\
+          ) > "\${rowfiles[\${prefix}_taf]}" &
+        pids[\${prefix}_taf]=\$!
+        ( run_cell "\${prefix}_maf"      "\$N" "\$TIME_BUDGET" \\
+            "\$TAFFY" view -i "\$input" -r "\${REF_CHROM}:\${START}-\${END}" -U query -m -T "\$TAFFY_T" \\
+          ) > "\${rowfiles[\${prefix}_maf]}" &
+        pids[\${prefix}_maf]=\$!
+        ( run_cell "\${prefix}_taf_norm" "\$N" "\$TIME_BUDGET" \\
+            sh -c '"\$1" view -i "\$2" -r "\$3" -U query -T "\$4" | "\$1" norm' \\
+            _ "\$TAFFY" "\$input" "\${REF_CHROM}:\${START}-\${END}" "\$TAFFY_T" \\
+          ) > "\${rowfiles[\${prefix}_taf_norm]}" &
+        pids[\${prefix}_taf_norm]=\$!
+        ( run_cell "\${prefix}_maf_norm" "\$N" "\$TIME_BUDGET" \\
+            sh -c '"\$1" view -i "\$2" -r "\$3" -U query -T "\$4" | "\$1" norm -k' \\
+            _ "\$TAFFY" "\$input" "\${REF_CHROM}:\${START}-\${END}" "\$TAFFY_T" \\
+          ) > "\${rowfiles[\${prefix}_maf_norm]}" &
+        pids[\${prefix}_maf_norm]=\$!
+    }
+
+    # Pre-allocate non-tui cell rowfiles too.
+    for tool in tai_taf tai_maf hal bb; do
         rowfiles[\$tool]="\$LOGDIR/row_\${tool}_\${N}.tsv"
     done
 
-    # tui_taf / tui_maf: universal MAF, reoriented onto the queried
-    # genome (-U query) so blocks come out hg38-anchored -- comparable
-    # to the .tai path / bigBed.  Without -U query the default is
-    # \`-U ancestor\`, which passes blocks through in their native
-    # ancestor anchor + emits every overlapping universal-column block
-    # (~12x larger output that conflates this bench's question).
-    # -m forces MAF; absence => TAF (taffy view's default).
-    ( run_cell tui_taf "\$N" "\$TIME_BUDGET" \\
-        "\$TAFFY" view -i "\$UNI" -r "\${REF_CHROM}:\${START}-\${END}" -U query    -T "\$TAFFY_T" \\
-      ) > "\${rowfiles[tui_taf]}" &
-    pids[tui_taf]=\$!
-
-    ( run_cell tui_maf "\$N" "\$TIME_BUDGET" \\
-        "\$TAFFY" view -i "\$UNI" -r "\${REF_CHROM}:\${START}-\${END}" -U query -m -T "\$TAFFY_T" \\
-      ) > "\${rowfiles[tui_maf]}" &
-    pids[tui_maf]=\$!
-
-    # tui_taf_norm / tui_maf_norm: same as above but piped through
-    # \`taffy norm\` to merge fragmented universal-lift output.  Uses
-    # \`sh -c\` with positional args so the pipe's RSS is captured (GNU
-    # time aggregates child rusage via wait4).  taffy norm uses 1 bgzf
-    # thread because it reads an uncompressed stdin (only the view side
-    # benefits from \$TAFFY_T).
-    ( run_cell tui_taf_norm "\$N" "\$TIME_BUDGET" \\
-        sh -c '"\$1" view -i "\$2" -r "\$3" -U query -T "\$4" | "\$1" norm' \\
-        _ "\$TAFFY" "\$UNI" "\${REF_CHROM}:\${START}-\${END}" "\$TAFFY_T" \\
-      ) > "\${rowfiles[tui_taf_norm]}" &
-    pids[tui_taf_norm]=\$!
-
-    ( run_cell tui_maf_norm "\$N" "\$TIME_BUDGET" \\
-        sh -c '"\$1" view -i "\$2" -r "\$3" -U query -T "\$4" | "\$1" norm -k' \\
-        _ "\$TAFFY" "\$UNI" "\${REF_CHROM}:\${START}-\${END}" "\$TAFFY_T" \\
-      ) > "\${rowfiles[tui_maf_norm]}" &
-    pids[tui_maf_norm]=\$!
+    [[ -n "\$UNI"     ]] && launch_tui_cells "maf.tui" "\$UNI"
+    [[ -n "\$UNI_TAF" ]] && launch_tui_cells "taf.tui" "\$UNI_TAF"
 
     # tai_taf / tai_maf: hg38-anchored MAF via .tai.
     ( run_cell tai_taf "\$N" "\$TIME_BUDGET" \\
@@ -435,13 +472,12 @@ for N in "\${SIZES[@]}"; do
         pids[bb]=\$!
     fi
 
-    # Wait for each cell and append its row in canonical order.
-    for tool in tui_taf tui_maf tui_taf_norm tui_maf_norm tai_taf tai_maf hal bb; do
-        if [[ -n "\${pids[\$tool]:-}" ]]; then
-            wait "\${pids[\$tool]}" || true
-            if [[ -s "\${rowfiles[\$tool]}" ]]; then
-                cat "\${rowfiles[\$tool]}" >> "\$BENCH_TSV"
-            fi
+    # Wait for each cell and append its row.  Iterate the pids set we
+    # actually launched -- which varies by which .tui sources were given.
+    for tool in "\${!pids[@]}"; do
+        wait "\${pids[\$tool]}" || true
+        if [[ -s "\${rowfiles[\$tool]}" ]]; then
+            cat "\${rowfiles[\$tool]}" >> "\$BENCH_TSV"
         fi
     done
 
@@ -483,14 +519,25 @@ with open(os.path.join(bench_dir, "bench.tsv")) as f:
         except (ValueError, KeyError):
             continue
 
-tools = ["tui_taf", "tui_maf", "tui_taf_norm", "tui_maf_norm",
-         "tai_taf", "tai_maf", "hal", "bb"]
+# maf.tui_* uses blues; taf.tui_* uses purples (visually distinct but
+# easy to read pairs across colour-coded output formats).  tai_*, hal,
+# bb keep their existing colours.
 colors = {
-    "tui_taf":      "#1f77b4", "tui_maf":      "#aec7e8",
-    "tui_taf_norm": "#17becf", "tui_maf_norm": "#9edae5",
-    "tai_taf":      "#2ca02c", "tai_maf":      "#98df8a",
-    "hal":          "#d62728", "bb":           "#ff7f0e",
+    "maf.tui_taf":      "#1f77b4", "maf.tui_maf":      "#aec7e8",
+    "maf.tui_taf_norm": "#17becf", "maf.tui_maf_norm": "#9edae5",
+    "taf.tui_taf":      "#9467bd", "taf.tui_maf":      "#c5b0d5",
+    "taf.tui_taf_norm": "#bd5fbb", "taf.tui_maf_norm": "#e6abe6",
+    "tai_taf":          "#2ca02c", "tai_maf":          "#98df8a",
+    "hal":              "#d62728", "bb":               "#ff7f0e",
 }
+# Show the tools present in the data (the driver may have launched only
+# the maf.tui set, or only the taf.tui set, or both).  Preserve a stable
+# render order so legend reads cleanly.
+order = ["maf.tui_taf", "maf.tui_maf", "maf.tui_taf_norm", "maf.tui_maf_norm",
+         "taf.tui_taf", "taf.tui_maf", "taf.tui_taf_norm", "taf.tui_maf_norm",
+         "tai_taf", "tai_maf", "hal", "bb"]
+present = {r["tool"] for r in rows}
+tools = [t for t in order if t in present]
 
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
 fig.subplots_adjust(left=0.06, right=0.97, top=0.92, bottom=0.12, wspace=0.22)
