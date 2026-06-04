@@ -1,0 +1,24 @@
+# Build artifacts
+*.o
+*.a
+bin/
+build/
+dist/
+include/
+lib/
+
+# Python build / venv junk
+__pycache__/
+*.egg-info/
+.pytest_cache/
+*.pyc
+taffy_env/
+venv-taffy/
+
+# Editor / OS noise
+*.swp
+.#*
+\#*\#
+*~
+core
+core.*
