@@ -38,6 +38,7 @@
 #ifndef _TAFFY_BLOCK_VIZ_H
 #define _TAFFY_BLOCK_VIZ_H
 
+#include <stdint.h>
 #include <stdio.h>
 
 #ifdef __cplusplus
@@ -150,6 +151,46 @@ int taffyClose(int taffyHandle, char **errStr);
  * the open handle.  Useful to drop memory after a browser pan moves
  * to a new species.  Returns 0 on success / -1 on failure. */
 int taffyCloseGenome(int taffyHandle, const char *genomeName, char **errStr);
+
+/* ------------------------------------------------------------------ */
+/* Chain tuning (per handle)                                           */
+/* ------------------------------------------------------------------ */
+
+/** Configure the chaining cost / gap-break parameters used by
+ * taffyGetBlocksInTargetRange when partitioning visited runs into
+ * chains (the per-handle defaults are 0 / 1 / 10 Mb, matching
+ * TAFFY_CHAIN_DEFAULT_{OPEN,EXTEND,MAX_GAP}).
+ *
+ * Semantics of each param:
+ *   chain_open    -- fixed cost per chain join.  0 = always pays to
+ *                    join collinear runs.  Higher values prevent
+ *                    short alignments from chaining across gaps.
+ *   chain_extend  -- per-bp cost added to chain_open scaled by
+ *                    (q_gap + t_gap).  1 = a 100-bp gap costs 100
+ *                    (on top of chain_open).
+ *   max_gap_length -- any candidate join whose q_gap or t_gap exceeds
+ *                    this is rejected outright -- the chain breaks.
+ *                    Pass INT64_MAX to disable the gap-break.
+ *
+ * Pass -1 in any field to leave that field unchanged.  All other
+ * negative values are rejected (returns -1 with errStr).  Returns 0
+ * on success.  Thread-safe (takes the same lock as the query path).
+ */
+int taffySetChainParams(int taffyHandle,
+                        int64_t chain_open,
+                        int64_t chain_extend,
+                        int64_t max_gap_length,
+                        char **errStr);
+
+/** Read back the currently-configured chain parameters for the
+ * handle.  Any non-NULL output pointer receives the current value;
+ * NULL pointers are ignored (call with NULLs for ones you don't
+ * care about).  Returns 0 on success, -1 on invalid handle. */
+int taffyGetChainParams(int taffyHandle,
+                        int64_t *chain_open,
+                        int64_t *chain_extend,
+                        int64_t *max_gap_length,
+                        char **errStr);
 
 /* ------------------------------------------------------------------ */
 /* Free functions for the returned linked lists.                       */

@@ -34,6 +34,11 @@ struct TaffyHandle {
     Tui *tui = nullptr;
     std::string tui_path_str;   // resolved .tui path (for tui_sequence_lengths)
     std::map<std::string, TuiGenomeLift *> lift_cache;
+    // Chain tuning -- defaults match TAFFY_CHAIN_DEFAULT_{OPEN,EXTEND,MAX_GAP}.
+    // Tunable per-handle via taffySetChainParams.
+    int64_t chain_open      = TAFFY_CHAIN_DEFAULT_OPEN;
+    int64_t chain_extend    = TAFFY_CHAIN_DEFAULT_EXTEND;
+    int64_t max_gap_length  = TAFFY_CHAIN_DEFAULT_MAX_GAP;
 };
 
 static std::map<int, TaffyHandle *> g_handles;
@@ -121,6 +126,42 @@ extern "C" int taffyCloseGenome(int h, const char *genome, char **errStr) {
         tui_genome_lift_destruct(it->second);
         H->lift_cache.erase(it);
     }
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Chain tuning setter/getter                                          */
+/* ------------------------------------------------------------------ */
+
+extern "C" int taffySetChainParams(int h,
+                                   int64_t chain_open,
+                                   int64_t chain_extend,
+                                   int64_t max_gap_length,
+                                   char **errStr) {
+    // Validate: -1 means "leave unchanged"; any other negative is bogus.
+    if (chain_open      < -1) { set_err(errStr, "taffyBlockViz: chain_open must be >= 0 or -1"); return -1; }
+    if (chain_extend    < -1) { set_err(errStr, "taffyBlockViz: chain_extend must be >= 0 or -1"); return -1; }
+    if (max_gap_length  < -1) { set_err(errStr, "taffyBlockViz: max_gap_length must be >= 0 or -1"); return -1; }
+    std::lock_guard<std::mutex> lock(g_mutex);
+    TaffyHandle *H = get_handle(h, errStr);
+    if (!H) return -1;
+    if (chain_open     != -1) H->chain_open     = chain_open;
+    if (chain_extend   != -1) H->chain_extend   = chain_extend;
+    if (max_gap_length != -1) H->max_gap_length = max_gap_length;
+    return 0;
+}
+
+extern "C" int taffyGetChainParams(int h,
+                                   int64_t *chain_open,
+                                   int64_t *chain_extend,
+                                   int64_t *max_gap_length,
+                                   char **errStr) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    TaffyHandle *H = get_handle(h, errStr);
+    if (!H) return -1;
+    if (chain_open)     *chain_open     = H->chain_open;
+    if (chain_extend)   *chain_extend   = H->chain_extend;
+    if (max_gap_length) *max_gap_length = H->max_gap_length;
     return 0;
 }
 
@@ -439,16 +480,17 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
     // join collinear runs aggressively (one snake per real alignment),
     // and the universal MAF's runs are gap-free by construction so the
     // q_gap + t_gap between adjacent runs of the same alignment is
-    // usually small.  chain_open=0 + chain_extend=1 + 10 Mb max_gap
-    // chains anything in the same syntenic block while still keeping
-    // truly distant paralogs in their own chain.
-    TaffyChainCostParams cost = { 0, 1 };
+    // usually small.  Defaults (TAFFY_CHAIN_DEFAULT_OPEN/EXTEND/MAX_GAP)
+    // chain anything in the same syntenic block while keeping truly
+    // distant paralogs in their own chain; callers can override via
+    // taffySetChainParams.
+    TaffyChainCostParams cost = { H->chain_open, H->chain_extend };
     std::vector<int64_t> chain_id((size_t) n, 0);
     TaffyChainInfo *chains = nullptr;
     int64_t n_chains = 0;
     taffy_chain(cx.alns.data(), n,
                 taffy_chain_default_gap_cost, &cost,
-                /*max_gap_length=*/ 10 * 1000 * 1000,
+                H->max_gap_length,
                 chain_id.data(), &chains, &n_chains);
 
     // Primary chain = chains[0] (sorted desc by score).

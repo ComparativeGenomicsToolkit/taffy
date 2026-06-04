@@ -74,6 +74,19 @@ typedef struct {
     int64_t chain_extend;
 } TaffyChainCostParams;
 
+/* Browser/blockViz tuning preset, shared by taffyBlockViz's
+ * get_blocks_impl and taffy lift --chainFilter so the constants live
+ * in one place.  open=0 + extend=1 chains aggressively (any forward-
+ * collinear runs join; nothing is dropped on cost alone); max_gap of
+ * 10 Mb breaks chains only across truly large rearrangements.  These
+ * differ from the lastz-style 5000/1 defaults baked into
+ * taffy_chain_default_gap_cost() -- those are tuned for whole-genome
+ * PAF chaining where alignment scores are kbs, not tens of bp.
+ */
+#define TAFFY_CHAIN_DEFAULT_OPEN     ((int64_t) 0)
+#define TAFFY_CHAIN_DEFAULT_EXTEND   ((int64_t) 1)
+#define TAFFY_CHAIN_DEFAULT_MAX_GAP  ((int64_t) 10 * 1000 * 1000)
+
 int64_t taffy_chain_default_gap_cost(int64_t q_gap, int64_t t_gap, void *params);
 
 /* Chain alignments and assign chain IDs.
