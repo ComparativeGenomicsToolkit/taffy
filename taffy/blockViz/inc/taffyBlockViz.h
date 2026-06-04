@@ -221,23 +221,40 @@ void taffyFreeMetadataList(struct taffy_metadata_t *metadata);
 /** Return blocks of `qSpecies` aligned within `tChrom`:[tStart, tEnd)
  * on `tSpecies`.  Output is a linked list of taffy_block_t.
  *
- * AUTO-BINNING FOR WIDE QUERIES: when (tEnd - tStart) / 2000 >= 100
- * (i.e. spans of >= 200 kb), the implementation switches to a bin
- * accumulator instead of emitting one block per mapped run.  Each
- * output block represents coverage of one (qChrom, strand, bin) cell:
- *   - block.tStart  = bin start on tChrom (bin_size = span/2000)
- *   - block.size    = total bp covered by mapped runs landing in this
- *                     bin from `qChrom` on `strand` (may exceed
- *                     bin_size when source paralogs map to the same
- *                     target region)
- *   - block.qStart  = synthetic monotone surrogate (bin_idx * bin_size,
- *                     NOT a real qSpecies coord)
- *   - block.strand  = '+' or '-' of the contributing runs
- * Bin mode skips the chain pass and mapBackAdjacencies (those don't
- * apply to aggregated coverage); targetDupeBlocks is always NULL in
- * bin mode.  This is what gives chromosome-scale browser views their
- * ~30-100x speedup over per-run output -- on bird-to-chicken
- * whole-chrom lifts it turns ~4M output blocks into ~2000 bins.
+ * BROWSER-SCALE OUTPUT.  Two output regimes:
+ *
+ * 1. Per-run + chain merge (default; spans < 10 Mb).  Visited runs go
+ *    through taffy_chain, then adjacent collinear alns within a chain
+ *    are merged into one taffy_block_t.  A 500 kb apes-vs-chimp query
+ *    produces ~63 primary-chain blocks (was ~2000 unmerged).  Browser
+ *    snake-track renderers cap on output block count; this collapse
+ *    keeps that under the cap for primary-chain output even at full
+ *    chr-scale queries (~700 blocks for hg38.chr5 / 181 Mb).
+ *
+ *    IMPORTANT for snake-track callers: the primary chain stays small,
+ *    but if dupMode includes paralogs (QUERY_DUPS or
+ *    QUERY_AND_TARGET_DUPS) the total block count can spike on
+ *    paralog-rich queries (thousands of singleton dupe chains in dense
+ *    apes regions).  Use NO_DUPS for the snake track and route paralog
+ *    rendering through targetDupeBlocks or a separate query if needed.
+ *
+ * 2. Auto-binning (spans >= 10 Mb).  When (tEnd - tStart) / 500 >=
+ *    20 kb, the implementation switches to a bin accumulator instead
+ *    of per-run blocks.  Each output block represents coverage of one
+ *    (qChrom, strand, bin) cell:
+ *      - block.tStart  = bin start on tChrom (bin_size = span/500)
+ *      - block.size    = total bp covered by mapped runs landing in
+ *                        this bin from `qChrom` on `strand` (may
+ *                        exceed bin_size when source paralogs map to
+ *                        the same target region -- coverage signal)
+ *      - block.qStart  = synthetic monotone surrogate (bin_idx *
+ *                        bin_size, NOT a real qSpecies coord)
+ *      - block.strand  = '+' or '-' of the contributing runs
+ *    Bin mode skips the chain pass and mapBackAdjacencies (those
+ *    don't apply to aggregated coverage); targetDupeBlocks is always
+ *    NULL in bin mode.  Output is capped at ~500 blocks, well under
+ *    HAL's snake-track NUM_LEVELS limit.  This regime targets
+ *    coverage-histogram rendering, not snake; render accordingly.
  *
  * @param taffyHandle      handle from taffyOpen
  * @param qSpecies         genome to fetch blocks FROM

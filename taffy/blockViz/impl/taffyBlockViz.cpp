@@ -492,14 +492,24 @@ struct BlockCtx {
     std::map<BinKey, int64_t> bins;
 };
 
-// Bin policy.  At wide queries we want O(1000s) of output blocks, not
-// O(millions).  TARGET_BIN_COUNT sets the max bins per chromosome-scale
-// query; binSize = span / TARGET_BIN_COUNT.  MIN_BIN_BP keeps the per-bin
-// resolution coarse enough that the bookkeeping savings dominate the
-// loss of fidelity -- below this, bin mode is not worth engaging and we
-// return per-run blocks as before.
-static const int64_t TARGET_BIN_COUNT = 2000;
-static const int64_t MIN_BIN_BP       = 100;
+// Bin policy.  Bin mode is for chromosome-scale "coverage track"
+// territory ONLY (span >= 10 Mb): below that the per-run + chain pass
+// + post-chain merge already collapses adjacent collinear runs into a
+// handful of snake segments, and the result is what browsers want for
+// snake-track rendering.  Once spans get wide enough that even merged
+// chains would overwhelm the snake renderer (HAL's halSnakeTrack.c
+// caps at NUM_LEVELS=1000), bin mode produces ~500 coverage cells
+// suitable for a histogram/coverage-bar viz instead.  TARGET_BIN_COUNT
+// stays well under 1000 so even browsers that pipe bin output through
+// the snake renderer don't blow the cap.
+//
+//   bin_size = span / TARGET_BIN_COUNT
+//   bin_mode = bin_size >= MIN_BIN_BP
+//
+// With TARGET_BIN_COUNT=500 and MIN_BIN_BP=20000, bin mode engages at
+// spans >= 10 Mb and produces at most 500 output blocks.
+static const int64_t TARGET_BIN_COUNT = 500;
+static const int64_t MIN_BIN_BP       = 20000;
 
 // Visitor: clip the q run, compute (tStart, qStart, size, strand),
 // and buffer both a taffy_block_t (for the eventual output linked list)
@@ -721,9 +731,69 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
     // Primary chain = chains[0] (sorted desc by score).
     int64_t primary_id = (n_chains > 0) ? chains[0].id : 0;
 
+    // Post-chain merge: collapse adjacent collinear alns within a chain
+    // into one taffy_block_t each.  Without this, a 500 kb browser query
+    // can emit ~2000 per-run blocks all from one chain -- the browser's
+    // snake-track renderer caps at NUM_LEVELS=1000 and errAborts ("too
+    // many levels").  HAL avoids this by emitting one block per maximal
+    // collinear stretch.  With this merge, a typical syntenic 500 kb
+    // window emits tens of blocks instead of thousands.
+    //
+    // alns are sorted by (q_name, strand, q_start) post-chain; within a
+    // single chain they're contiguous in q_start order.  Two alns merge
+    // if they share chain + qChrom + strand AND abut on both axes.
+    // The strand-aware q-axis (qSpecies forward coord) check:
+    //   +: prev.t_end == cur.t_start (qStart strictly increases)
+    //   -: cur.t_end   == prev.t_start (qStart strictly decreases on -)
+    {
+        std::map<int64_t, std::vector<int64_t>> chain_alns;
+        for (int64_t i = 0; i < n; i++) chain_alns[chain_id[i]].push_back(i);
+
+        for (auto &kv : chain_alns) {
+            auto &v = kv.second;
+            /* alns within a chain are already q_start-sorted (chain_partition
+             * walks in that order); v inherits the same order. */
+            for (size_t j = 1; j < v.size(); ) {
+                int64_t pi = v[j-1], ci = v[j];
+                TaffyAln *p = &cx.alns[pi];
+                TaffyAln *c = &cx.alns[ci];
+                /* chain.c only joins same-(t_name, strand) alns, so those
+                 * match by construction within one chain.  Only the
+                 * coordinate abut needs checking. */
+                bool abut_q = (p->q_end == c->q_start);
+                bool abut_t = (p->strand > 0)
+                            ? (p->t_end   == c->t_start)
+                            : (c->t_end   == p->t_start);
+                if (abut_q && abut_t) {
+                    struct taffy_block_t *pb = (struct taffy_block_t *) p->user;
+                    struct taffy_block_t *cb = (struct taffy_block_t *) c->user;
+                    /* Grow pb to cover both.  + strand: extend size.
+                     * - strand: qStart slides down to cb's qStart and
+                     * size grows. */
+                    pb->size += cb->size;
+                    if (p->strand < 0) pb->qStart = cb->qStart;
+                    /* Update p's TaffyAln extents so the NEXT iteration
+                     * checks abut against the merged boundary. */
+                    p->q_end = c->q_end;
+                    if (p->strand > 0) p->t_end   = c->t_end;
+                    else               p->t_start = c->t_start;
+                    /* Drop cb; mark c as consumed so the routing loop
+                     * below skips it. */
+                    free(cb->qChrom);
+                    free(cb);
+                    c->user = nullptr;
+                    v.erase(v.begin() + j);
+                } else {
+                    j++;
+                }
+            }
+        }
+    }
+
     // Walk alns (post-chain order) and route blocks per dupMode.  Each
     // aln's `user` field is the taffy_block_t* we created in the
-    // visitor; chain_id[i] is its chain.
+    // visitor (or NULL if it was merged away by the pass above);
+    // chain_id[i] is its chain.
     struct taffy_block_t *mapped_head = nullptr, *mapped_tail = nullptr;
     auto append_mapped = [&](struct taffy_block_t *b) {
         b->next = nullptr;
@@ -737,6 +807,7 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
 
     for (int64_t i = 0; i < n; i++) {
         struct taffy_block_t *b = (struct taffy_block_t *) cx.alns[i].user;
+        if (b == nullptr) continue;   // merged away by the post-chain pass
         int64_t cid = chain_id[i];
         bool is_primary = (cid == primary_id);
 
