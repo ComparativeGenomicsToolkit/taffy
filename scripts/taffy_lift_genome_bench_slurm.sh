@@ -409,6 +409,34 @@ run_cell() {
         "\$tool" "\$sid" "\$sci" "\$common" "\$wall" "\$rss" "\$rc" "\$timed_out" "\$n_mapped" "\$n_mapped_bp"
 }
 
+# --- Concurrency throttle ----------------------------------------------
+# Bound the SUM of running-cell OMP_NUM_THREADS by T_TOTAL so we never
+# oversubscribe the SLURM allocation -- same as lift-bench.  Without
+# this, the 9 species x (halLiftover + N modes x M thread counts x
+# K bins) cells all launch at once and oversubscribe the cpus-per-task
+# allocation.
+THREAD_BUDGET=\$T_TOTAL
+launched=0
+declare -A pid_threads
+
+acquire_slot() {
+    local threads=\$1
+    while (( launched + threads > THREAD_BUDGET )); do
+        wait -n 2>/dev/null || true
+        local p
+        for p in "\${!pid_threads[@]}"; do
+            if ! kill -0 \$p 2>/dev/null; then
+                launched=\$(( launched - pid_threads[\$p] ))
+                unset pid_threads[\$p]
+            fi
+        done
+    done
+    launched=\$(( launched + threads ))
+}
+register_pid() {
+    pid_threads[\$1]=\$2
+}
+
 # --- Fire all cells in parallel.  No waves. ----------------------------
 # Cells per species: 1 halLiftover + 1 per provided .tui source (1-2).
 echo "=== launching cells: \$(wc -l < "\$SPECIES_TSV") species x (1 halLiftover + .tui sources) ==="
@@ -423,11 +451,12 @@ while IFS=\$'\t' read -r sid sci common; do
     # Native (un-prefixed) bed -- halLiftover wants bare chrom names.
     stem_hl="halLiftover_\${sid}"
     rowfiles[\$stem_hl]="\$LOGDIR/row_\${stem_hl}.tsv"
+    acquire_slot 1
     ( run_cell halLiftover "\$sid" "\$sci" "\$common" \\
         "\$HALLIFTOVER" "\$HAL" "\$REF" "\$NATIVE_BED" "\$sid" \\
         "\$LOGDIR/mapped_\${stem_hl}.bed" \\
       ) > "\${rowfiles[\$stem_hl]}" &
-    pids[\$stem_hl]=\$!
+    pids[\$stem_hl]=\$!; register_pid \$! 1
 
     # ---- taffy lift cells: one per (.tui source) x (mode) ----
     # Mode loop: 'default' = column-walk (existing); 'fast' = chunk-walk
@@ -455,25 +484,27 @@ while IFS=\$'\t' read -r sid sci common; do
                 tool="maf.tui\${ftag}\${tt}"
                 stem="\${tool}_\${sid}"
                 rowfiles[\$stem]="\$LOGDIR/row_\${stem}.tsv"
+                acquire_slot \$THREADS
                 ( export OMP_NUM_THREADS=\$THREADS; \\
                   run_cell "\$tool" "\$sid" "\$sci" "\$common" \\
                     "\$TAFFY" lift -i "\$UNI" -b "\$PREFIXED_BED" -g "\$sid" \\
                                   "\${ffl[@]}" \\
                                   -o "\$LOGDIR/mapped_\${stem}.bed" \\
                 ) > "\${rowfiles[\$stem]}" &
-                pids[\$stem]=\$!
+                pids[\$stem]=\$!; register_pid \$! \$THREADS
             fi
             if [[ -n "\$UNI_TAF" ]]; then
                 tool="taf.tui\${ftag}\${tt}"
                 stem="\${tool}_\${sid}"
                 rowfiles[\$stem]="\$LOGDIR/row_\${stem}.tsv"
+                acquire_slot \$THREADS
                 ( export OMP_NUM_THREADS=\$THREADS; \\
                   run_cell "\$tool" "\$sid" "\$sci" "\$common" \\
                     "\$TAFFY" lift -i "\$UNI_TAF" -b "\$PREFIXED_BED" -g "\$sid" \\
                                   "\${ffl[@]}" \\
                                   -o "\$LOGDIR/mapped_\${stem}.bed" \\
                 ) > "\${rowfiles[\$stem]}" &
-                pids[\$stem]=\$!
+                pids[\$stem]=\$!; register_pid \$! \$THREADS
             fi
         done
     done
@@ -489,25 +520,27 @@ while IFS=\$'\t' read -r sid sci common; do
                     tool="maf.tui_fast\${btag}\${tt}"
                     stem="\${tool}_\${sid}"
                     rowfiles[\$stem]="\$LOGDIR/row_\${stem}.tsv"
+                    acquire_slot \$THREADS
                     ( export OMP_NUM_THREADS=\$THREADS; \\
                       run_cell "\$tool" "\$sid" "\$sci" "\$common" \\
                         "\$TAFFY" lift -i "\$UNI" -b "\$PREFIXED_BED" -g "\$sid" \\
                                       --fast --bin "\$B" \\
                                       -o "\$LOGDIR/mapped_\${stem}.bed" \\
                     ) > "\${rowfiles[\$stem]}" &
-                    pids[\$stem]=\$!
+                    pids[\$stem]=\$!; register_pid \$! \$THREADS
                 fi
                 if [[ -n "\$UNI_TAF" ]]; then
                     tool="taf.tui_fast\${btag}\${tt}"
                     stem="\${tool}_\${sid}"
                     rowfiles[\$stem]="\$LOGDIR/row_\${stem}.tsv"
+                    acquire_slot \$THREADS
                     ( export OMP_NUM_THREADS=\$THREADS; \\
                       run_cell "\$tool" "\$sid" "\$sci" "\$common" \\
                         "\$TAFFY" lift -i "\$UNI_TAF" -b "\$PREFIXED_BED" -g "\$sid" \\
                                       --fast --bin "\$B" \\
                                       -o "\$LOGDIR/mapped_\${stem}.bed" \\
                     ) > "\${rowfiles[\$stem]}" &
-                    pids[\$stem]=\$!
+                    pids[\$stem]=\$!; register_pid \$! \$THREADS
                 fi
             done
         done

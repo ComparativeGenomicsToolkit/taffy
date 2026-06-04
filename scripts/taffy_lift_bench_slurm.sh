@@ -579,6 +579,42 @@ run_cell() {
 # Per cell N_intervals is fixed across the run (constant from driver).
 N_INTERVALS_INNER=$N_INTERVALS
 
+# --- Concurrency throttle ----------------------------------------------
+# Bound the SUM of running-cell OMP_NUM_THREADS by T_TOTAL so we never
+# oversubscribe the SLURM allocation.  Without this, the wave loop's
+# bare \`( ... ) &\` fans 140+ cells out simultaneously and each one
+# fights the others for cores -- exactly the negative-thread-scaling
+# pattern we saw at -T 24 with --threadsPerCell 1,4,8.
+#
+# acquire_slot N : block until \`launched + N <= THREAD_BUDGET\`, then
+#                  increment \`launched\`.  Uses bash 4.3+ \`wait -n\`
+#                  to sleep efficiently on any child completion, then
+#                  reaps every tracked pid that's no longer alive.
+# register_pid PID N : after backgrounding a cell, record its pid +
+#                  thread count so the next acquire_slot can decrement
+#                  \`launched\` when the cell finishes.
+THREAD_BUDGET=\$T_TOTAL
+launched=0
+declare -A pid_threads
+
+acquire_slot() {
+    local threads=\$1
+    while (( launched + threads > THREAD_BUDGET )); do
+        wait -n 2>/dev/null || true   # block until any child finishes
+        local p
+        for p in "\${!pid_threads[@]}"; do
+            if ! kill -0 \$p 2>/dev/null; then
+                launched=\$(( launched - pid_threads[\$p] ))
+                unset pid_threads[\$p]
+            fi
+        done
+    done
+    launched=\$(( launched + threads ))
+}
+register_pid() {
+    pid_threads[\$1]=\$2
+}
+
 # --- Outer loop: size waves; inner = species x 3 tools in parallel. ----
 for N in "\${SIZES[@]}"; do
     BED_NATIVE="\$BEDS/intervals_\${N}.bed"
@@ -611,10 +647,11 @@ for N in "\${SIZES[@]}"; do
         # at least one paralog hit in a close target.  taffy lift and
         # halLiftover both emit one row per paralog x per gap-free run, so
         # -multiple aligns liftover's semantics with theirs.
+        acquire_slot 1
         ( run_cell liftover "\$sid" "\$sci" "\$common" "\$N" "\$TIME_BUDGET" \\
             "\$LIFTOVER" -minMatch=0 -multiple "\$BED_NATIVE" "\$chain" "\$out_lo" "\$unm_lo" \\
           ) > "\${rowfiles[\$stem_lo]}" &
-        pids[\$stem_lo]=\$!
+        pids[\$stem_lo]=\$!; register_pid \$! 1
 
         # ---- halLiftover cell ----
         # halLiftover's input bed uses chain-native chrom names (no
@@ -623,10 +660,11 @@ for N in "\${SIZES[@]}"; do
         stem_hl="halLiftover_\${sid}_\${N}"
         rowfiles[\$stem_hl]="\$LOGDIR/row_\${stem_hl}.tsv"
         out_hl="\$LOGDIR/mapped_\${stem_hl}.bed"
+        acquire_slot 1
         ( run_cell halLiftover "\$sid" "\$sci" "\$common" "\$N" "\$TIME_BUDGET" \\
             "\$HALLIFTOVER" "\$HAL" "\$REF" "\$BED_NATIVE" "\$sid" "\$out_hl" \\
           ) > "\${rowfiles[\$stem_hl]}" &
-        pids[\$stem_hl]=\$!
+        pids[\$stem_hl]=\$!; register_pid \$! 1
 
         # ---- taffy lift cells: one per (.tui source) x (--maxGap K) x (mode) -
         # Mode loop: 'default' = column-walk, 'fast' = chunk-walk (--fast).
@@ -658,25 +696,27 @@ for N in "\${SIZES[@]}"; do
                         tool="maf.tui\${gtag}\${ftag}\${tt}"
                         stem="\${tool}_\${sid}_\${N}"
                         rowfiles[\$stem]="\$LOGDIR/row_\${stem}.tsv"
+                        acquire_slot \$THREADS
                         ( export OMP_NUM_THREADS=\$THREADS; \\
                           run_cell "\$tool" "\$sid" "\$sci" "\$common" "\$N" "\$TIME_BUDGET" \\
                             "\$TAFFY" lift -i "\$UNI" -b "\$BED_PREFIXED" -g "\$sid" \\
                                           --maxGap "\$K" "\${ffl[@]}" \\
                                           -o "\$LOGDIR/mapped_\${stem}.bed" \\
                         ) > "\${rowfiles[\$stem]}" &
-                        pids[\$stem]=\$!
+                        pids[\$stem]=\$!; register_pid \$! \$THREADS
                     fi
                     if [[ -n "\$UNI_TAF" ]]; then
                         tool="taf.tui\${gtag}\${ftag}\${tt}"
                         stem="\${tool}_\${sid}_\${N}"
                         rowfiles[\$stem]="\$LOGDIR/row_\${stem}.tsv"
+                        acquire_slot \$THREADS
                         ( export OMP_NUM_THREADS=\$THREADS; \\
                           run_cell "\$tool" "\$sid" "\$sci" "\$common" "\$N" "\$TIME_BUDGET" \\
                             "\$TAFFY" lift -i "\$UNI_TAF" -b "\$BED_PREFIXED" -g "\$sid" \\
                                           --maxGap "\$K" "\${ffl[@]}" \\
                                           -o "\$LOGDIR/mapped_\${stem}.bed" \\
                         ) > "\${rowfiles[\$stem]}" &
-                        pids[\$stem]=\$!
+                        pids[\$stem]=\$!; register_pid \$! \$THREADS
                     fi
                 done
 
@@ -692,25 +732,27 @@ for N in "\${SIZES[@]}"; do
                                 tool="maf.tui\${ftag}\${btag}\${tt}"
                                 stem="\${tool}_\${sid}_\${N}"
                                 rowfiles[\$stem]="\$LOGDIR/row_\${stem}.tsv"
+                                acquire_slot \$THREADS
                                 ( export OMP_NUM_THREADS=\$THREADS; \\
                                   run_cell "\$tool" "\$sid" "\$sci" "\$common" "\$N" "\$TIME_BUDGET" \\
                                     "\$TAFFY" lift -i "\$UNI" -b "\$BED_PREFIXED" -g "\$sid" \\
                                                   --fast --bin "\$B" \\
                                                   -o "\$LOGDIR/mapped_\${stem}.bed" \\
                                 ) > "\${rowfiles[\$stem]}" &
-                                pids[\$stem]=\$!
+                                pids[\$stem]=\$!; register_pid \$! \$THREADS
                             fi
                             if [[ -n "\$UNI_TAF" ]]; then
                                 tool="taf.tui\${ftag}\${btag}\${tt}"
                                 stem="\${tool}_\${sid}_\${N}"
                                 rowfiles[\$stem]="\$LOGDIR/row_\${stem}.tsv"
+                                acquire_slot \$THREADS
                                 ( export OMP_NUM_THREADS=\$THREADS; \\
                                   run_cell "\$tool" "\$sid" "\$sci" "\$common" "\$N" "\$TIME_BUDGET" \\
                                     "\$TAFFY" lift -i "\$UNI_TAF" -b "\$BED_PREFIXED" -g "\$sid" \\
                                                   --fast --bin "\$B" \\
                                                   -o "\$LOGDIR/mapped_\${stem}.bed" \\
                                 ) > "\${rowfiles[\$stem]}" &
-                                pids[\$stem]=\$!
+                                pids[\$stem]=\$!; register_pid \$! \$THREADS
                             fi
                         done
                     done
@@ -725,6 +767,10 @@ for N in "\${SIZES[@]}"; do
         [[ -s "\${rowfiles[\$stem]}" ]] && cat "\${rowfiles[\$stem]}" >> "\$BENCH_TSV"
     done
     unset pids rowfiles
+    # Reset throttle state for the next wave (no live children remain
+    # at this point so any pid_threads entries are stale).
+    unset pid_threads; declare -A pid_threads
+    launched=0
 
     echo "=== wave N=\$N took \$((SECONDS - t_wave)) s ==="
 done
