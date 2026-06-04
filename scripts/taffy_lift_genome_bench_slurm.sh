@@ -36,6 +36,7 @@ UNI_TAF=""
 HAL=""
 TREE=""
 FAST_MODE=0                          # --fast: add chunk-walk variant cells alongside default
+NO_HAL=0                             # --no-hal: skip halLiftover cells (taffy-only run)
 BIN_SIZES_CSV=""                     # --bin CSV: add bedGraph variants per bin size; empty = off.
 THREADS_PER_CELL_CSV="1"             # --threadsPerCell CSV: OMP_NUM_THREADS values to bench; tool gets _t<N> suffix when N>1.
 OUTDIR=""
@@ -123,6 +124,9 @@ Optional:
   --no-stage-local
                 Skip the cp of .tui + HAL to \$TMPDIR.  Cells read from
                 the network paths instead.
+  --no-hal      Skip halLiftover cells (taffy-only run).  Also skips
+                the HAL staging step (saves ~29 min on a 965 GB HAL at
+                vertebrate scale).  -H is optional in this mode.
   --partition X --account X
   --no-wait     Submit and detach (default: driver blocks until SLURM done)
   --dry-run     Print sbatch; do not submit
@@ -138,6 +142,7 @@ while [[ $# -gt 0 ]]; do
         -u)             UNI="$2"; shift 2;;
         --uniTaf)       UNI_TAF="$2"; shift 2;;
         --fast)         FAST_MODE=1; shift;;
+        --no-hal)       NO_HAL=1; shift;;
         --bin)          BIN_SIZES_CSV="$2"; shift 2;;
         --threadsPerCell) THREADS_PER_CELL_CSV="$2"; shift 2;;
         -H)             HAL="$2"; shift 2;;
@@ -160,14 +165,19 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-for v in HAL TREE OUTDIR; do
+for v in TREE OUTDIR; do
     [[ -n "${!v}" ]] || { echo "ERROR: -$(echo $v | cut -c1) required" >&2; usage 1; }
 done
+if [[ "$NO_HAL" -eq 0 ]]; then
+    [[ -n "$HAL" ]] || { echo "ERROR: -H (HAL) required (or pass --no-hal)" >&2; usage 1; }
+fi
 [[ -n "$UNI" || -n "$UNI_TAF" ]] || {
     echo "ERROR: at least one of -u / --uniTaf must be set" >&2; usage 1;
 }
 [[ -n "$TAFFY"       ]] || { echo "ERROR: taffy not on PATH (set \$TAFFY)" >&2; exit 1; }
-[[ -n "$HALLIFTOVER" ]] || { echo "ERROR: halLiftover not on PATH (set \$HALLIFTOVER)" >&2; exit 1; }
+if [[ "$NO_HAL" -eq 0 ]]; then
+    [[ -n "$HALLIFTOVER" ]] || { echo "ERROR: halLiftover not on PATH (set \$HALLIFTOVER, or pass --no-hal)" >&2; exit 1; }
+fi
 if [[ -n "$UNI" ]]; then
     [[ -f "$UNI"        ]] || { echo "ERROR: $UNI not found" >&2; exit 1; }
     [[ -f "${UNI}.tui"  ]] || { echo "ERROR: $UNI has no .tui sibling" >&2; exit 1; }
@@ -176,7 +186,9 @@ if [[ -n "$UNI_TAF" ]]; then
     [[ -f "$UNI_TAF"        ]] || { echo "ERROR: $UNI_TAF not found" >&2; exit 1; }
     [[ -f "${UNI_TAF}.tui"  ]] || { echo "ERROR: $UNI_TAF has no .tui sibling" >&2; exit 1; }
 fi
-[[ -f "$HAL"         ]] || { echo "ERROR: $HAL not found" >&2; exit 1; }
+if [[ "$NO_HAL" -eq 0 ]]; then
+    [[ -f "$HAL"     ]] || { echo "ERROR: $HAL not found" >&2; exit 1; }
+fi
 [[ -f "$TREE"        ]] || { echo "ERROR: $TREE not found" >&2; exit 1; }
 
 mkdir -p "$OUTDIR" "$OUTDIR/logs" "$OUTDIR/beds"
@@ -245,7 +257,7 @@ N_TPC=${#THREADS_PER_CELL_ARR[@]}
 
 echo ">> output dir:    $OUTDIR"
 echo ">> taffy:         $TAFFY"
-echo ">> halLiftover:   $HALLIFTOVER"
+echo ">> halLiftover:   $([[ "$NO_HAL" -eq 1 ]] && echo "(skipped via --no-hal)" || echo "$HALLIFTOVER")"
 echo ">> uni:           $UNI  (using \$UNI.tui only)"
 echo ">> hal:           $HAL"
 echo ">> tree:          $TREE"
@@ -294,6 +306,7 @@ TREE="$TREE"     # for plot.py: divergence-from-ref x-axis
 TIME_BUDGET=$TIME_BUDGET
 STAGE_LOCAL=$STAGE_LOCAL
 FAST_MODE=$FAST_MODE
+NO_HAL=$NO_HAL
 T_TOTAL=$T_TOTAL
 BIN_SIZES=( ${BIN_SIZES_ARR[*]:-} )
 THREADS_PER_CELL=( ${THREADS_PER_CELL_ARR[*]} )
@@ -354,8 +367,11 @@ if [[ "\$STAGE_LOCAL" -eq 1 ]]; then
         UNI_TAF="\$LOCAL_UNI_TAF"
     fi
 
-    # HAL for halLiftover
-    HAL=\$(stage_one "\$HAL")
+    # HAL for halLiftover -- skipped when --no-hal (saves ~29 min on
+    # the 965 GB .hal at vertebrate scale).
+    if [[ "\$NO_HAL" -eq 0 ]]; then
+        HAL=\$(stage_one "\$HAL")
+    fi
 
     echo "stage: all inputs staged to \$STAGE_DIR" >&2
 fi
@@ -447,17 +463,19 @@ declare -A pids rowfiles
 while IFS=\$'\t' read -r sid sci common; do
     [[ -n "\$sid" ]] || continue
 
-    # ---- halLiftover cell ----
-    # halLiftover HAL SRC_GENOME SRC_BED TGT_GENOME TGT_BED
-    # Native (un-prefixed) bed -- halLiftover wants bare chrom names.
-    stem_hl="halLiftover_\${sid}"
-    rowfiles[\$stem_hl]="\$LOGDIR/row_\${stem_hl}.tsv"
-    acquire_slot 1
-    ( run_cell halLiftover "\$sid" "\$sci" "\$common" \\
-        "\$HALLIFTOVER" "\$HAL" "\$REF" "\$NATIVE_BED" "\$sid" \\
-        "\$LOGDIR/mapped_\${stem_hl}.bed" \\
-      ) > "\${rowfiles[\$stem_hl]}" &
-    pids[\$stem_hl]=\$!; register_pid \$! 1
+    # ---- halLiftover cell ---- (skipped when --no-hal)
+    if [[ "\$NO_HAL" -eq 0 ]]; then
+        # halLiftover HAL SRC_GENOME SRC_BED TGT_GENOME TGT_BED
+        # Native (un-prefixed) bed -- halLiftover wants bare chrom names.
+        stem_hl="halLiftover_\${sid}"
+        rowfiles[\$stem_hl]="\$LOGDIR/row_\${stem_hl}.tsv"
+        acquire_slot 1
+        ( run_cell halLiftover "\$sid" "\$sci" "\$common" \\
+            "\$HALLIFTOVER" "\$HAL" "\$REF" "\$NATIVE_BED" "\$sid" \\
+            "\$LOGDIR/mapped_\${stem_hl}.bed" \\
+          ) > "\${rowfiles[\$stem_hl]}" &
+        pids[\$stem_hl]=\$!; register_pid \$! 1
+    fi
 
     # ---- taffy lift cells: one per (.tui source) x (mode) ----
     # Mode loop: 'default' = column-walk (existing); 'fast' = chunk-walk

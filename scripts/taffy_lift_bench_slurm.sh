@@ -53,6 +53,7 @@ T_TOTAL=24                          # cpus-per-task; one core per concurrent cel
 REF="GCF_016700215.2"               # chicken
 MAX_GAPS_CSV=""                     # --maxGap CSV: e.g. "0,1000,10000".  Empty = single taffy cell (K=0).
 FAST_MODE=0                         # --fast: add a --fast variant cell next to each taffy cell.
+NO_HAL=0                            # --no-hal: skip halLiftover cells (taffy + liftOver only)
 BIN_SIZES_CSV=""                    # --bin CSV: e.g. "100000,1000000".  Empty = no binned variants.
                                     # Non-empty implies --fast (the binned mode requires it at the taffy CLI).
 THREADS_PER_CELL_CSV="1"            # OMP_NUM_THREADS values for taffy cells, comma-separated.
@@ -159,6 +160,8 @@ Optional:
   --no-stage-local
                 Skip the copy of .tui + chains to \$TMPDIR (read straight
                 from the network paths).  Only sensible for small tests.
+  --no-hal      Skip halLiftover cells (taffy + liftOver only).  Also
+                skips the HAL staging step.  -H becomes optional.
   --partition X --account X
   --no-wait     Submit and detach (default: driver blocks until SLURM done)
   --dry-run     Print sbatch; do not submit
@@ -185,6 +188,7 @@ while [[ $# -gt 0 ]]; do
         -L)             SPECIES_FILE="$2"; shift 2;;
         --maxGap)       MAX_GAPS_CSV="$2"; shift 2;;
         --fast)         FAST_MODE=1; shift;;
+        --no-hal)       NO_HAL=1; shift;;
         --bin)          BIN_SIZES_CSV="$2"; shift 2;;
         --threadsPerCell) THREADS_PER_CELL_CSV="$2"; shift 2;;
         --timeBudget)   TIME_BUDGET="$2"; shift 2;;
@@ -201,15 +205,20 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-for v in HAL CHAINS_DIR TREE OUTDIR; do
+for v in CHAINS_DIR TREE OUTDIR; do
     [[ -n "${!v}" ]] || { echo "ERROR: -$(echo $v | cut -c1) required" >&2; usage 1; }
 done
+if [[ "$NO_HAL" -eq 0 ]]; then
+    [[ -n "$HAL" ]] || { echo "ERROR: -H (HAL) required (or pass --no-hal)" >&2; usage 1; }
+fi
 [[ -n "$UNI" || -n "$UNI_TAF" ]] || {
     echo "ERROR: at least one of -u / --uniTaf must be set" >&2; usage 1;
 }
 [[ -n "$TAFFY"       ]] || { echo "ERROR: taffy not on PATH (set \$TAFFY)" >&2; exit 1; }
 [[ -n "$LIFTOVER"    ]] || { echo "ERROR: liftOver not on PATH (set \$LIFTOVER)" >&2; exit 1; }
-[[ -n "$HALLIFTOVER" ]] || { echo "ERROR: halLiftover not on PATH (set \$HALLIFTOVER)" >&2; exit 1; }
+if [[ "$NO_HAL" -eq 0 ]]; then
+    [[ -n "$HALLIFTOVER" ]] || { echo "ERROR: halLiftover not on PATH (set \$HALLIFTOVER, or pass --no-hal)" >&2; exit 1; }
+fi
 if [[ -n "$UNI" ]]; then
     [[ -f "$UNI"        ]] || { echo "ERROR: $UNI not found" >&2; exit 1; }
     [[ -f "${UNI}.tui"  ]] || { echo "ERROR: $UNI has no .tui sibling" >&2; exit 1; }
@@ -218,7 +227,9 @@ if [[ -n "$UNI_TAF" ]]; then
     [[ -f "$UNI_TAF"        ]] || { echo "ERROR: $UNI_TAF not found" >&2; exit 1; }
     [[ -f "${UNI_TAF}.tui"  ]] || { echo "ERROR: $UNI_TAF has no .tui sibling" >&2; exit 1; }
 fi
-[[ -f "$HAL"         ]] || { echo "ERROR: $HAL not found" >&2; exit 1; }
+if [[ "$NO_HAL" -eq 0 ]]; then
+    [[ -f "$HAL"     ]] || { echo "ERROR: $HAL not found" >&2; exit 1; }
+fi
 [[ -d "$CHAINS_DIR" ]] || { echo "ERROR: $CHAINS_DIR not found" >&2; exit 1; }
 [[ -f "$TREE"     ]] || { echo "ERROR: $TREE not found" >&2; exit 1; }
 
@@ -397,7 +408,7 @@ PY
 echo ">> output dir:    $OUTDIR"
 echo ">> taffy:         $TAFFY"
 echo ">> liftOver:      $LIFTOVER"
-echo ">> halLiftover:   $HALLIFTOVER"
+echo ">> halLiftover:   $([[ "$NO_HAL" -eq 1 ]] && echo "(skipped via --no-hal)" || echo "$HALLIFTOVER")"
 echo ">> uni:           $UNI  (using \$UNI.tui only)"
 echo ">> hal:           $HAL"
 echo ">> chains dir:    $CHAINS_DIR"
@@ -448,6 +459,7 @@ SPECIES_TSV="$OUTDIR/species.tsv"
 SIZES=( ${SIZE_ARR[*]} )
 MAX_GAPS=( ${MAX_GAPS_ARR[*]} )
 FAST_MODE=$FAST_MODE
+NO_HAL=$NO_HAL
 BIN_SIZES=( ${BIN_SIZES_ARR[*]:-} )
 THREADS_PER_CELL=( ${THREADS_PER_CELL_ARR[*]} )
 
@@ -502,7 +514,9 @@ if [[ "\$STAGE_LOCAL" -eq 1 ]]; then
     fi
 
     # HAL file for halLiftover.
-    HAL=\$(stage_one "\$HAL")
+    if [[ "\$NO_HAL" -eq 0 ]]; then
+        HAL=\$(stage_one "\$HAL")
+    fi
 
     # Stage every chain in the panel into a local mirror directory.
     LOCAL_CHAINS="\$STAGE_DIR/chains"
@@ -653,18 +667,20 @@ for N in "\${SIZES[@]}"; do
           ) > "\${rowfiles[\$stem_lo]}" &
         pids[\$stem_lo]=\$!; register_pid \$! 1
 
-        # ---- halLiftover cell ----
-        # halLiftover's input bed uses chain-native chrom names (no
-        # <REF>. prefix), same as UCSC liftOver.  Argument order:
-        # halLiftover HAL SRC_GENOME SRC_BED TGT_GENOME TGT_BED.
-        stem_hl="halLiftover_\${sid}_\${N}"
-        rowfiles[\$stem_hl]="\$LOGDIR/row_\${stem_hl}.tsv"
-        out_hl="\$LOGDIR/mapped_\${stem_hl}.bed"
-        acquire_slot 1
-        ( run_cell halLiftover "\$sid" "\$sci" "\$common" "\$N" "\$TIME_BUDGET" \\
-            "\$HALLIFTOVER" "\$HAL" "\$REF" "\$BED_NATIVE" "\$sid" "\$out_hl" \\
-          ) > "\${rowfiles[\$stem_hl]}" &
-        pids[\$stem_hl]=\$!; register_pid \$! 1
+        # ---- halLiftover cell ---- (skipped when --no-hal)
+        if [[ "\$NO_HAL" -eq 0 ]]; then
+            # halLiftover's input bed uses chain-native chrom names (no
+            # <REF>. prefix), same as UCSC liftOver.  Argument order:
+            # halLiftover HAL SRC_GENOME SRC_BED TGT_GENOME TGT_BED.
+            stem_hl="halLiftover_\${sid}_\${N}"
+            rowfiles[\$stem_hl]="\$LOGDIR/row_\${stem_hl}.tsv"
+            out_hl="\$LOGDIR/mapped_\${stem_hl}.bed"
+            acquire_slot 1
+            ( run_cell halLiftover "\$sid" "\$sci" "\$common" "\$N" "\$TIME_BUDGET" \\
+                "\$HALLIFTOVER" "\$HAL" "\$REF" "\$BED_NATIVE" "\$sid" "\$out_hl" \\
+              ) > "\${rowfiles[\$stem_hl]}" &
+            pids[\$stem_hl]=\$!; register_pid \$! 1
+        fi
 
         # ---- taffy lift cells: one per (.tui source) x (--maxGap K) x (mode) -
         # Mode loop: 'default' = column-walk, 'fast' = chunk-walk (--fast).
