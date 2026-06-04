@@ -36,6 +36,7 @@ struct Args {
     int doDupes = 0;
     int verbose = 0;
     std::string qChrom;       // "" = unfiltered
+    taffy_dup_type_t dupMode = TAFFY_QUERY_AND_TARGET_DUPS;
 };
 
 static void usage(const char *prog) {
@@ -59,6 +60,15 @@ static int parse_args(int argc, char **argv, Args *a) {
         else if (opt == "--filterByChrom") {
             if (i + 1 >= argc) { fprintf(stderr, "--filterByChrom needs an argument\n"); return -1; }
             a->qChrom = argv[i + 1]; i += 2;
+        }
+        else if (opt == "--dupMode") {
+            if (i + 1 >= argc) { fprintf(stderr, "--dupMode needs an argument (noDups|queryDups|all)\n"); return -1; }
+            std::string m = argv[i + 1];
+            if (m == "noDups")      a->dupMode = TAFFY_NO_DUPS;
+            else if (m == "queryDups") a->dupMode = TAFFY_QUERY_DUPS;
+            else if (m == "all")    a->dupMode = TAFFY_QUERY_AND_TARGET_DUPS;
+            else { fprintf(stderr, "--dupMode must be noDups|queryDups|all\n"); return -1; }
+            i += 2;
         }
         else if (opt == "-h" || opt == "--help") { usage(argv[0]); return 1; }
         else { fprintf(stderr, "unknown option: %s\n", opt.c_str()); return -1; }
@@ -128,7 +138,7 @@ int main(int argc, char **argv) {
             args.tChrom.c_str(), args.tStart, args.tEnd,
             /*tReversed=*/0,
             /*seqMode=*/TAFFY_NO_SEQUENCES,
-            /*dupMode=*/TAFFY_QUERY_AND_TARGET_DUPS,
+            /*dupMode=*/args.dupMode,
             /*mapBackAdjacencies=*/0,
             /*coalescenceLimitName=*/nullptr,
             &errStr);
@@ -138,7 +148,7 @@ int main(int argc, char **argv) {
             args.tChrom.c_str(), args.tStart, args.tEnd,
             /*tReversed=*/0,
             /*seqMode=*/TAFFY_NO_SEQUENCES,
-            /*dupMode=*/TAFFY_QUERY_AND_TARGET_DUPS,
+            /*dupMode=*/args.dupMode,
             /*mapBackAdjacencies=*/0,
             args.qChrom.c_str(),
             /*coalescenceLimitName=*/nullptr,
@@ -156,7 +166,21 @@ int main(int argc, char **argv) {
                b->qChrom, (long) b->tStart, (long) b->qStart, (long) b->size, b->strand);
         n++;
     }
-    if (args.verbose) fprintf(stderr, ">> emitted %ld blocks\n", (long) n);
+    if (args.verbose) fprintf(stderr, ">> emitted %ld mapped blocks\n", (long) n);
+
+    if (args.doDupes) {
+        int64_t nd = 0, nr = 0;
+        printf("--- targetDupeBlocks ---\n");
+        for (struct taffy_target_dupe_list_t *d = res->targetDupeBlocks; d; d = d->next) {
+            nd++;
+            for (struct taffy_target_range_t *r = d->tRange; r; r = r->next) {
+                printf("dupe id=%ld\tqChrom=%s\ttStart=%ld\tsize=%ld\n",
+                       (long) d->id, d->qChrom, (long) r->tStart, (long) r->size);
+                nr++;
+            }
+        }
+        if (args.verbose) fprintf(stderr, ">> emitted %ld dupe entries (%ld ranges)\n", (long) nd, (long) nr);
+    }
 
     taffyFreeBlockResults(res);
     if (taffyClose(h, &errStr) != 0) die("taffyClose", errStr);

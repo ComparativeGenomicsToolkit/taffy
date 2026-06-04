@@ -13,12 +13,14 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <vector>
 
 #include "taffyBlockViz.h"
 
 extern "C" {
+#include "chain.h"
 #include "sonLib.h"
 #include "taf.h"
 #include "tui.h"
@@ -297,54 +299,70 @@ extern "C" struct taffy_chromosome_t *taffyGetChroms(int h, const char *species,
 /* ------------------------------------------------------------------ */
 
 struct BlockCtx {
-    struct taffy_block_t *head = nullptr;
-    struct taffy_block_t *tail = nullptr;
+    // Buffer one taffy_block_t plus a parallel TaffyAln per visited run.
+    // Linking into the output list happens after taffy_chain has assigned
+    // chain IDs and we know how to route each block per the dupMode.
+    std::vector<struct taffy_block_t *> blocks;
+    std::vector<TaffyAln>                alns;
+    // Intern owned strings (qChroms) so TaffyAln const char * stays
+    // valid through the chain call.  std::set guarantees that
+    // references to elements aren't invalidated by future insertions,
+    // so the c_str() pointer we stash in TaffyAln.t_name is stable.
+    std::set<std::string>                qchrom_interns;
+    std::string                          tFullName;
     int64_t c_lo = 0;             // column-start of current interval
     int64_t tpos_at_c_lo = 0;     // tSpecies position at c_lo
     const char *qChromFilter = nullptr;  // optional filter
 };
 
-// Visitor: clip the q run to the active column interval, compute the
-// tSpecies position from the column offset, emit a taffy_block_t.
+// Visitor: clip the q run, compute (tStart, qStart, size, strand),
+// and buffer both a taffy_block_t (for the eventual output linked list)
+// and a TaffyAln (for the chain call after the visit loop).
 static void block_visit_cb(const TuiRun *r, void *user) {
     BlockCtx *cx = (BlockCtx *) user;
     if (cx->qChromFilter && strcmp(r->seq, cx->qChromFilter) != 0) return;
 
-    // Clip the run to [c_lo, c_lo + interval_size) -- visit_runs already
-    // walks runs within an interval, but we re-clip defensively against
-    // the interval-start so the per-block tpos calc is correct.
     int64_t r_end = r->g_start + r->length;
-    // The visitor is invoked with cx->c_lo / c_hi values set per
-    // interval; the interval bounds are stamped on cx by the caller.
-    // (See taffyGetBlocksInTargetRange_filterByChrom below.)
     int64_t cs = r->g_start > cx->c_lo ? r->g_start : cx->c_lo;
-    int64_t ce = r_end; // upper bound applied by caller via visit_runs
+    int64_t ce = r_end;
 
-    // Map tSpecies pos at column `cs`: linear within an interval, since
+    // tSpecies position at column `cs`: linear within an interval, since
     // an interval is a contiguous run of tSpecies bases.
     int64_t tStart = cx->tpos_at_c_lo + (cs - cx->c_lo);
 
-    // Compute qStart honouring strand (mirrors taf_lift.c
-    // chunk_lift_visit_cb).
+    // Compute qStart honouring strand (mirrors taf_lift.c chunk_lift_visit_cb).
     int64_t qStart;
     if (r->strand) {
         qStart = r->t_start + (cs - r->g_start);
     } else {
         qStart = r->t_start + r->length - (ce - r->g_start);
     }
+    int64_t size = ce - cs;
 
     struct taffy_block_t *b = (struct taffy_block_t *) st_calloc(1, sizeof(*b));
     b->qChrom = strdup(r->seq);
     b->tStart = tStart;
     b->qStart = qStart;
-    b->size   = ce - cs;
+    b->size   = size;
     b->strand = r->strand ? '+' : '-';
-    b->qSequence = nullptr;   // seqMode unsupported in initial cut
-    b->tSequence = nullptr;
+    cx->blocks.push_back(b);
 
-    if (!cx->head) cx->head = b;
-    if (cx->tail) cx->tail->next = b;
-    cx->tail = b;
+    // Intern qChrom; set::insert returns iterator stable across future
+    // inserts so .c_str() remains valid for the rest of the visit.
+    auto ins = cx->qchrom_interns.emplace(r->seq);
+    const char *qc_interned = ins.first->c_str();
+
+    TaffyAln a = {0};
+    a.q_name  = cx->tFullName.c_str();        // single tSpecies.tChrom for whole query
+    a.q_start = tStart;
+    a.q_end   = tStart + size;
+    a.t_name  = qc_interned;
+    a.t_start = qStart;
+    a.t_end   = qStart + size;
+    a.strand  = r->strand ? +1 : -1;
+    a.score   = size;
+    a.user    = (void *) b;
+    cx->alns.push_back(a);
 }
 
 static struct taffy_block_results_t *
@@ -359,7 +377,10 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
     if (mapBackAdjacencies != 0) { set_err(errStr, "taffyBlockViz: mapBackAdjacencies not supported"); return nullptr; }
     if (coalescenceLimitName) { set_err(errStr, "taffyBlockViz: coalescenceLimitName not supported"); return nullptr; }
     if (seqMode != TAFFY_NO_SEQUENCES) { set_err(errStr, "taffyBlockViz: seqMode != NO_SEQUENCES not supported"); return nullptr; }
-    if (dupMode != TAFFY_QUERY_AND_TARGET_DUPS) { set_err(errStr, "taffyBlockViz: dupMode != QUERY_AND_TARGET_DUPS not supported"); return nullptr; }
+    if (dupMode != TAFFY_NO_DUPS && dupMode != TAFFY_QUERY_DUPS && dupMode != TAFFY_QUERY_AND_TARGET_DUPS) {
+        set_err(errStr, "taffyBlockViz: unknown dupMode");
+        return nullptr;
+    }
     if (!qSpecies || !tSpecies || !tChrom) { set_err(errStr, "taffyBlockViz: missing required arg"); return nullptr; }
     if (tEnd < 0 || (tEnd > 0 && tEnd <= tStart)) { set_err(errStr, "taffyBlockViz: bad tStart/tEnd"); return nullptr; }
 
@@ -395,9 +416,11 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
         return res;   // empty result, not an error
     }
 
-    // Walk each interval; emit blocks per qSpecies run that overlaps.
+    // Walk each interval; buffer one taffy_block_t + TaffyAln per visited
+    // qSpecies run.  Output linking happens AFTER chaining.
     BlockCtx cx;
     cx.qChromFilter = qChrom;
+    cx.tFullName    = tFullName;  // stable interned string for chain partition
     int64_t cum_tpos = tStart;
     for (int64_t k = 0; k < n_iv; k++) {
         cx.c_lo = iv[k].start;
@@ -409,10 +432,91 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
     free(iv);
 
     struct taffy_block_results_t *res = (struct taffy_block_results_t *) st_calloc(1, sizeof(*res));
-    res->mappedBlocks = cx.head;
-    // targetDupeBlocks not split out in initial cut -- paralogs land
-    // in mappedBlocks (the QUERY_AND_TARGET_DUPS mode by default).
-    res->targetDupeBlocks = nullptr;
+    int64_t n = (int64_t) cx.alns.size();
+    if (n == 0) return res;  // empty query, nothing to chain
+
+    // Run the chainer.  Tuning rationale: browser snake tracks want to
+    // join collinear runs aggressively (one snake per real alignment),
+    // and the universal MAF's runs are gap-free by construction so the
+    // q_gap + t_gap between adjacent runs of the same alignment is
+    // usually small.  chain_open=0 + chain_extend=1 + 10 Mb max_gap
+    // chains anything in the same syntenic block while still keeping
+    // truly distant paralogs in their own chain.
+    TaffyChainCostParams cost = { 0, 1 };
+    std::vector<int64_t> chain_id((size_t) n, 0);
+    TaffyChainInfo *chains = nullptr;
+    int64_t n_chains = 0;
+    taffy_chain(cx.alns.data(), n,
+                taffy_chain_default_gap_cost, &cost,
+                /*max_gap_length=*/ 10 * 1000 * 1000,
+                chain_id.data(), &chains, &n_chains);
+
+    // Primary chain = chains[0] (sorted desc by score).
+    int64_t primary_id = (n_chains > 0) ? chains[0].id : 0;
+
+    // Walk alns (post-chain order) and route blocks per dupMode.  Each
+    // aln's `user` field is the taffy_block_t* we created in the
+    // visitor; chain_id[i] is its chain.
+    struct taffy_block_t *mapped_head = nullptr, *mapped_tail = nullptr;
+    auto append_mapped = [&](struct taffy_block_t *b) {
+        b->next = nullptr;
+        if (!mapped_head) mapped_head = b;
+        if (mapped_tail) mapped_tail->next = b;
+        mapped_tail = b;
+    };
+    // For QUERY_AND_TARGET_DUPS: collect non-primary alns grouped by
+    // chain_id so each non-primary chain becomes one dupe-list entry.
+    std::map<int64_t, taffy_target_dupe_list_t *> dupe_by_chain;
+
+    for (int64_t i = 0; i < n; i++) {
+        struct taffy_block_t *b = (struct taffy_block_t *) cx.alns[i].user;
+        int64_t cid = chain_id[i];
+        bool is_primary = (cid == primary_id);
+
+        if (dupMode == TAFFY_NO_DUPS && !is_primary) {
+            // Drop non-primary blocks entirely.
+            free(b->qChrom);
+            free(b);
+            continue;
+        }
+
+        // Always append to mappedBlocks under QUERY_DUPS / QUERY_AND_TARGET_DUPS.
+        append_mapped(b);
+
+        if (dupMode == TAFFY_QUERY_AND_TARGET_DUPS && !is_primary) {
+            // Also build a dupe-list entry for this non-primary chain.
+            auto it = dupe_by_chain.find(cid);
+            if (it == dupe_by_chain.end()) {
+                taffy_target_dupe_list_t *d = (taffy_target_dupe_list_t *)
+                    st_calloc(1, sizeof(*d));
+                d->id     = cid;
+                d->qChrom = strdup(b->qChrom);  // own a copy; mappedBlocks owns its own
+                d->tRange = nullptr;
+                dupe_by_chain[cid] = d;
+                it = dupe_by_chain.find(cid);
+            }
+            // Append tRange node (in source-coord order; aln list is
+            // already q_start-sorted within the chain by the sweep).
+            taffy_target_range_t *r = (taffy_target_range_t *)
+                st_calloc(1, sizeof(*r));
+            r->tStart = b->tStart;
+            r->size   = b->size;
+            r->next   = it->second->tRange;   // prepend (we'll reverse below if needed)
+            it->second->tRange = r;
+        }
+    }
+
+    // Link dupe entries into a single linked list.
+    struct taffy_target_dupe_list_t *dupe_head = nullptr, *dupe_tail = nullptr;
+    for (auto &kv : dupe_by_chain) {
+        if (!dupe_head) dupe_head = kv.second;
+        if (dupe_tail) dupe_tail->next = kv.second;
+        dupe_tail = kv.second;
+    }
+
+    res->mappedBlocks     = mapped_head;
+    res->targetDupeBlocks = dupe_head;
+    free(chains);
     return res;
 }
 
