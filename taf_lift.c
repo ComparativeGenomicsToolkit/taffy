@@ -34,6 +34,7 @@ static void usage(void) {
     fprintf(stderr, "-G --maxGap    [INT]       : (bed mode) Merge two adjacent target rows when the gap between them is <= INT bp.  Default 0 (touch / overlap only).  Max 2^60.  The merged interval spans the un-lifted gap region (no UCSC liftOver / halLiftover analogue).  Downstream tools that count target coverage will overcount by up to INT * number-of-merges.\n");
     fprintf(stderr, "-S --minSize   [INT]       : (bed mode) Drop output rows whose target length is < INT bp.  Default 1 (no filter).  Applied AFTER --maxGap so small fragments that would coalesce don't get filtered prematurely; reported in the summary log as 'dropped < --minSize'.\n");
     fprintf(stderr, "-F --fast                  : (bed mode) Use chunk-iteration lift instead of per-column open/close.  O(runs_in_range) vs O(columns_in_range); 10-1000x faster on chromosome-scale queries.  Output is equivalent modulo merge order (use with --maxGap N for browser-style block collapse).\n");
+    fprintf(stderr, "-B --bin       [INT]       : (bed mode, requires --fast) Emit coarse-grained bedGraph: for every N-bp window on the TARGET genome, the value is the total source-bp lifted into that window.  Output is `seq<TAB>bin_start<TAB>bin_end<TAB>bp_covered`, sorted by (seq, bin).  Skips the per-row merge + filter machinery -- mutually exclusive with --maxGap / --minSize.  Intended for browser chromosome-scale tracks where per-base accuracy isn't needed.\n");
     fprintf(stderr, "-l --logLevel  : Set log level\n");
     fprintf(stderr, "-h --help      : Print this help\n");
 }
@@ -785,6 +786,17 @@ typedef struct {
     const char *name;
     const char *score;
     int64_t    *n_out_p;
+    // --bin coarse-grained bedGraph mode.  When bin_size > 0 the visitor
+    // does NOT touch pending[]/pending_push at all -- it accumulates a
+    // flat array of (target_seq, bin_idx, bp) tuples here, which is
+    // sorted, merged, and emitted as bedGraph at end-of-lift.
+    int64_t     bin_size;
+    struct BinEntry {
+        const char *seq;   // borrowed from gl->seq_names; pointer-stable per gl
+        int64_t     bin;   // bin_idx = target_pos / bin_size
+        int64_t     bp;    // source bp contributed to this bin by one clipped run
+    } *bins;
+    size_t      n_bins, cap_bins;
 } ChunkLiftCtx;
 
 // Visitor callback: clip the run to [c_lo, c_hi), map to target coords
@@ -810,6 +822,31 @@ static void chunk_lift_visit_cb(const TuiRun *r, void *user) {
         t_out_start = r->t_start + r->length - (ce - r->g_start);
         t_out_end   = r->t_start + r->length - (cs - r->g_start);
     }
+    // --bin coarse-grained bedGraph path: accumulate per-(target_seq, bin)
+    // bp directly, skip the pending_push / open-merge machinery entirely.
+    // Strand is irrelevant for bp coverage so we ignore emit_strand here.
+    if (cx->bin_size > 0) {
+        int64_t bs = cx->bin_size;
+        int64_t bin_lo = t_out_start / bs;
+        int64_t bin_hi = (t_out_end - 1) / bs;
+        for (int64_t b = bin_lo; b <= bin_hi; b++) {
+            int64_t b_start = b * bs;
+            int64_t b_end   = b_start + bs;
+            int64_t cs2 = (t_out_start > b_start) ? t_out_start : b_start;
+            int64_t ce2 = (t_out_end   < b_end)   ? t_out_end   : b_end;
+            int64_t bp = ce2 - cs2;
+            if (bp <= 0) continue;
+            if (cx->n_bins == cx->cap_bins) {
+                cx->cap_bins = cx->cap_bins ? cx->cap_bins * 2 : 4096;
+                cx->bins = st_realloc(cx->bins, cx->cap_bins * sizeof(*cx->bins));
+            }
+            cx->bins[cx->n_bins].seq = r->seq;
+            cx->bins[cx->n_bins].bin = b;
+            cx->bins[cx->n_bins].bp  = bp;
+            cx->n_bins++;
+        }
+        return;
+    }
     char out_strand = 0;
     if (cx->emit_strand) {
         int sign = (r->strand ? +1 : -1) * cx->input_strand_sign;
@@ -823,9 +860,21 @@ static void chunk_lift_visit_cb(const TuiRun *r, void *user) {
                                cx->name, cx->score, cx->n_out_p);
 }
 
+// Comparator for the bin-accumulator array: sort by (seq name lexically,
+// bin index ascending).  seq names are interned in gl->seq_names so
+// pointer-equal seq strings compare equal under strcmp too -- the
+// post-sort merge can use either pointer or strcmp equality.
+static int bin_entry_cmp(const void *a, const void *b) {
+    const struct BinEntry *x = a, *y = b;
+    int c = strcmp(x->seq, y->seq);
+    if (c) return c;
+    return (x->bin < y->bin) ? -1 : (x->bin > y->bin) ? 1 : 0;
+}
+
 static int bed_lift_chunk_impl(Tui *tui, TuiGenomeLift *gl,
                                const char *bed_file, const char *output_file,
-                               int64_t max_gap, int64_t min_size) {
+                               int64_t max_gap, int64_t min_size,
+                               int64_t bin_size) {
     FILE *bf = fopen(bed_file, "r");
     if (bf == NULL) {
         fprintf(stderr, "ERROR: failed to open bed %s: %s\n", bed_file, strerror(errno));
@@ -847,6 +896,7 @@ static int bed_lift_chunk_impl(Tui *tui, TuiGenomeLift *gl,
     cx.fh = fh;
     cx.max_gap = max_gap;
     cx.min_size = min_size;
+    cx.bin_size = bin_size;
     cx.n_out_p = &n_out;
 
     ssize_t got;
@@ -886,11 +936,12 @@ static int bed_lift_chunk_impl(Tui *tui, TuiGenomeLift *gl,
             n_unmapped++;
             continue;
         }
-        if (cx.pending_cap == 0) {
+        if (cx.bin_size == 0 && cx.pending_cap == 0) {
             cx.pending_cap = BED_MAX_OPEN;
             cx.pending = st_calloc((size_t)cx.pending_cap, sizeof(PendingBed));
         }
-        for (int s = 0; s < cx.pending_cap; s++) cx.pending[s].active = 0;
+        if (cx.bin_size == 0)
+            for (int s = 0; s < cx.pending_cap; s++) cx.pending[s].active = 0;
 
         for (int64_t k = 0; k < n_iv; k++) {
             cx.c_lo = iv[k].start;
@@ -898,21 +949,61 @@ static int bed_lift_chunk_impl(Tui *tui, TuiGenomeLift *gl,
             tui_genome_lift_visit_runs(gl, cx.c_lo, cx.c_hi,
                                        chunk_lift_visit_cb, &cx);
         }
-        flush_pending(cx.fh, cx.pending, cx.pending_cap, min_size,
-                      name, score, &n_out, &n_filtered);
-        cx.pending_touch = 0;
+        if (cx.bin_size == 0) {
+            // BED-row mode: flush this record's open intervals.  Bin mode
+            // accumulates ACROSS bed records and flushes once at the end.
+            flush_pending(cx.fh, cx.pending, cx.pending_cap, min_size,
+                          name, score, &n_out, &n_filtered);
+            cx.pending_touch = 0;
+        }
         free(iv);
     }
+
+    if (cx.bin_size > 0) {
+        // bedGraph emit: sort all bin entries by (seq, bin), then merge-
+        // and-emit consecutive same-key entries.  All BED input records
+        // contribute to one combined bedGraph (lift "this whole region of
+        // source -> coverage on target"), so output is *across* records,
+        // not per-record.
+        qsort(cx.bins, cx.n_bins, sizeof(*cx.bins), bin_entry_cmp);
+        size_t i = 0;
+        while (i < cx.n_bins) {
+            const char *seq = cx.bins[i].seq;
+            int64_t bin = cx.bins[i].bin, bp_total = 0;
+            size_t j = i;
+            // Pointer equality is safe here: seq strings are interned in
+            // gl->seq_names, so equal strings (post-sort neighbours) point
+            // to the same buffer.  Falls back to strcmp implicitly via the
+            // sort -- if pointer-equal fails, the bin index also differs.
+            while (j < cx.n_bins && cx.bins[j].seq == seq && cx.bins[j].bin == bin) {
+                bp_total += cx.bins[j].bp;
+                j++;
+            }
+            fprintf(fh, "%s\t%" PRIi64 "\t%" PRIi64 "\t%" PRIi64 "\n",
+                    seq, bin * cx.bin_size, (bin + 1) * cx.bin_size, bp_total);
+            n_out++;
+            i = j;
+        }
+        free(cx.bins);
+    }
+
     free(cx.pending);
     free(line);
     fclose(bf);
     if (output_file) fclose(fh);
 
-    st_logInfo("BED lift (--fast): %" PRIi64 " input -> %" PRIi64 " output intervals "
-               "(%" PRIi64 " unmapped, %" PRIi64 " dropped < --minSize) "
-               "in %" PRIi64 " s\n",
-               n_in, n_out, n_unmapped, n_filtered,
-               (int64_t)(time(NULL) - t0));
+    if (cx.bin_size > 0) {
+        st_logInfo("BED lift (--fast --bin %" PRIi64 "): %" PRIi64 " input -> %" PRIi64 " bedGraph rows "
+                   "(%" PRIi64 " unmapped) in %" PRIi64 " s\n",
+                   cx.bin_size, n_in, n_out, n_unmapped,
+                   (int64_t)(time(NULL) - t0));
+    } else {
+        st_logInfo("BED lift (--fast): %" PRIi64 " input -> %" PRIi64 " output intervals "
+                   "(%" PRIi64 " unmapped, %" PRIi64 " dropped < --minSize) "
+                   "in %" PRIi64 " s\n",
+                   n_in, n_out, n_unmapped, n_filtered,
+                   (int64_t)(time(NULL) - t0));
+    }
     return 0;
 }
 
@@ -1175,6 +1266,7 @@ int taf_lift_main(int argc, char *argv[]) {
     int64_t max_gap      = 0;      // --maxGap (bed mode), 0 = strict abut
     int64_t min_size     = 1;      // --minSize (bed mode), 1 = no filter
     int     fast_mode    = 0;      // --fast (bed mode), 0 = legacy column walk
+    int64_t bin_size     = 0;      // --bin (bed mode, requires --fast), 0 = off
 
     while (1) {
         static struct option long_options[] = {
@@ -1188,11 +1280,12 @@ int taf_lift_main(int argc, char *argv[]) {
             { "maxGap",     required_argument, 0, 'G' },
             { "minSize",    required_argument, 0, 'S' },
             { "fast",       no_argument,       0, 'F' },
+            { "bin",        required_argument, 0, 'B' },
             { "help",       no_argument,       0, 'h' },
             { 0, 0, 0, 0 }
         };
         int idx = 0;
-        int key = getopt_long(argc, argv, "l:i:w:b:g:o:m:G:S:Fh", long_options, &idx);
+        int key = getopt_long(argc, argv, "l:i:w:b:g:o:m:G:S:FB:h", long_options, &idx);
         if (key == -1) break;
         switch (key) {
             case 'l': logLevelString = optarg; break;
@@ -1239,6 +1332,19 @@ int taf_lift_main(int argc, char *argv[]) {
                 break;
             }
             case 'F': fast_mode = 1; break;
+            case 'B': {
+                errno = 0;
+                char *end_p = NULL;
+                long long v = strtoll(optarg, &end_p, 10);
+                if (errno == ERANGE || end_p == optarg || *end_p != 0 ||
+                    v < 1 || v > ((long long)1 << 60)) {
+                    fprintf(stderr, "ERROR: --bin must be in [1, 2^60] "
+                                    "(got '%s')\n", optarg);
+                    return 1;
+                }
+                bin_size = (int64_t)v;
+                break;
+            }
             case 'h': usage(); return 0;
             default:  usage(); return 1;
         }
@@ -1255,11 +1361,20 @@ int taf_lift_main(int argc, char *argv[]) {
         usage();
         return 1;
     }
-    // --maxGap / --minSize / --fast only apply to BED output (rows can
-    // merge / drop / chunk-iterate); wig is per-position, no "row" concept.
-    if (wig_file != NULL && (max_gap != 0 || min_size != 1 || fast_mode)) {
-        fprintf(stderr, "ERROR: --maxGap / --minSize / --fast are BED-mode only "
+    // --maxGap / --minSize / --fast / --bin only apply to BED output (rows can
+    // merge / drop / chunk-iterate / bin); wig is per-position, no "row" concept.
+    if (wig_file != NULL && (max_gap != 0 || min_size != 1 || fast_mode || bin_size > 0)) {
+        fprintf(stderr, "ERROR: --maxGap / --minSize / --fast / --bin are BED-mode only "
                         "(use with -b/--bed, not -w/--wig)\n");
+        return 1;
+    }
+    if (bin_size > 0 && !fast_mode) {
+        fprintf(stderr, "ERROR: --bin requires --fast\n");
+        return 1;
+    }
+    if (bin_size > 0 && (max_gap != 0 || min_size != 1)) {
+        fprintf(stderr, "ERROR: --bin is mutually exclusive with --maxGap / --minSize "
+                        "(bin output is fixed-width bedGraph; merge / drop don't apply)\n");
         return 1;
     }
 
@@ -1291,7 +1406,7 @@ int taf_lift_main(int argc, char *argv[]) {
     // manageable in O(open paralog count) memory).
     if (bed_file != NULL) {
         int rc = fast_mode
-            ? bed_lift_chunk_impl(tui, gl, bed_file, output_file, max_gap, min_size)
+            ? bed_lift_chunk_impl(tui, gl, bed_file, output_file, max_gap, min_size, bin_size)
             : bed_lift_main_impl (tui, gl, bed_file, output_file, max_gap, min_size);
         tui_genome_lift_destruct(gl);
         tui_destruct(tui);
