@@ -95,12 +95,12 @@ typedef struct _Tui Tui;
  * Returns NULL if the file can't be opened / isn't a tui container.
  */
 /*
- * Thread-safety: a `Tui` is immutable after `tui_load` returns (it holds only
- * the .tui path and a small in-memory X index).  Each query call re-opens the
- * file privately, so multiple threads can concurrently issue `tui_query`,
- * `tui_load_seq_runs`, and `tui_genome_lift_load` on the SAME `Tui`.  The
- * `TuiGenomeLift` returned by `tui_genome_lift_load`, however, is NOT
- * thread-safe -- see that function's docs.
+ * Thread-safety: tui_query and tui_load_seq_runs share a cached OneFile
+ * cursor on tui->of (opened once in tui_load), so they are NOT thread-safe on
+ * the same Tui *.  Callers serialize externally (blockViz holds g_mutex; CLI
+ * callers are single-threaded).  tui_genome_lift_load opens a private OneFile
+ * via tui->path and is concurrent-safe in the usual sense.  The
+ * `TuiGenomeLift` it returns is NOT thread-safe -- see that function's docs.
  */
 Tui *tui_load(const char *tui_path);
 
