@@ -273,13 +273,17 @@ struct taffy_block_results_t *taffyGetBlocksInTargetRange_filterByChrom(
  * `parentName` and `parentBranchLength` are stubbed to "" / 0.0 in
  * this initial cut.
  *
- * KNOWN LIMITATION: the implementation infers genome boundaries by
- * splitting d-line keys on the FIRST dot, which misclassifies genome
- * names that contain dots themselves (e.g. NCBI versioned accessions
- * "GCA_028858775.2" come out as "GCA_028858775").  The actual query
- * functions (taffyGetBlocksInTargetRange, taffyGetChroms) take the
- * full genome string from the caller and work correctly regardless;
- * this only affects the cosmetic listing. */
+ * .TUI REBUILD NOTE: when the .tui contains a g-record genome roster
+ * (added at writer time -- see tui_create / "O g" records in the
+ * schema), the full genome name including any version suffix is
+ * returned ("GCA_028858775.2").  When the .tui PREDATES the g-record
+ * schema (e.g. the existing cluster 92 GB 577-way .tui), this falls
+ * back to splitting d-line keys on the FIRST dot, which truncates
+ * dotted names ("GCA_028858775.2" -> "GCA_028858775").  Rebuild the
+ * .tui to fix.  The actual query functions
+ * (taffyGetBlocksInTargetRange, taffyGetChroms) take the full genome
+ * string from the caller and work correctly either way; the
+ * truncation only affects this cosmetic listing. */
 struct taffy_species_t *taffyGetSpecies(int taffyHandle, char **errStr);
 
 /** List of chromosomes in the named genome (sorted alphabetically). */
