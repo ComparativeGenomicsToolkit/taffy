@@ -522,8 +522,16 @@ run_cell() {
 
     local n_mapped=0 n_mapped_bp=0 n_unmapped=0
     if [[ -s "\$out_bed" ]]; then
-        # Single awk pass for both row count and total bp.
-        read -r n_mapped n_mapped_bp < <(awk '{n++; bp += \$3 - \$2} END {print n+0, bp+0}' "\$out_bed")
+        # Single awk pass for both row count and total bp.  For BED output
+        # bp = sum(end-start) gives target bp covered; for bedGraph (the
+        # --bin variants) the bin WIDTH would be constant and bin_size *
+        # n_rows is meaningless -- the real source-bp count lives in the
+        # value column (\$4).  Detect bin variants by tool-name suffix.
+        if [[ "\$tool" == *_bin* ]]; then
+            read -r n_mapped n_mapped_bp < <(awk '{n++; bp += \$4} END {print n+0, bp+0}' "\$out_bed")
+        else
+            read -r n_mapped n_mapped_bp < <(awk '{n++; bp += \$3 - \$2} END {print n+0, bp+0}' "\$out_bed")
+        fi
     fi
     [[ -s "\$unm_bed" ]] && n_unmapped=\$(grep -v '^#' "\$unm_bed" | wc -l)
 

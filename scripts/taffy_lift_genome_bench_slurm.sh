@@ -367,7 +367,15 @@ run_cell() {
 
     local n_mapped=0 n_mapped_bp=0
     if [[ -s "\$out_bed" ]]; then
-        read -r n_mapped n_mapped_bp < <(awk '{n++; bp += \$3 - \$2} END {print n+0, bp+0}' "\$out_bed")
+        # For BED output bp = sum(end-start) (target bp covered); for
+        # bedGraph from --bin variants \$3-\$2 is the constant bin width
+        # and bin_size * n_rows is meaningless -- the actual source-bp
+        # count is in the value column (\$4).  Branch on tool name.
+        if [[ "\$tool" == *_bin* ]]; then
+            read -r n_mapped n_mapped_bp < <(awk '{n++; bp += \$4} END {print n+0, bp+0}' "\$out_bed")
+        else
+            read -r n_mapped n_mapped_bp < <(awk '{n++; bp += \$3 - \$2} END {print n+0, bp+0}' "\$out_bed")
+        fi
     fi
 
     printf "%s\t%s\t%s\t%s\t\$N_CHROMS_INNER\t\$REF_BP_INNER\t%s\t%s\t%d\t%d\t%d\t%d\n" \\
