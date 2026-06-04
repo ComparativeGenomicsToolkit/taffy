@@ -35,6 +35,7 @@ struct Args {
     int doSeq = 0;
     int doDupes = 0;
     int verbose = 0;
+    int mapBack = 0;
     std::string qChrom;       // "" = unfiltered
     taffy_dup_type_t dupMode = TAFFY_QUERY_AND_TARGET_DUPS;
 };
@@ -57,6 +58,7 @@ static int parse_args(int argc, char **argv, Args *a) {
         if (opt == "--doSeq")        { a->doSeq = 1; i++; }
         else if (opt == "--doDupes") { a->doDupes = 1; i++; }
         else if (opt == "--verbose") { a->verbose = 1; i++; }
+        else if (opt == "--mapBack") { a->mapBack = 1; i++; }
         else if (opt == "--filterByChrom") {
             if (i + 1 >= argc) { fprintf(stderr, "--filterByChrom needs an argument\n"); return -1; }
             a->qChrom = argv[i + 1]; i += 2;
@@ -139,7 +141,7 @@ int main(int argc, char **argv) {
             /*tReversed=*/0,
             /*seqMode=*/TAFFY_NO_SEQUENCES,
             /*dupMode=*/args.dupMode,
-            /*mapBackAdjacencies=*/0,
+            /*mapBackAdjacencies=*/args.mapBack,
             /*coalescenceLimitName=*/nullptr,
             &errStr);
     } else {
@@ -149,7 +151,7 @@ int main(int argc, char **argv) {
             /*tReversed=*/0,
             /*seqMode=*/TAFFY_NO_SEQUENCES,
             /*dupMode=*/args.dupMode,
-            /*mapBackAdjacencies=*/0,
+            /*mapBackAdjacencies=*/args.mapBack,
             args.qChrom.c_str(),
             /*coalescenceLimitName=*/nullptr,
             &errStr);

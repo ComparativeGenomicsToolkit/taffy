@@ -30,6 +30,18 @@ extern "C" {
 /* Handle state                                                        */
 /* ------------------------------------------------------------------ */
 
+// One row of a per-(genome, seq) runs table cached on the handle to
+// drive mapBackAdjacencies' qSpecies-coord neighbor lookup.  Decoded
+// out of tui_load_seq_runs's flat (t_start, g_start, lenc) triples;
+// kept sorted by t_start (the load order) so a lower_bound bsearch
+// over t_start finds the run owning a given qSpecies position.
+struct SeqRun {
+    int64_t t_start;   // qSpecies forward position
+    int64_t g_start;   // universal column
+    int64_t length;
+    int     strand;    // +1 / -1
+};
+
 struct TaffyHandle {
     Tui *tui = nullptr;
     std::string tui_path_str;   // resolved .tui path (for tui_sequence_lengths)
@@ -39,6 +51,11 @@ struct TaffyHandle {
     int64_t chain_open      = TAFFY_CHAIN_DEFAULT_OPEN;
     int64_t chain_extend    = TAFFY_CHAIN_DEFAULT_EXTEND;
     int64_t max_gap_length  = TAFFY_CHAIN_DEFAULT_MAX_GAP;
+    // mapBackAdjacencies: per-(qSpecies, qChrom) sorted run table.
+    // Key is the fully-qualified "<genome>.<chrom>" string the .tui
+    // uses for d-line lookups.  Lazily populated on first flank scan
+    // for each qChrom; browser pan/zoom keeps hitting the same set.
+    std::map<std::string, std::vector<SeqRun>> qseq_runs_cache;
 };
 
 static std::map<int, TaffyHandle *> g_handles;
@@ -336,6 +353,101 @@ extern "C" struct taffy_chromosome_t *taffyGetChroms(int h, const char *species,
 }
 
 /* ------------------------------------------------------------------ */
+/* mapBackAdjacencies helpers                                          */
+/* ------------------------------------------------------------------ */
+
+// HAL caps its mapAdjacencies inner loop at ~10 steps per side per
+// mapped segment.  Match that here so the off-screen scan doesn't run
+// away on regions with many short paralogous fragments.
+static const int MAX_ADJ_SCAN = 10;
+
+// Lazily load + cache the qSpecies sequence's runs table.  Key is
+// "<qSpecies>.<qChrom>" (the .tui's d-line name).  Caller holds g_mutex.
+static const std::vector<SeqRun> *get_seq_runs(TaffyHandle *H,
+                                               const std::string &full_seq_name) {
+    auto it = H->qseq_runs_cache.find(full_seq_name);
+    if (it != H->qseq_runs_cache.end()) return &it->second;
+
+    int64_t n = 0;
+    int64_t *flat = tui_load_seq_runs(H->tui, full_seq_name.c_str(), &n);
+    std::vector<SeqRun> out;
+    if (flat && n > 0) {
+        out.reserve((size_t) n);
+        for (int64_t i = 0; i < n; i++) {
+            // The .tui stores lenc = (length << 1) | (1 - strand).
+            // Decoded by tui_load_seq_runs into the third field of each
+            // triple as-is; reverse-strand bit is in the LSB.
+            int64_t lenc = flat[3*i + 2];
+            SeqRun r;
+            r.t_start = flat[3*i + 0];
+            r.g_start = flat[3*i + 1];
+            r.length  = lenc >> 1;
+            r.strand  = (lenc & 1) ? -1 : +1;
+            out.push_back(r);
+        }
+    }
+    free(flat);
+    auto ins = H->qseq_runs_cache.emplace(full_seq_name, std::move(out));
+    return &ins.first->second;
+}
+
+// Build a taffy_block_t for an off-screen flank candidate.
+// Forward-strand half-open coords; strand reflects the candidate run's
+// strand (the alignment direction, NOT post-XOR with input strand).
+static struct taffy_block_t *make_flank_block(const SeqRun &cand,
+                                              const char *qChrom,
+                                              int64_t tStart_fwd) {
+    struct taffy_block_t *b = (struct taffy_block_t *) st_calloc(1, sizeof(*b));
+    b->qChrom    = strdup(qChrom);
+    b->tStart    = tStart_fwd;
+    b->qStart    = cand.t_start;
+    b->size      = cand.length;
+    b->strand    = (cand.strand > 0) ? '+' : '-';
+    b->qSequence = nullptr;
+    b->tSequence = nullptr;
+    return b;
+}
+
+// Scan up to MAX_ADJ_SCAN qSpecies-coord neighbors of the chain edge,
+// back-map each candidate to tSpecies via gl_t, and return the first
+// off-screen flank (i.e. whose tSpecies range falls outside [tStartUser,
+// tEndUser) on tChrom_filter).  dir = -1 walks left from `start_idx`,
+// dir = +1 walks right.  Returns NULL if no off-screen flank is found
+// within the scan budget.
+static struct taffy_block_t *find_off_screen_flank(
+        const std::vector<SeqRun> *runs, int64_t start_idx, int dir,
+        const TuiGenomeLift *gl_t,
+        const char *qChrom,
+        const char *tChrom_filter,
+        int64_t tStartUser, int64_t tEndUser) {
+    const int64_t n = (int64_t) runs->size();
+    for (int step = 1; step <= MAX_ADJ_SCAN; step++) {
+        int64_t idx = start_idx + dir * step;
+        if (idx < 0 || idx >= n) break;
+        const SeqRun &cand = (*runs)[idx];
+        // Back-map BOTH ends of the candidate to tSpecies via gl_t.  If
+        // either end's seq differs from tChrom_filter, the run lifts to
+        // a different tChrom or is unmapped on tSpecies -- not a usable
+        // flank on the same browser track.
+        TuiGenomeMatch m_lo[1], m_hi[1];
+        int nlo = tui_genome_lift_column((TuiGenomeLift *) gl_t,
+                                         cand.g_start, m_lo, 1);
+        int nhi = tui_genome_lift_column((TuiGenomeLift *) gl_t,
+                                         cand.g_start + cand.length - 1, m_hi, 1);
+        if (nlo == 0 || nhi == 0) continue;
+        if (strcmp(m_lo[0].seq, tChrom_filter) != 0) continue;
+        if (strcmp(m_hi[0].seq, tChrom_filter) != 0) continue;
+        int64_t tLo = (m_lo[0].pos < m_hi[0].pos) ? m_lo[0].pos : m_hi[0].pos;
+        int64_t tHi = ((m_lo[0].pos > m_hi[0].pos) ? m_lo[0].pos : m_hi[0].pos) + 1;
+        // Off-screen test: the candidate's tSpecies range must NOT
+        // overlap the user's [tStartUser, tEndUser).
+        if (tLo < tEndUser && tHi > tStartUser) continue;   // on-screen
+        return make_flank_block(cand, qChrom, tLo);
+    }
+    return nullptr;
+}
+
+/* ------------------------------------------------------------------ */
 /* Block query (the hot path)                                          */
 /* ------------------------------------------------------------------ */
 
@@ -415,7 +527,7 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
                 char **errStr) {
     // Reject unsupported parameters loudly so the caller knows.
     if (tReversed != 0) { set_err(errStr, "taffyBlockViz: tReversed not supported"); return nullptr; }
-    if (mapBackAdjacencies != 0) { set_err(errStr, "taffyBlockViz: mapBackAdjacencies not supported"); return nullptr; }
+    // mapBackAdjacencies: implemented below; honour the flag.
     if (coalescenceLimitName) { set_err(errStr, "taffyBlockViz: coalescenceLimitName not supported"); return nullptr; }
     if (seqMode != TAFFY_NO_SEQUENCES) { set_err(errStr, "taffyBlockViz: seqMode != NO_SEQUENCES not supported"); return nullptr; }
     if (dupMode != TAFFY_NO_DUPS && dupMode != TAFFY_QUERY_DUPS && dupMode != TAFFY_QUERY_AND_TARGET_DUPS) {
@@ -546,6 +658,89 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
             r->next   = it->second->tRange;   // prepend (we'll reverse below if needed)
             it->second->tRange = r;
         }
+    }
+
+    // ---- mapBackAdjacencies ---------------------------------------------
+    // For each emitted (chain, qChrom) span, find the immediate qSpecies-
+    // forward-coord neighbors on either side and emit any that back-map
+    // to a tSpecies region OUTSIDE [tStart, tEnd) on tChrom.  Matches
+    // HAL's mapAdjacencies (halBlockMapper.cpp::mapAdjacencies) but at
+    // chain granularity (one flank per side per chain) rather than per
+    // mapped segment -- a chain is the snake-track unit.
+    if (mapBackAdjacencies) {
+        TuiGenomeLift *gl_t = get_or_load_gl(H, tSpecies, errStr);
+        if (gl_t) {
+            // Span per (chain_id, qChrom): min q_start aln-index and max
+            // q_end aln-index.  Walking emitted alns suffices because the
+            // chainer sorted them by q_start within each (q_name, strand)
+            // partition; the first/last aln of a chain on a given t_name
+            // is what we want to scan from.
+            struct ChainEdge {
+                int64_t left_idx;   // aln-buffer index of leftmost run
+                int64_t right_idx;  // aln-buffer index of rightmost run
+                std::string qChrom;
+            };
+            std::map<int64_t, ChainEdge> edges;
+            for (int64_t i = 0; i < n; i++) {
+                int64_t cid = chain_id[i];
+                // For NO_DUPS we already dropped non-primary blocks;
+                // restrict flanks to chains we actually emitted.
+                if (dupMode == TAFFY_NO_DUPS && cid != primary_id) continue;
+                auto it = edges.find(cid);
+                if (it == edges.end()) {
+                    ChainEdge e;
+                    e.left_idx  = i;
+                    e.right_idx = i;
+                    e.qChrom    = cx.alns[i].t_name;
+                    edges[cid] = e;
+                } else {
+                    if (cx.alns[i].q_start < cx.alns[it->second.left_idx].q_start)
+                        it->second.left_idx = i;
+                    if (cx.alns[i].q_end > cx.alns[it->second.right_idx].q_end)
+                        it->second.right_idx = i;
+                }
+            }
+
+            for (auto &kv : edges) {
+                const ChainEdge &E = kv.second;
+                std::string full = std::string(qSpecies) + "." + E.qChrom;
+                const std::vector<SeqRun> *runs = get_seq_runs(H, full);
+                if (!runs || runs->empty()) continue;
+
+                // Binary-search runs[] for the chain's leftmost / rightmost
+                // qStart -- those are the SeqRun indices we'll walk outward
+                // from.  Aln.t_start IS qSpecies forward-coord (qStart in
+                // block-output terms), so lower_bound on t_start finds the
+                // owning run.
+                auto bsearch_t_start = [&](int64_t target) -> int64_t {
+                    int64_t lo = 0, hi = (int64_t) runs->size();
+                    while (lo < hi) {
+                        int64_t m = lo + (hi - lo) / 2;
+                        if ((*runs)[m].t_start < target) lo = m + 1;
+                        else hi = m;
+                    }
+                    return lo;
+                };
+                int64_t left_qStart  = cx.alns[E.left_idx].t_start;
+                int64_t right_qEnd   = cx.alns[E.right_idx].t_end;
+                int64_t left_idx_runs  = bsearch_t_start(left_qStart);
+                int64_t right_idx_runs = bsearch_t_start(right_qEnd) - 1;
+                if (right_idx_runs < 0) right_idx_runs = 0;
+
+                struct taffy_block_t *L =
+                    find_off_screen_flank(runs, left_idx_runs,  -1,
+                                          gl_t, E.qChrom.c_str(),
+                                          tChrom, tStart, tEnd);
+                if (L) append_mapped(L);
+                struct taffy_block_t *R =
+                    find_off_screen_flank(runs, right_idx_runs, +1,
+                                          gl_t, E.qChrom.c_str(),
+                                          tChrom, tStart, tEnd);
+                if (R) append_mapped(R);
+            }
+        }
+        // Note: gl_t isn't released here -- it stays in lift_cache for
+        // later browser pans against the same tSpecies.
     }
 
     // Link dupe entries into a single linked list.
