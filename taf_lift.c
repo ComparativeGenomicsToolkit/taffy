@@ -506,15 +506,29 @@ typedef struct {
     int         active;
 } PendingBed;
 
-// Cap on the pending-merge buffer.  At apes / rodent / fish paralog density
-// the simultaneously-touchable bucket count is ~30-50; 256 leaves comfortable
-// headroom while bounding RAM for pathological single-BED-line whole-chrom
-// inputs (a 49 Mb mexican-tetra chrom blew past 720 MB RSS with an unbounded
-// pool before this cap was added).  When the pool is full, the LRU slot is
-// flushed to disk and reused -- the merge-window shrinks but correctness is
-// preserved (an LRU slot that goes idle was about to be flushed at end-of-
-// line anyway).
-#define PENDING_MAX 256
+// Cap on the pending-merge buffer.  Sized to make LRU eviction rare on
+// realistic paralog-dense workloads -- the prior 256-slot cap allowed
+// enough LRU evictions on dense regions (apes hg38 chr5 paralog hotspot
+// is the canonical case) that default and --fast paths lost DIFFERENT
+// merge opportunities and emitted the same bp coverage with a slightly
+// different row packing (off-by-a-few rows at chunk boundaries).
+//
+// Sizing:  the buffer holds open target intervals that might still merge
+// with the next incoming run.  Empirical concurrent-slot counts:
+//   apes / rodent / fish typical regions :   ~30-50
+//   apes hg38 chr5 paralog hotspot       :  ~200-500
+//   pathological whole-chrom (mexican-tetra
+//     49 Mb single BED record)           :  >1M  (LRU eviction fires
+//                                               here at any feasible cap;
+//                                               documented as accepted,
+//                                               bp exact)
+// 1024 covers the realistic hotspot cases.  Going higher (8192/16384) does
+// close the residual 1-3 split-vs-merged rows that LRU still produces, but
+// costs 4-7x wall clock because pending_push / pending_cascade do linear
+// O(p_cap) scans on every push -- the buffer is small enough at 1024 to
+// stay in L1/L2 cache.  When the pool fills the LRU slot is flushed to
+// disk and reused; the merge window shrinks but bp coverage is preserved.
+#define PENDING_MAX 1024
 
 // Flush one pending row to disk.  Caller clears `pe->active` after.
 // `min_size` (>=1) drops rows whose length is below threshold without
