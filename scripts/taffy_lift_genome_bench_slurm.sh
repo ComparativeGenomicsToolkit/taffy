@@ -36,6 +36,7 @@ UNI_TAF=""
 HAL=""
 TREE=""
 FAST_MODE=0                          # --fast: add chunk-walk variant cells alongside default
+BIN_SIZES_CSV=""                     # --bin CSV: add bedGraph variants per bin size; empty = off.
 OUTDIR=""
 REF="GCA_000001405.15"              # hg38
 T_TOTAL=32                          # cpus-per-task; ≥ 2 × n_species
@@ -97,6 +98,13 @@ Optional:
                 bench.tsv gets a '_fast' suffix: 'maf.tui_fast' /
                 'taf.tui_fast'.  Default cells are still emitted so the
                 bench can compare default-vs-fast wall + verify parity.
+  --bin CSV     taffy lift --bin sizes (bedGraph, coarse-grained browser
+                tracks) to bench side-by-side.  Each value adds a
+                --fast --bin <N> variant cell per species per source.
+                Auto-enables --fast.  Tool name suffix '_bin<S>' (human-
+                readable when divisible: 1M, 100k, 1G; raw int otherwise).
+                Example: --bin 100000,1000000 adds 'maf.tui_fast_bin100k'
+                and 'maf.tui_fast_bin1M' per species.
   --timeBudget SEC  Per-cell wall cap (timeout) (default $TIME_BUDGET)
   --time HRS    sbatch wall (default $SBATCH_TIME)
   --mem GB      sbatch mem (default $SBATCH_MEM)
@@ -121,6 +129,7 @@ while [[ $# -gt 0 ]]; do
         -u)             UNI="$2"; shift 2;;
         --uniTaf)       UNI_TAF="$2"; shift 2;;
         --fast)         FAST_MODE=1; shift;;
+        --bin)          BIN_SIZES_CSV="$2"; shift 2;;
         -H)             HAL="$2"; shift 2;;
         -t)             TREE="$2"; shift 2;;
         -o)             OUTDIR="$2"; shift 2;;
@@ -201,6 +210,20 @@ N_CHROMS=$(wc -l < "$NATIVE_BED")
 REF_BP=$(awk '{s += $3 - $2} END {print s}' "$NATIVE_BED")
 echo ">>   ${REF} input bed: $N_CHROMS chroms, $REF_BP bp total" >&2
 
+# --- Resolve --bin CSV.  Default empty -> no bin cells.  Non-empty
+# implies --fast (auto-enable) -- the taffy CLI rejects --bin without
+# it, and we always want a plain-fast cell alongside for comparison.
+if [[ -z "$BIN_SIZES_CSV" ]]; then
+    BIN_SIZES_ARR=( )
+else
+    IFS=',' read -r -a BIN_SIZES_ARR <<< "$BIN_SIZES_CSV"
+    for B in "${BIN_SIZES_ARR[@]}"; do
+        [[ "$B" =~ ^[1-9][0-9]*$ ]] || { echo "ERROR: --bin values must be positive integers (got '$B')" >&2; exit 1; }
+    done
+    FAST_MODE=1
+fi
+N_BIN=${#BIN_SIZES_ARR[@]}
+
 echo ">> output dir:    $OUTDIR"
 echo ">> taffy:         $TAFFY"
 echo ">> halLiftover:   $HALLIFTOVER"
@@ -217,10 +240,13 @@ N_SOURCES=0
 [[ -n "$UNI"     ]] && N_SOURCES=$((N_SOURCES + 1))
 [[ -n "$UNI_TAF" ]] && N_SOURCES=$((N_SOURCES + 1))
 N_MODES=$([[ "$FAST_MODE" -eq 1 ]] && echo 2 || echo 1)
-CELLS_PER_SPECIES=$(( 1 + N_SOURCES * N_MODES ))
+# Per source: N_MODES standard cells (default + fast) + N_BIN bin cells
+# (always fast-based, only added when N_BIN > 0).
+CELLS_PER_SPECIES=$(( 1 + N_SOURCES * (N_MODES + N_BIN) ))
 TOTAL_CELLS=$(( N_SPECIES * CELLS_PER_SPECIES ))
 echo ">> cpus/task:     $T_TOTAL  (need ≥ $TOTAL_CELLS for full parallel: $N_SPECIES species × $CELLS_PER_SPECIES cells)"
 echo ">> --fast mode:   $([[ $FAST_MODE -eq 1 ]] && echo "ON (adds _fast variant per taffy cell)" || echo "OFF (default column-walk only)")"
+echo ">> --bin sizes:   $([[ $N_BIN -gt 0 ]] && echo "${BIN_SIZES_ARR[*]}  (adds 1 fast+bin cell per source per size)" || echo "OFF")"
 (( T_TOTAL >= TOTAL_CELLS )) || \
     echo ">> WARN: T_TOTAL=$T_TOTAL < TOTAL_CELLS=$TOTAL_CELLS; cells will queue" >&2
 echo ">> time budget:   $TIME_BUDGET s per cell"
@@ -242,6 +268,18 @@ TREE="$TREE"     # for plot.py: divergence-from-ref x-axis
 TIME_BUDGET=$TIME_BUDGET
 STAGE_LOCAL=$STAGE_LOCAL
 FAST_MODE=$FAST_MODE
+BIN_SIZES=( ${BIN_SIZES_ARR[*]:-} )
+
+# Format an integer bin size as the human-readable suffix used in tool
+# names ('1M', '100k'); divisibility-exact only, no rounding.
+fmt_bin() {
+    local n=\$1
+    if   (( n % 1000000000 == 0 )); then echo "\$((n/1000000000))G"
+    elif (( n % 1000000    == 0 )); then echo "\$((n/1000000))M"
+    elif (( n % 1000       == 0 )); then echo "\$((n/1000))k"
+    else                                  echo "\$n"
+    fi
+}
 TAFFY="$TAFFY"
 HALLIFTOVER="$HALLIFTOVER"
 SPECIES_TSV="$OUTDIR/species.tsv"
@@ -394,6 +432,38 @@ while IFS=\$'\t' read -r sid sci common; do
             pids[\$stem]=\$!
         fi
     done
+
+    # --bin variants: always launched as --fast --bin <B>, one cell per
+    # source per bin size.  Auto-enabled by the driver when --bin CSV is
+    # non-empty; --fast and --bin together are the only supported combo
+    # at the taffy CLI level.
+    if [[ \${#BIN_SIZES[@]} -gt 0 ]]; then
+        for B in "\${BIN_SIZES[@]}"; do
+            btag="_bin\$(fmt_bin \$B)"
+            if [[ -n "\$UNI" ]]; then
+                tool="maf.tui_fast\${btag}"
+                stem="\${tool}_\${sid}"
+                rowfiles[\$stem]="\$LOGDIR/row_\${stem}.tsv"
+                ( run_cell "\$tool" "\$sid" "\$sci" "\$common" \\
+                    "\$TAFFY" lift -i "\$UNI" -b "\$PREFIXED_BED" -g "\$sid" \\
+                                  --fast --bin "\$B" \\
+                                  -o "\$LOGDIR/mapped_\${stem}.bed" \\
+                  ) > "\${rowfiles[\$stem]}" &
+                pids[\$stem]=\$!
+            fi
+            if [[ -n "\$UNI_TAF" ]]; then
+                tool="taf.tui_fast\${btag}"
+                stem="\${tool}_\${sid}"
+                rowfiles[\$stem]="\$LOGDIR/row_\${stem}.tsv"
+                ( run_cell "\$tool" "\$sid" "\$sci" "\$common" \\
+                    "\$TAFFY" lift -i "\$UNI_TAF" -b "\$PREFIXED_BED" -g "\$sid" \\
+                                  --fast --bin "\$B" \\
+                                  -o "\$LOGDIR/mapped_\${stem}.bed" \\
+                  ) > "\${rowfiles[\$stem]}" &
+                pids[\$stem]=\$!
+            fi
+        done
+    fi
 done < "\$SPECIES_TSV"
 
 # Wait for all cells, append rows in stable order.
@@ -512,22 +582,33 @@ BASE_COLOR = {
     "maf.tui":     "#1f77b4",
     "taf.tui":     "#9467bd",
 }
+def _parse_bin_suffix(s):
+    m = re.match(r'^(\d+)([GMk]?)$', s)
+    if not m: return None
+    return int(m.group(1)) * {'G': 10**9, 'M': 10**6, 'k': 10**3, '': 1}[m.group(2)]
 def parse_tool(tool):
-    """Return (family, is_fast).  Strips the '_fast' suffix if present so
-    --fast variants render in the same colour family as the column-walk."""
+    """Return (family, is_fast, bin_size).  Strips '_binN' then '_fast' so
+    'maf.tui_fast_bin1M' -> ('maf.tui', True, 1_000_000) and stays in the
+    same colour family as the column-walk sibling."""
+    bin_size = None
+    m = re.search(r'_bin(\d+[GMk]?)$', tool)
+    if m:
+        bin_size = _parse_bin_suffix(m.group(1))
+        tool = tool[:m.start()]
     is_fast = tool.endswith("_fast")
     base = tool[:-len("_fast")] if is_fast else tool
-    return base, is_fast
+    return base, is_fast, bin_size
 def tool_color(tool):
-    fam, _ = parse_tool(tool)
+    fam, _, _ = parse_tool(tool)
     return BASE_COLOR.get(fam, "#888888")
-# Order: halLiftover, maf.tui (column-walk + fast paired), taf.tui (same),
-# anything else.  Pair fast right after its default sibling so legends
-# read naturally.
+# Order: halLiftover, maf.tui (column-walk + fast paired + bin variants),
+# taf.tui (same), anything else.  Pair fast right after its default
+# sibling, and bin variants (always fast-based) after plain fast,
+# ascending by bin size.
 def tool_sort_key(t):
-    fam, is_fast = parse_tool(t)
+    fam, is_fast, bin_size = parse_tool(t)
     fam_order = {"halLiftover": 0, "maf.tui": 1, "taf.tui": 2}.get(fam, 9)
-    return (fam_order, int(is_fast))
+    return (fam_order, int(is_fast), -1 if bin_size is None else bin_size)
 tools = sorted(set(r["tool"] for r in rows), key=tool_sort_key)
 
 xs = np.arange(len(species_order))
@@ -551,12 +632,18 @@ for ti, tool in enumerate(tools):
     z = lambda lst: [v if v is not None else 0 for v in lst]
     off = (ti - (n_tools - 1) / 2) * width
     color = tool_color(tool)
-    _, is_fast = parse_tool(tool)
-    # --fast variants share the family colour but render hollow (no fill,
-    # coloured edge) so the pair is obviously paired but visually distinct
-    # from its column-walk sibling.  Timed-out overlay keeps the same
-    # fill/hollow rule so a timed-out fast bar still looks fast.
-    if is_fast:
+    _, is_fast, bin_size = parse_tool(tool)
+    # Three visual styles:
+    #   default        -> solid filled bar (family colour)
+    #   --fast         -> hollow / outlined bar (same colour)
+    #   --fast --bin N -> hollow + diagonal stripes ('xx' hatch), same colour
+    # Timed-out variant of each keeps its base style + a '//' hatch.
+    if bin_size:
+        bar_kw = dict(facecolor="none", edgecolor=color,
+                      hatch="xx", linewidth=1.0)
+        to_kw  = dict(facecolor="none", edgecolor=color,
+                      hatch="xx//", linewidth=1.0, alpha=0.85)
+    elif is_fast:
         bar_kw = dict(facecolor="none", edgecolor=color, linewidth=1.5)
         to_kw  = dict(facecolor="none", edgecolor=color,
                       hatch="//", linewidth=1.5, alpha=0.85)

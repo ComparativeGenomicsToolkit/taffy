@@ -53,6 +53,8 @@ T_TOTAL=24                          # cpus-per-task; one core per concurrent cel
 REF="GCF_016700215.2"               # chicken
 MAX_GAPS_CSV=""                     # --maxGap CSV: e.g. "0,1000,10000".  Empty = single taffy cell (K=0).
 FAST_MODE=0                         # --fast: add a --fast variant cell next to each taffy cell.
+BIN_SIZES_CSV=""                    # --bin CSV: e.g. "100000,1000000".  Empty = no binned variants.
+                                    # Non-empty implies --fast (the binned mode requires it at the taffy CLI).
 SIZES="1000,100000,1000000"
 N_INTERVALS=100                     # random intervals per (species, size) cell
 SEED=42                             # RNG seed for the random-interval generator
@@ -126,6 +128,14 @@ Optional:
                 in bench.tsv gets a '_fast' suffix: e.g. 'maf.tui_fast',
                 'maf.tui_g1000_fast'.  Lets you compare default-vs-fast
                 wall + verify output parity in one job.
+  --bin CSV     taffy lift --bin sizes (bedGraph, coarse-grained browser
+                tracks) to bench side-by-side.  Each value adds a
+                --fast --bin <N> variant cell PER SPECIES PER SIZE (only
+                at K=0 -- --bin is mutex with --maxGap at the CLI).
+                Auto-enables --fast.  Tool name suffix: '_bin<S>' where
+                <S> is human-readable when divisible (1M, 100k, 1G) and
+                raw int otherwise.  Example: --bin 100000,1000000 adds
+                'maf.tui_fast_bin100k' and 'maf.tui_fast_bin1M' per cell.
   --timeBudget SEC  Per-cell wall cap (timeout) (default $TIME_BUDGET)
   --time HRS    sbatch wall (default $SBATCH_TIME)
   --mem GB      sbatch mem (default $SBATCH_MEM)
@@ -160,6 +170,7 @@ while [[ $# -gt 0 ]]; do
         -L)             SPECIES_FILE="$2"; shift 2;;
         --maxGap)       MAX_GAPS_CSV="$2"; shift 2;;
         --fast)         FAST_MODE=1; shift;;
+        --bin)          BIN_SIZES_CSV="$2"; shift 2;;
         --timeBudget)   TIME_BUDGET="$2"; shift 2;;
         --time)         SBATCH_TIME="$2"; shift 2;;
         --mem)          SBATCH_MEM="$2"; shift 2;;
@@ -309,6 +320,20 @@ else
     done
 fi
 
+# --- Resolve --bin CSV.  Default empty -> no bin cells.  Non-empty
+# implies --fast (auto-enable).  Bin cells launch only at K=0 since the
+# taffy CLI rejects --bin with --maxGap; this mirrors that constraint
+# without bothering to enumerate the cartesian product.
+if [[ -z "$BIN_SIZES_CSV" ]]; then
+    BIN_SIZES_ARR=( )
+else
+    IFS=',' read -r -a BIN_SIZES_ARR <<< "$BIN_SIZES_CSV"
+    for B in "${BIN_SIZES_ARR[@]}"; do
+        [[ "$B" =~ ^[1-9][0-9]*$ ]] || { echo "ERROR: --bin values must be positive integers (got '$B')" >&2; exit 1; }
+    done
+    FAST_MODE=1
+fi
+
 python3 - "$REF_SIZES" "$OUTDIR/beds" "$SEED" "$N_INTERVALS" "${SIZE_ARR[@]}" <<'PY'
 import os, random, sys
 sizes_path, beds_dir, seed, n_intervals, *sizes = sys.argv[1:]
@@ -358,6 +383,7 @@ awk -F'\t' '{printf("                  %-18s %-30s %s\n", $1, $2, $3)}' "$SPECIE
 echo ">> sizes:         ${SIZE_ARR[*]}  ($N_INTERVALS intervals each, seed=$SEED)"
 echo ">> --maxGap vals: ${MAX_GAPS_ARR[*]}  (taffy cells per source per (species, size))"
 echo ">> --fast mode:   $([[ $FAST_MODE -eq 1 ]] && echo "ON (adds _fast variant per taffy cell)" || echo "OFF (default column-walk only)")"
+echo ">> --bin sizes:   $([[ ${#BIN_SIZES_ARR[@]} -gt 0 ]] && echo "${BIN_SIZES_ARR[*]}  (adds 1 fast+bin cell per size at K=0)" || echo "OFF")"
 echo ">> cpus/task:     $T_TOTAL  (one core per concurrent cell)"
 echo ">> time budget:   $TIME_BUDGET s per cell"
 echo ">> local-stage:   $([[ $STAGE_LOCAL -eq 1 ]] && echo "ON (copies to \$TMPDIR)" || echo "OFF (reads from network)")"
@@ -386,6 +412,18 @@ SPECIES_TSV="$OUTDIR/species.tsv"
 SIZES=( ${SIZE_ARR[*]} )
 MAX_GAPS=( ${MAX_GAPS_ARR[*]} )
 FAST_MODE=$FAST_MODE
+BIN_SIZES=( ${BIN_SIZES_ARR[*]:-} )
+
+# Format an integer bin size as the human-readable suffix used in tool
+# names ('1M', '100k', '500'); divisibility-exact only, no rounding.
+fmt_bin() {
+    local n=\$1
+    if   (( n % 1000000000 == 0 )); then echo "\$((n/1000000000))G"
+    elif (( n % 1000000    == 0 )); then echo "\$((n/1000000))M"
+    elif (( n % 1000       == 0 )); then echo "\$((n/1000))k"
+    else                                  echo "\$n"
+    fi
+}
 
 BENCH_TSV="\$OUTDIR/bench.tsv"
 LOGDIR="\$OUTDIR/logs"
@@ -586,6 +624,37 @@ for N in "\${SIZES[@]}"; do
                       ) > "\${rowfiles[\$stem]}" &
                     pids[\$stem]=\$!
                 fi
+
+                # --bin variants: only at K=0 + mode=fast (--bin is mutex
+                # with --maxGap at the CLI, and requires --fast).  Adds
+                # one extra cell per bin size in BIN_SIZES.
+                if [[ "\$mode" == "fast" && "\$K" == "0" && \${#BIN_SIZES[@]} -gt 0 ]]; then
+                    for B in "\${BIN_SIZES[@]}"; do
+                        btag="_bin\$(fmt_bin \$B)"
+                        if [[ -n "\$UNI" ]]; then
+                            tool="maf.tui\${ftag}\${btag}"
+                            stem="\${tool}_\${sid}_\${N}"
+                            rowfiles[\$stem]="\$LOGDIR/row_\${stem}.tsv"
+                            ( run_cell "\$tool" "\$sid" "\$sci" "\$common" "\$N" "\$TIME_BUDGET" \\
+                                "\$TAFFY" lift -i "\$UNI" -b "\$BED_PREFIXED" -g "\$sid" \\
+                                              --fast --bin "\$B" \\
+                                              -o "\$LOGDIR/mapped_\${stem}.bed" \\
+                              ) > "\${rowfiles[\$stem]}" &
+                            pids[\$stem]=\$!
+                        fi
+                        if [[ -n "\$UNI_TAF" ]]; then
+                            tool="taf.tui\${ftag}\${btag}"
+                            stem="\${tool}_\${sid}_\${N}"
+                            rowfiles[\$stem]="\$LOGDIR/row_\${stem}.tsv"
+                            ( run_cell "\$tool" "\$sid" "\$sci" "\$common" "\$N" "\$TIME_BUDGET" \\
+                                "\$TAFFY" lift -i "\$UNI_TAF" -b "\$BED_PREFIXED" -g "\$sid" \\
+                                              --fast --bin "\$B" \\
+                                              -o "\$LOGDIR/mapped_\${stem}.bed" \\
+                              ) > "\${rowfiles[\$stem]}" &
+                            pids[\$stem]=\$!
+                        fi
+                    done
+                fi
             done
         done
     done < "\$SPECIES_TSV"
@@ -739,22 +808,34 @@ BASE_COLOR = {
 }
 import matplotlib.colors as mcolors
 
+def _parse_bin_suffix(s):
+    # '1M' -> 1_000_000; '100k' -> 100_000; '500' -> 500; bad -> None.
+    m = re.match(r'^(\d+)([GMk]?)$', s)
+    if not m: return None
+    return int(m.group(1)) * {'G': 10**9, 'M': 10**6, 'k': 10**3, '': 1}[m.group(2)]
+
 def parse_tool(tool):
-    """Return (family, gap, is_fast) for taffy variants like
-    'maf.tui_g1000_fast' / 'maf.tui_g1000' / 'maf.tui_fast' / 'maf.tui'.
-    Non-tui tools return (tool, None, False)."""
+    """Return (family, gap, is_fast, bin) for taffy variants like
+    'maf.tui_g1000_fast' / 'maf.tui_fast_bin1M' / 'maf.tui'.
+    Non-tui tools return (tool, None, False, None)."""
+    # _binN is outermost suffix in our naming convention; strip first.
+    bin_size = None
+    m = re.search(r'_bin(\d+[GMk]?)$', tool)
+    if m:
+        bin_size = _parse_bin_suffix(m.group(1))
+        tool = tool[:m.start()]
     is_fast = tool.endswith("_fast")
     base = tool[:-len("_fast")] if is_fast else tool
     for fam in ("maf.tui", "taf.tui"):
-        if base == fam:           return fam, 0, is_fast
+        if base == fam:           return fam, 0, is_fast, bin_size
         prefix = fam + "_g"
         if base.startswith(prefix):
-            try: return fam, int(base[len(prefix):]), is_fast
+            try: return fam, int(base[len(prefix):]), is_fast, bin_size
             except ValueError: pass
-    return tool, None, False
+    return tool, None, False, bin_size
 
 def tool_color(tool):
-    fam, gap, _ = parse_tool(tool)
+    fam, gap, _, _ = parse_tool(tool)
     base = BASE_COLOR.get(fam, "#666666")
     if gap is None or gap == 0:
         return base
@@ -770,9 +851,12 @@ size_marker = {sz: m for sz, m in zip(sizes, ["o", "s", "^", "D", "v", "*"])}
 # Tools present in the data, ordered: non-tui first, then tui families
 # sorted within by K.
 def tool_sort_key(t):
-    fam, gap, is_fast = parse_tool(t)
+    fam, gap, is_fast, bin_size = parse_tool(t)
     fam_order = {"liftover": 0, "halLiftover": 1, "maf.tui": 2, "taf.tui": 3}.get(fam, 9)
-    return (fam_order, gap if gap is not None else -1, int(is_fast))
+    # Order within family: by gap, then default-before-fast, then no-bin
+    # before binned variants (ascending bin size after that).
+    return (fam_order, gap if gap is not None else -1, int(is_fast),
+            -1 if bin_size is None else bin_size)
 tools = sorted({r["tool"] for r in rows}, key=tool_sort_key)
 
 def by_tool_size(tool, size):
@@ -786,12 +870,13 @@ def by_tool_size(tool, size):
 
 for tool in tools:
     color = tool_color(tool)
-    _, _, is_fast = parse_tool(tool)
+    _, _, is_fast, bin_size = parse_tool(tool)
     # --fast variants render with dashed line + open marker so they
     # overlay cleanly on top of their column-walk counterpart (same
-    # color/marker family).
-    linestyle = "--" if is_fast else "-"
-    markerfacecolor = "none" if is_fast else None
+    # color/marker family).  --bin variants are dotted (":") to stack
+    # a third visually-distinct layer on top of (default, fast).
+    linestyle = ":" if bin_size else ("--" if is_fast else "-")
+    markerfacecolor = "none" if (is_fast or bin_size) else None
     for sz in sizes:
         pts = by_tool_size(tool, sz)
         if not pts: continue
