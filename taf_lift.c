@@ -16,6 +16,7 @@
 #include "tui.h"
 #include "sonLib.h"
 #include <getopt.h>
+#include "chain.h"
 #include <time.h>
 #include <errno.h>
 #include <signal.h>
@@ -35,6 +36,7 @@ static void usage(void) {
     fprintf(stderr, "-S --minSize   [INT]       : (bed mode) Drop output rows whose target length is < INT bp.  Default 1 (no filter).  Applied AFTER --maxGap so small fragments that would coalesce don't get filtered prematurely; reported in the summary log as 'dropped < --minSize'.\n");
     fprintf(stderr, "-F --fast                  : (bed mode) Use chunk-iteration lift instead of per-column open/close.  O(runs_in_range) vs O(columns_in_range); 10-1000x faster on chromosome-scale queries.  Output is equivalent modulo merge order (use with --maxGap N for browser-style block collapse).\n");
     fprintf(stderr, "-B --bin       [INT]       : (bed mode, requires --fast) Emit coarse-grained bedGraph: for every N-bp window on the TARGET genome, the value is the total source-bp lifted into that window.  Output is `seq<TAB>bin_start<TAB>bin_end<TAB>bp_covered`, sorted by (seq, bin).  Skips the per-row merge + filter machinery -- mutually exclusive with --maxGap / --minSize.  Intended for browser chromosome-scale tracks where per-base accuracy isn't needed.\n");
+    fprintf(stderr, "-C --chainFilter [INT]     : (bed mode, requires --fast; mutex with --bin) Keep only the top N chains per BED record.  Buffers the visited runs, runs the taffy chainer (chain_open=0, chain_extend=1, max_gap=10Mb), and replays survivors through --maxGap / --minSize.  N=1 = primary chain only; useful for browser-snake-style filtering of paralog noise.  Drops are counted in the summary log.\n");
     fprintf(stderr, "-l --logLevel  : Set log level\n");
     fprintf(stderr, "-h --help      : Print this help\n");
 }
@@ -797,6 +799,21 @@ typedef struct {
         int64_t     bp;    // source bp contributed to this bin by one clipped run
     } *bins;
     size_t      n_bins, cap_bins;
+    // --chainFilter: keep only the top-N highest-scoring chains.  When
+    // chain_filter > 0 the visitor BUFFERS each clipped run instead of
+    // calling pending_push; bed_lift_chunk_impl runs the chain at the
+    // end of each BED record, picks the top N chains by total_score,
+    // and replays surviving entries through pending_push so --maxGap /
+    // --minSize / strand merge still fire on the kept subset.
+    int64_t     chain_filter;
+    struct LiftRun {
+        const char *seq;          // target seq (gl-owned, pointer stable)
+        int64_t     c_start, c_end; // column range (chain q-axis)
+        int64_t     t_start, t_end; // target genome pos (chain t-axis, forward)
+        int         strand;         // run strand: +1 = forward, -1 = reverse
+        char        out_strand;     // already-XOR'd output strand char ('+'/'-'/0)
+    } *run_buf;
+    size_t      n_run_buf, cap_run_buf;
 } ChunkLiftCtx;
 
 // Visitor callback: clip the run to [c_lo, c_hi), map to target coords
@@ -852,6 +869,24 @@ static void chunk_lift_visit_cb(const TuiRun *r, void *user) {
         int sign = (r->strand ? +1 : -1) * cx->input_strand_sign;
         out_strand = (sign >= 0) ? '+' : '-';
     }
+    // --chainFilter path: buffer for the post-record chain pass.
+    // Don't touch pending_push; replay happens after chaining.
+    if (cx->chain_filter > 0) {
+        if (cx->n_run_buf == cx->cap_run_buf) {
+            cx->cap_run_buf = cx->cap_run_buf ? cx->cap_run_buf * 2 : 4096;
+            cx->run_buf = st_realloc(cx->run_buf,
+                                     cx->cap_run_buf * sizeof(*cx->run_buf));
+        }
+        struct LiftRun *L = &cx->run_buf[cx->n_run_buf++];
+        L->seq        = r->seq;
+        L->c_start    = cs;
+        L->c_end      = ce;
+        L->t_start    = t_out_start;
+        L->t_end      = t_out_end;
+        L->strand     = r->strand ? +1 : -1;
+        L->out_strand = out_strand;
+        return;
+    }
     cx->pending = pending_push(cx->fh, cx->pending, &cx->pending_cap,
                                &cx->pending_touch,
                                r->seq, t_out_start, t_out_end,
@@ -874,7 +909,8 @@ static int bin_entry_cmp(const void *a, const void *b) {
 static int bed_lift_chunk_impl(Tui *tui, TuiGenomeLift *gl,
                                const char *bed_file, const char *output_file,
                                int64_t max_gap, int64_t min_size,
-                               int64_t bin_size) {
+                               int64_t bin_size,
+                               int64_t chain_filter) {
     FILE *bf = fopen(bed_file, "r");
     if (bf == NULL) {
         fprintf(stderr, "ERROR: failed to open bed %s: %s\n", bed_file, strerror(errno));
@@ -890,6 +926,7 @@ static int bed_lift_chunk_impl(Tui *tui, TuiGenomeLift *gl,
     char *line = NULL;
     size_t cap = 0;
     int64_t lineno = 0, n_in = 0, n_out = 0, n_unmapped = 0, n_filtered = 0;
+    int64_t n_chain_filtered = 0;  // runs dropped by chainFilter (only meaningful when chain_filter > 0)
     time_t t0 = time(NULL);
     ChunkLiftCtx cx;
     memset(&cx, 0, sizeof(cx));
@@ -897,6 +934,7 @@ static int bed_lift_chunk_impl(Tui *tui, TuiGenomeLift *gl,
     cx.max_gap = max_gap;
     cx.min_size = min_size;
     cx.bin_size = bin_size;
+    cx.chain_filter = chain_filter;
     cx.n_out_p = &n_out;
 
     ssize_t got;
@@ -949,6 +987,81 @@ static int bed_lift_chunk_impl(Tui *tui, TuiGenomeLift *gl,
             tui_genome_lift_visit_runs(gl, cx.c_lo, cx.c_hi,
                                        chunk_lift_visit_cb, &cx);
         }
+
+        // --chainFilter post-visit pass: chain the buffered runs of THIS
+        // record, pick the top-N chains by total_score, and replay the
+        // survivors through pending_push so --maxGap / --minSize / strand
+        // merge still fire on the kept subset.
+        if (cx.chain_filter > 0 && cx.n_run_buf > 0) {
+            int64_t n_buf = (int64_t) cx.n_run_buf;
+            TaffyAln *alns = st_malloc((size_t) n_buf * sizeof(TaffyAln));
+            for (int64_t i = 0; i < n_buf; i++) {
+                struct LiftRun *L = &cx.run_buf[i];
+                alns[i].q_name  = chrom;
+                alns[i].q_start = L->c_start;
+                alns[i].q_end   = L->c_end;
+                alns[i].t_name  = L->seq;
+                alns[i].t_start = L->t_start;
+                alns[i].t_end   = L->t_end;
+                alns[i].strand  = L->strand;
+                alns[i].score   = L->c_end - L->c_start;
+                alns[i].user    = (void *) (intptr_t) i;   // buf index
+            }
+            TaffyChainCostParams cost = {
+                TAFFY_CHAIN_DEFAULT_OPEN, TAFFY_CHAIN_DEFAULT_EXTEND
+            };
+            int64_t *chain_id = st_calloc((size_t) n_buf, sizeof(int64_t));
+            TaffyChainInfo *chains_out = NULL;
+            int64_t n_chains_out = 0;
+            taffy_chain(alns, n_buf,
+                        taffy_chain_default_gap_cost, &cost,
+                        TAFFY_CHAIN_DEFAULT_MAX_GAP,
+                        chain_id, &chains_out, &n_chains_out);
+
+            // Mark the top-N chain ids by score; taffy_chain returns
+            // chains_out sorted desc, so chains_out[0..min(N,nc)) are
+            // the winners.  Use a flat bool[] keyed on (max id + 1) for
+            // O(1) membership.
+            int64_t max_id = 0;
+            for (int64_t k = 0; k < n_chains_out; k++)
+                if (chains_out[k].id > max_id) max_id = chains_out[k].id;
+            char *keep_chain = st_calloc((size_t)(max_id + 1), sizeof(char));
+            int64_t n_keep_chains = cx.chain_filter < n_chains_out
+                                       ? cx.chain_filter : n_chains_out;
+            for (int64_t k = 0; k < n_keep_chains; k++)
+                keep_chain[chains_out[k].id] = 1;
+
+            // taffy_chain SORTS alns in place by (q_name, strand, q_start),
+            // destroying the input order.  Walk alns post-sort and use
+            // aln.user (the original buf index) to recover the LiftRun.
+            // Set up pending state if not already.
+            if (cx.pending_cap == 0) {
+                cx.pending_cap = BED_MAX_OPEN;
+                cx.pending = st_calloc((size_t)cx.pending_cap, sizeof(PendingBed));
+            }
+            for (int s = 0; s < cx.pending_cap; s++) cx.pending[s].active = 0;
+
+            for (int64_t i = 0; i < n_buf; i++) {
+                if (!keep_chain[chain_id[i]]) { n_chain_filtered++; continue; }
+                int64_t bi = (int64_t)(intptr_t) alns[i].user;
+                struct LiftRun *L = &cx.run_buf[bi];
+                cx.pending = pending_push(cx.fh, cx.pending, &cx.pending_cap,
+                                          &cx.pending_touch,
+                                          L->seq, L->t_start, L->t_end,
+                                          L->out_strand, cx.emit_strand,
+                                          cx.max_gap, cx.min_size,
+                                          cx.name, cx.score, cx.n_out_p);
+            }
+
+            free(keep_chain);
+            free(chain_id);
+            free(chains_out);
+            free(alns);
+
+            // Reset buffer for the next BED record (keep allocation).
+            cx.n_run_buf = 0;
+        }
+
         if (cx.bin_size == 0) {
             // BED-row mode: flush this record's open intervals.  Bin mode
             // accumulates ACROSS bed records and flushes once at the end.
@@ -988,6 +1101,7 @@ static int bed_lift_chunk_impl(Tui *tui, TuiGenomeLift *gl,
     }
 
     free(cx.pending);
+    free(cx.run_buf);
     free(line);
     fclose(bf);
     if (output_file) fclose(fh);
@@ -997,6 +1111,13 @@ static int bed_lift_chunk_impl(Tui *tui, TuiGenomeLift *gl,
                    "(%" PRIi64 " unmapped) in %" PRIi64 " s\n",
                    cx.bin_size, n_in, n_out, n_unmapped,
                    (int64_t)(time(NULL) - t0));
+    } else if (cx.chain_filter > 0) {
+        st_logInfo("BED lift (--fast --chainFilter %" PRIi64 "): %" PRIi64 " input -> "
+                   "%" PRIi64 " output intervals (%" PRIi64 " unmapped, "
+                   "%" PRIi64 " dropped < --minSize, %" PRIi64 " dropped by chain) "
+                   "in %" PRIi64 " s\n",
+                   cx.chain_filter, n_in, n_out, n_unmapped, n_filtered,
+                   n_chain_filtered, (int64_t)(time(NULL) - t0));
     } else {
         st_logInfo("BED lift (--fast): %" PRIi64 " input -> %" PRIi64 " output intervals "
                    "(%" PRIi64 " unmapped, %" PRIi64 " dropped < --minSize) "
@@ -1267,6 +1388,7 @@ int taf_lift_main(int argc, char *argv[]) {
     int64_t min_size     = 1;      // --minSize (bed mode), 1 = no filter
     int     fast_mode    = 0;      // --fast (bed mode), 0 = legacy column walk
     int64_t bin_size     = 0;      // --bin (bed mode, requires --fast), 0 = off
+    int64_t chain_filter = 0;      // --chainFilter N (bed mode, requires --fast), 0 = off
 
     while (1) {
         static struct option long_options[] = {
@@ -1281,11 +1403,12 @@ int taf_lift_main(int argc, char *argv[]) {
             { "minSize",    required_argument, 0, 'S' },
             { "fast",       no_argument,       0, 'F' },
             { "bin",        required_argument, 0, 'B' },
+            { "chainFilter", required_argument, 0, 'C' },
             { "help",       no_argument,       0, 'h' },
             { 0, 0, 0, 0 }
         };
         int idx = 0;
-        int key = getopt_long(argc, argv, "l:i:w:b:g:o:m:G:S:FB:h", long_options, &idx);
+        int key = getopt_long(argc, argv, "l:i:w:b:g:o:m:G:S:FB:C:h", long_options, &idx);
         if (key == -1) break;
         switch (key) {
             case 'l': logLevelString = optarg; break;
@@ -1345,6 +1468,19 @@ int taf_lift_main(int argc, char *argv[]) {
                 bin_size = (int64_t)v;
                 break;
             }
+            case 'C': {
+                errno = 0;
+                char *end_p = NULL;
+                long long v = strtoll(optarg, &end_p, 10);
+                if (errno == ERANGE || end_p == optarg || *end_p != 0 ||
+                    v < 1 || v > ((long long)1 << 31)) {
+                    fprintf(stderr, "ERROR: --chainFilter must be in [1, 2^31] "
+                                    "(got '%s')\n", optarg);
+                    return 1;
+                }
+                chain_filter = (int64_t)v;
+                break;
+            }
             case 'h': usage(); return 0;
             default:  usage(); return 1;
         }
@@ -1377,6 +1513,19 @@ int taf_lift_main(int argc, char *argv[]) {
                         "(bin output is fixed-width bedGraph; merge / drop don't apply)\n");
         return 1;
     }
+    if (chain_filter > 0 && !fast_mode) {
+        fprintf(stderr, "ERROR: --chainFilter requires --fast\n");
+        return 1;
+    }
+    if (chain_filter > 0 && bin_size > 0) {
+        fprintf(stderr, "ERROR: --chainFilter is mutually exclusive with --bin "
+                        "(bin output isn't per-block, so chain filtering doesn't apply)\n");
+        return 1;
+    }
+    if (chain_filter > 0 && wig_file != NULL) {
+        fprintf(stderr, "ERROR: --chainFilter is BED-mode only\n");
+        return 1;
+    }
 
     // The .tui lives at <maf>.tui (same convention as tai_path).
     char *tui_p = tui_path(maf_file);
@@ -1406,7 +1555,7 @@ int taf_lift_main(int argc, char *argv[]) {
     // manageable in O(open paralog count) memory).
     if (bed_file != NULL) {
         int rc = fast_mode
-            ? bed_lift_chunk_impl(tui, gl, bed_file, output_file, max_gap, min_size, bin_size)
+            ? bed_lift_chunk_impl(tui, gl, bed_file, output_file, max_gap, min_size, bin_size, chain_filter)
             : bed_lift_main_impl (tui, gl, bed_file, output_file, max_gap, min_size);
         tui_genome_lift_destruct(gl);
         tui_destruct(tui);
