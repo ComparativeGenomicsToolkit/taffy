@@ -3,13 +3,14 @@ include ${rootPath}/include.mk
 
 srcDir = taffy/impl
 oneCodeDir = taffy/submodules/ONEcode
-libHeaders = taffy/inc/*.h
+blockVizDir = taffy/blockViz
+libHeaders = taffy/inc/*.h ${blockVizDir}/inc/*.h
 libTests = tests/*.c
 
 all: all_libs all_progs
 all_libs: ${LIBDIR}/libstTaf.a
 
-all_progs: all_libs ${BINDIR}/taffy
+all_progs: all_libs ${BINDIR}/taffy ${BINDIR}/taffyBlockVizTest
 
 sonLib: 
 	mkdir -p ${LIBDIR} ${BINDIR}
@@ -37,8 +38,8 @@ stTafDependencies = ${sonLibDir}/sonLib.a ${sonLibDir}/cuTest.a ${LIBDIR}/libabp
 ${oneCodeDir}/ONElib.o : ${oneCodeDir}/ONElib.c ${oneCodeDir}/ONElib.h
 	${CC} ${CFLAGS} ${LDFLAGS} -fPIC -o ${oneCodeDir}/ONElib.o -c ${oneCodeDir}/ONElib.c
 
-${LIBDIR}/libstTaf.a : ${libTests} ${libHeaders} ${srcDir}/alignment_block.o ${srcDir}/line_iterator.o ${srcDir}/maf.o ${srcDir}/paf.o ${srcDir}/ond.o ${srcDir}/taf.o ${srcDir}/add_gap_bases.o ${srcDir}/merge_adjacent_alignments.o ${srcDir}/prefix_sort.o ${srcDir}/wiggle.o ${srcDir}/tai.o ${srcDir}/tui.o ${srcDir}/block_reader.o ${srcDir}/remote_io.o ${srcDir}/gerp.o ${srcDir}/gerp_stats.o ${oneCodeDir}/ONElib.o ${libHeaders} ${stTafDependencies}
-	${AR} rc libstTaf.a ${srcDir}/alignment_block.o ${srcDir}/line_iterator.o ${srcDir}/maf.o ${srcDir}/paf.o ${srcDir}/ond.o ${srcDir}/taf.o ${srcDir}/add_gap_bases.o ${srcDir}/merge_adjacent_alignments.o ${srcDir}/prefix_sort.o ${srcDir}/wiggle.o ${srcDir}/tai.o ${srcDir}/tui.o ${srcDir}/block_reader.o ${srcDir}/remote_io.o ${srcDir}/gerp.o ${srcDir}/gerp_stats.o ${oneCodeDir}/ONElib.o
+${LIBDIR}/libstTaf.a : ${libTests} ${libHeaders} ${srcDir}/alignment_block.o ${srcDir}/line_iterator.o ${srcDir}/maf.o ${srcDir}/paf.o ${srcDir}/ond.o ${srcDir}/taf.o ${srcDir}/add_gap_bases.o ${srcDir}/merge_adjacent_alignments.o ${srcDir}/prefix_sort.o ${srcDir}/wiggle.o ${srcDir}/tai.o ${srcDir}/tui.o ${srcDir}/block_reader.o ${srcDir}/remote_io.o ${srcDir}/gerp.o ${srcDir}/gerp_stats.o ${blockVizDir}/impl/taffyBlockViz.o ${oneCodeDir}/ONElib.o ${libHeaders} ${stTafDependencies}
+	${AR} rc libstTaf.a ${srcDir}/alignment_block.o ${srcDir}/line_iterator.o ${srcDir}/maf.o ${srcDir}/paf.o ${srcDir}/ond.o ${srcDir}/taf.o ${srcDir}/add_gap_bases.o ${srcDir}/merge_adjacent_alignments.o ${srcDir}/prefix_sort.o ${srcDir}/wiggle.o ${srcDir}/tai.o ${srcDir}/tui.o ${srcDir}/block_reader.o ${srcDir}/remote_io.o ${srcDir}/gerp.o ${srcDir}/gerp_stats.o ${blockVizDir}/impl/taffyBlockViz.o ${oneCodeDir}/ONElib.o
 	mv libstTaf.a ${LIBDIR}/
 
 ${srcDir}/alignment_block.o : ${srcDir}/alignment_block.c ${libHeaders}
@@ -58,6 +59,9 @@ ${srcDir}/ond.o : ${srcDir}/ond.c ${libHeaders}
 
 ${srcDir}/add_gap_bases.o : ${srcDir}/add_gap_bases.cpp ${libHeaders}
 	${CXX} ${CPPFLAGS} ${CXXFLAGS} -o ${srcDir}/add_gap_bases.o -c ${srcDir}/add_gap_bases.cpp
+
+${blockVizDir}/impl/taffyBlockViz.o : ${blockVizDir}/impl/taffyBlockViz.cpp ${blockVizDir}/inc/taffyBlockViz.h ${libHeaders}
+	${CXX} ${CPPFLAGS} ${CXXFLAGS} -I${blockVizDir}/inc -o ${blockVizDir}/impl/taffyBlockViz.o -c ${blockVizDir}/impl/taffyBlockViz.cpp
 
 ${srcDir}/merge_adjacent_alignments.o : ${srcDir}/merge_adjacent_alignments.c ${libHeaders} abPOA
 	${CC} ${CFLAGS} ${LDFLAGS} -o ${srcDir}/merge_adjacent_alignments.o -c ${srcDir}/merge_adjacent_alignments.c
@@ -88,6 +92,9 @@ ${BINDIR}/stTafTests : ${libTests} ${LIBDIR}/libstTaf.a ${stTafDependencies}
 
 ${BINDIR}/taffy : taf_norm.o taf_add_gap_bases.o taf_index.o taf_view.o taf_sort.o taf_stats.o taf_coverage.o taf_annotate.o taf_lift.o taf_gerp.o taf_gerp_stats.o taffy_main.o ${LIBDIR}/libstTaf.a ${libHeaders} ${stTafDependencies}
 	${CXX} ${CPPFLAGS} ${CXXFLAGS} taf_norm.o taf_add_gap_bases.o taf_index.o taf_view.o taf_sort.o taf_stats.o taf_coverage.o taf_annotate.o taf_lift.o taf_gerp.o taf_gerp_stats.o taffy_main.o -o ${BINDIR}/taffy ${LIBDIR}/libstTaf.a ${LDLIBS}
+
+${BINDIR}/taffyBlockVizTest : ${blockVizDir}/tests/taffyBlockVizTest.cpp ${LIBDIR}/libstTaf.a ${blockVizDir}/inc/taffyBlockViz.h ${stTafDependencies}
+	${CXX} ${CPPFLAGS} ${CXXFLAGS} -I${blockVizDir}/inc ${blockVizDir}/tests/taffyBlockVizTest.cpp -o ${BINDIR}/taffyBlockVizTest ${LIBDIR}/libstTaf.a ${LDLIBS}
 
 taffy_main.o : taffy_main.cpp ${stTafDependencies} ${libHeaders}
 	${CXX} ${CPPFLAGS} ${CXXFLAGS} -o taffy_main.o -c taffy_main.cpp
