@@ -15,6 +15,7 @@
 #include <string.h>
 #include <assert.h>
 #include <signal.h>
+#include <omp.h>
 #include <stdlib.h>
 #include <time.h>
 #include <unistd.h>
@@ -1804,7 +1805,13 @@ struct _TuiGenomeLift {
     // Running max(chunk.g_max) over chunks[0..i] -- same shape as
     // TGLChunk::max_end_prefix, but over chunks for the outer scan.
     int64_t   *chunk_max_end;
-    OneFile   *of;               // kept open for lazy R decoding
+    // OneFile cursor(s) for lazy R decoding.  When n_threads > 1 this is a
+    // ONElib master+slaves array (returned by oneFileOpenRead with
+    // nthreads > 1); &of[tid] gives each OpenMP worker its own cursor so
+    // chunk_decode calls don't contend on a shared file position.  Closed
+    // via oneFileClose(of) which tears down the whole group.
+    OneFile   *of;
+    int        n_threads;
 };
 
 static int glrun_cmp(const void *a, const void *b) {
@@ -1885,7 +1892,16 @@ TuiGenomeLift *tui_genome_lift_load(Tui *tui, const char *genome_name) {
     // returned gl for lazy chunk_decode on first column-query hit, and would
     // otherwise have its file position clobbered by interleaved tui_query
     // calls in the source-side path.  Closed in tui_genome_lift_destruct.
-    OneFile *of = oneFileOpenRead(tui->path, NULL, "tui", 1);
+    //
+    // Open with nthreads = omp_get_max_threads() so chunk_decode in
+    // tui_genome_lift_visit_runs can fan its zlib-inflate hot path across
+    // threads, each using its own &of[tid] cursor.  Slaves are cheap
+    // (share indices+codecs with master per ONElib); falling back to 1
+    // here is fine, but capping is unnecessary -- the user already
+    // controls width via OMP_NUM_THREADS.
+    int n_threads = omp_get_max_threads();
+    if (n_threads < 1) n_threads = 1;
+    OneFile *of = oneFileOpenRead(tui->path, NULL, "tui", n_threads);
     if (of == NULL) return NULL;
 
     // Match d-lines on prefix "<genome_name>." -- the writer's d-line names
@@ -1996,6 +2012,7 @@ TuiGenomeLift *tui_genome_lift_load(Tui *tui, const char *genome_name) {
     gl->n_chunks      = nc;
     gl->chunk_max_end = cme;
     gl->of            = of;     // kept open; destruct closes
+    gl->n_threads     = n_threads;
     return gl;
 }
 
@@ -2173,35 +2190,86 @@ void tui_genome_lift_visit_runs(TuiGenomeLift *gl, int64_t c_lo, int64_t c_hi,
     if (gl == NULL || cb == NULL || c_lo >= c_hi) return;
     TGLChunk *cs = gl->chunks;
     // Chunks are sorted by g_min.  Binary-search the lower_bound on
-    // g_min >= c_lo, then handle straddlers (g_min < c_lo but g_max > c_lo)
-    // via a BACKWARD pass terminated by chunk_max_end[j-1] <= c_lo, and the
-    // in-range chunks via a FORWARD pass terminated by g_min >= c_hi.  This
-    // mirrors tui_genome_lift_column's per-column outer scan (this function's
-    // previous ci=0 forward linear scan made --fast O(n_chunks_target) per iv,
-    // which dominated wall on dense intermediate targets on big TUIs).
+    // g_min >= c_lo, then collect straddlers (g_min < c_lo but g_max
+    // > c_lo) via a BACKWARD pass terminated by chunk_max_end[j-1]
+    // <= c_lo, and in-range chunks via a FORWARD pass terminated by
+    // g_min >= c_hi.  This mirrors tui_genome_lift_column's per-column
+    // outer scan.
+    //
+    // Pass 1 (cheap, serial): collect visited chunk indices into
+    // visited[].  Pass 2 (parallel): chunk_decode each chunk that
+    // hasn't been decoded yet -- the zlib-inflate of a ~1.6 MB R blob
+    // dominates wall on cold cache, and each chunk is decoded by
+    // exactly one thread thanks to OpenMP's iteration partitioning
+    // (no race on ch->runs).  Pass 3 (serial): walk runs and call cb
+    // -- pending_push / bin accumulators are not thread-safe, and
+    // the per-run cost is microseconds anyway so this is cheap.
     int64_t lo = 0, hi = gl->n_chunks;
     while (lo < hi) {
         int64_t m = lo + (hi - lo) / 2;
         if (cs[m].g_min < c_lo) lo = m + 1; else hi = m;
     }
     int64_t start = lo;
-    // Backward pass: straddlers with g_min < c_lo but g_max > c_lo.
+
+    int64_t v_cap = 64, v_n = 0;
+    int64_t *visited = st_malloc((size_t)v_cap * sizeof(int64_t));
+    // Backward pass collects in DESCENDING ci order; reverse below so
+    // visited[] is g_min-ascending (preserves cb call order vs the
+    // previous in-place implementation, which mattered to downstream
+    // pending_push merging).
+    int64_t back_start = v_n;
     for (int64_t ci = start - 1; ci >= 0; ci--) {
-        TGLChunk *ch = &cs[ci];
-        if (ch->g_max > c_lo) {
-            if (ch->runs == NULL) chunk_decode(ch, gl->of);
-            visit_chunk_runs(ch, gl, c_lo, c_hi, cb, user);
+        if (cs[ci].g_max > c_lo) {
+            if (v_n == v_cap) {
+                v_cap *= 2;
+                visited = st_realloc(visited, (size_t)v_cap * sizeof(int64_t));
+            }
+            visited[v_n++] = ci;
         }
         if (ci == 0) break;
         if (gl->chunk_max_end[ci - 1] <= c_lo) break;
     }
-    // Forward pass: chunks with g_min in [c_lo, c_hi).
+    for (int64_t i = back_start, j = v_n - 1; i < j; i++, j--) {
+        int64_t t = visited[i]; visited[i] = visited[j]; visited[j] = t;
+    }
     for (int64_t ci = start; ci < gl->n_chunks; ci++) {
-        TGLChunk *ch = &cs[ci];
-        if (ch->g_min >= c_hi) break;
+        if (cs[ci].g_min >= c_hi) break;
+        if (v_n == v_cap) {
+            v_cap *= 2;
+            visited = st_realloc(visited, (size_t)v_cap * sizeof(int64_t));
+        }
+        visited[v_n++] = ci;
+    }
+
+    // Parallel decode.  Skip the parallel section when there's nothing to
+    // gain (one chunk, single-threaded gl, or all chunks already cached)
+    // to avoid the OpenMP barrier overhead.
+    if (gl->n_threads > 1 && v_n > 1) {
+        int64_t needs_decode = 0;
+        for (int64_t i = 0; i < v_n; i++)
+            if (cs[visited[i]].runs == NULL) needs_decode++;
+        if (needs_decode > 1) {
+            #pragma omp parallel for schedule(dynamic, 1) num_threads(gl->n_threads)
+            for (int64_t i = 0; i < v_n; i++) {
+                TGLChunk *ch = &cs[visited[i]];
+                if (ch->runs == NULL) {
+                    int tid = omp_get_thread_num();
+                    chunk_decode(ch, &gl->of[tid]);
+                }
+            }
+        }
+    }
+
+    // Serial walk + cb.  Defensive chunk_decode handles the case where the
+    // parallel section was skipped (single-threaded gl, or n_threads > 1
+    // but the heuristic above bailed out) and a given chunk hadn't been
+    // decoded yet by a prior call.
+    for (int64_t i = 0; i < v_n; i++) {
+        TGLChunk *ch = &cs[visited[i]];
         if (ch->runs == NULL) chunk_decode(ch, gl->of);
         visit_chunk_runs(ch, gl, c_lo, c_hi, cb, user);
     }
+    free(visited);
 }
 
 /////////////////////////////////////////////////////////////////////////////
