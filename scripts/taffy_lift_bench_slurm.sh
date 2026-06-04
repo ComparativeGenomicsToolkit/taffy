@@ -55,6 +55,11 @@ MAX_GAPS_CSV=""                     # --maxGap CSV: e.g. "0,1000,10000".  Empty 
 FAST_MODE=0                         # --fast: add a --fast variant cell next to each taffy cell.
 BIN_SIZES_CSV=""                    # --bin CSV: e.g. "100000,1000000".  Empty = no binned variants.
                                     # Non-empty implies --fast (the binned mode requires it at the taffy CLI).
+THREADS_PER_CELL_CSV="1"            # OMP_NUM_THREADS values for taffy cells, comma-separated.
+                                    # Each value becomes a variant cell with OMP_NUM_THREADS=N
+                                    # exported -- lets you A/B compare parallel-decode wall.
+                                    # Default "1" = single-threaded (preserves prior behaviour).
+                                    # Tool name suffix '_t<N>' when N>1; N=1 keeps the bare name.
 SIZES="1000,100000,1000000"
 N_INTERVALS=100                     # random intervals per (species, size) cell
 SEED=42                             # RNG seed for the random-interval generator
@@ -136,6 +141,16 @@ Optional:
                 <S> is human-readable when divisible (1M, 100k, 1G) and
                 raw int otherwise.  Example: --bin 100000,1000000 adds
                 'maf.tui_fast_bin100k' and 'maf.tui_fast_bin1M' per cell.
+  --threadsPerCell CSV
+                OMP_NUM_THREADS values for taffy cells, comma-separated
+                (e.g. "1,4,8").  Each value becomes its own variant cell
+                per (species, size, source, mode) -- lets you A/B compare
+                parallel-decode wall in a single bench.  Tool name suffix
+                '_t<N>' when N>1; N=1 keeps the bare name for compat.
+                Default "1" = single-threaded.  halLiftover / liftover
+                ignore OMP_NUM_THREADS so don't get _t<N> variants.
+                T_TOTAL should be >= concurrent-cells * max-N to avoid
+                oversubscription; the driver warns at submit time.
   --timeBudget SEC  Per-cell wall cap (timeout) (default $TIME_BUDGET)
   --time HRS    sbatch wall (default $SBATCH_TIME)
   --mem GB      sbatch mem (default $SBATCH_MEM)
@@ -171,6 +186,7 @@ while [[ $# -gt 0 ]]; do
         --maxGap)       MAX_GAPS_CSV="$2"; shift 2;;
         --fast)         FAST_MODE=1; shift;;
         --bin)          BIN_SIZES_CSV="$2"; shift 2;;
+        --threadsPerCell) THREADS_PER_CELL_CSV="$2"; shift 2;;
         --timeBudget)   TIME_BUDGET="$2"; shift 2;;
         --time)         SBATCH_TIME="$2"; shift 2;;
         --mem)          SBATCH_MEM="$2"; shift 2;;
@@ -334,6 +350,15 @@ else
     FAST_MODE=1
 fi
 
+# --- Resolve --threadsPerCell CSV.  Default "1" -> a single variant
+# with OMP_NUM_THREADS=1 (preserves existing tool names).  Each value
+# fans out a separate taffy cell with OMP_NUM_THREADS=N exported;
+# tool name suffix '_t<N>' when N > 1, no suffix at N == 1.
+IFS=',' read -r -a THREADS_PER_CELL_ARR <<< "$THREADS_PER_CELL_CSV"
+for T in "${THREADS_PER_CELL_ARR[@]}"; do
+    [[ "$T" =~ ^[1-9][0-9]*$ ]] || { echo "ERROR: --threadsPerCell values must be positive integers (got '$T')" >&2; exit 1; }
+done
+
 python3 - "$REF_SIZES" "$OUTDIR/beds" "$SEED" "$N_INTERVALS" "${SIZE_ARR[@]}" <<'PY'
 import os, random, sys
 sizes_path, beds_dir, seed, n_intervals, *sizes = sys.argv[1:]
@@ -384,6 +409,17 @@ echo ">> sizes:         ${SIZE_ARR[*]}  ($N_INTERVALS intervals each, seed=$SEED
 echo ">> --maxGap vals: ${MAX_GAPS_ARR[*]}  (taffy cells per source per (species, size))"
 echo ">> --fast mode:   $([[ $FAST_MODE -eq 1 ]] && echo "ON (adds _fast variant per taffy cell)" || echo "OFF (default column-walk only)")"
 echo ">> --bin sizes:   $([[ ${#BIN_SIZES_ARR[@]} -gt 0 ]] && echo "${BIN_SIZES_ARR[*]}  (adds 1 fast+bin cell per size at K=0)" || echo "OFF")"
+echo ">> --threadsPerCell: ${THREADS_PER_CELL_ARR[*]}  (OMP_NUM_THREADS per taffy cell; N>1 cells get _t<N> suffix)"
+# Oversubscription check: concurrent taffy cells = N_SPECIES * N_TAFFY_TOOLS;
+# total CPU demand = sum(threads_per_cell) per (species, size, source, mode, bin).
+# N_TAFFY_TOOLS = N_MAX_GAPS * (1 + FAST_MODE) + (FAST_MODE * N_BIN), times sources,
+# all times threadsPerCell values length.  Approximate the order-of-magnitude check.
+_T_SUM=0
+for T in "${THREADS_PER_CELL_ARR[@]}"; do _T_SUM=$((_T_SUM + T)); done
+_N_TAFFY_VARIANTS=$(( ${#MAX_GAPS_ARR[@]} * (1 + FAST_MODE) + FAST_MODE * ${#BIN_SIZES_ARR[@]} ))
+_N_SRC=0; [[ -n "$UNI" ]] && _N_SRC=$((_N_SRC + 1)); [[ -n "$UNI_TAF" ]] && _N_SRC=$((_N_SRC + 1))
+_THREADS_NEEDED=$(( N_SPECIES * _N_SRC * _N_TAFFY_VARIANTS * _T_SUM / ${#THREADS_PER_CELL_ARR[@]} ))
+(( T_TOTAL >= _THREADS_NEEDED )) || echo ">> WARN: T_TOTAL=$T_TOTAL < estimated ${_THREADS_NEEDED} threads needed for full-parallel taffy fan-out; will queue / oversubscribe" >&2
 echo ">> cpus/task:     $T_TOTAL  (one core per concurrent cell)"
 echo ">> time budget:   $TIME_BUDGET s per cell"
 echo ">> local-stage:   $([[ $STAGE_LOCAL -eq 1 ]] && echo "ON (copies to \$TMPDIR)" || echo "OFF (reads from network)")"
@@ -413,6 +449,7 @@ SIZES=( ${SIZE_ARR[*]} )
 MAX_GAPS=( ${MAX_GAPS_ARR[*]} )
 FAST_MODE=$FAST_MODE
 BIN_SIZES=( ${BIN_SIZES_ARR[*]:-} )
+THREADS_PER_CELL=( ${THREADS_PER_CELL_ARR[*]} )
 
 # Format an integer bin size as the human-readable suffix used in tool
 # names ('1M', '100k', '500'); divisibility-exact only, no rounding.
@@ -600,6 +637,11 @@ for N in "\${SIZES[@]}"; do
         #   K=0, fast         : "maf.tui_fast"
         #   K>0, fast         : "maf.tui_g<K>_fast"
         # (Same scheme for taf.tui.)
+        # ttag(): tool-name suffix for OMP_NUM_THREADS=N (empty for N==1
+        # so the bare "maf.tui_fast" name still appears in single-thread
+        # runs -- matters for legacy bench.tsv readers).
+        ttag() { [[ "\$1" == "1" ]] && echo "" || echo "_t\$1"; }
+
         modes=( default )
         [[ "\$FAST_MODE" -eq 1 ]] && modes+=( fast )
         for K in "\${MAX_GAPS[@]}"; do
@@ -610,57 +652,67 @@ for N in "\${SIZES[@]}"; do
                 else
                     ftag=""; ffl=()
                 fi
-                if [[ -n "\$UNI" ]]; then
-                    tool="maf.tui\${gtag}\${ftag}"
-                    stem="\${tool}_\${sid}_\${N}"
-                    rowfiles[\$stem]="\$LOGDIR/row_\${stem}.tsv"
-                    ( run_cell "\$tool" "\$sid" "\$sci" "\$common" "\$N" "\$TIME_BUDGET" \\
-                        "\$TAFFY" lift -i "\$UNI" -b "\$BED_PREFIXED" -g "\$sid" \\
-                                      --maxGap "\$K" "\${ffl[@]}" \\
-                                      -o "\$LOGDIR/mapped_\${stem}.bed" \\
-                      ) > "\${rowfiles[\$stem]}" &
-                    pids[\$stem]=\$!
-                fi
-                if [[ -n "\$UNI_TAF" ]]; then
-                    tool="taf.tui\${gtag}\${ftag}"
-                    stem="\${tool}_\${sid}_\${N}"
-                    rowfiles[\$stem]="\$LOGDIR/row_\${stem}.tsv"
-                    ( run_cell "\$tool" "\$sid" "\$sci" "\$common" "\$N" "\$TIME_BUDGET" \\
-                        "\$TAFFY" lift -i "\$UNI_TAF" -b "\$BED_PREFIXED" -g "\$sid" \\
-                                      --maxGap "\$K" "\${ffl[@]}" \\
-                                      -o "\$LOGDIR/mapped_\${stem}.bed" \\
-                      ) > "\${rowfiles[\$stem]}" &
-                    pids[\$stem]=\$!
-                fi
+                for THREADS in "\${THREADS_PER_CELL[@]}"; do
+                    tt="\$(ttag \$THREADS)"
+                    if [[ -n "\$UNI" ]]; then
+                        tool="maf.tui\${gtag}\${ftag}\${tt}"
+                        stem="\${tool}_\${sid}_\${N}"
+                        rowfiles[\$stem]="\$LOGDIR/row_\${stem}.tsv"
+                        ( export OMP_NUM_THREADS=\$THREADS; \\
+                          run_cell "\$tool" "\$sid" "\$sci" "\$common" "\$N" "\$TIME_BUDGET" \\
+                            "\$TAFFY" lift -i "\$UNI" -b "\$BED_PREFIXED" -g "\$sid" \\
+                                          --maxGap "\$K" "\${ffl[@]}" \\
+                                          -o "\$LOGDIR/mapped_\${stem}.bed" \\
+                        ) > "\${rowfiles[\$stem]}" &
+                        pids[\$stem]=\$!
+                    fi
+                    if [[ -n "\$UNI_TAF" ]]; then
+                        tool="taf.tui\${gtag}\${ftag}\${tt}"
+                        stem="\${tool}_\${sid}_\${N}"
+                        rowfiles[\$stem]="\$LOGDIR/row_\${stem}.tsv"
+                        ( export OMP_NUM_THREADS=\$THREADS; \\
+                          run_cell "\$tool" "\$sid" "\$sci" "\$common" "\$N" "\$TIME_BUDGET" \\
+                            "\$TAFFY" lift -i "\$UNI_TAF" -b "\$BED_PREFIXED" -g "\$sid" \\
+                                          --maxGap "\$K" "\${ffl[@]}" \\
+                                          -o "\$LOGDIR/mapped_\${stem}.bed" \\
+                        ) > "\${rowfiles[\$stem]}" &
+                        pids[\$stem]=\$!
+                    fi
+                done
 
                 # --bin variants: only at K=0 + mode=fast (--bin is mutex
-                # with --maxGap at the CLI, and requires --fast).  Adds
-                # one extra cell per bin size in BIN_SIZES.
+                # with --maxGap at the CLI, and requires --fast).  One
+                # extra cell per (bin size, threads_per_cell).
                 if [[ "\$mode" == "fast" && "\$K" == "0" && \${#BIN_SIZES[@]} -gt 0 ]]; then
                     for B in "\${BIN_SIZES[@]}"; do
                         btag="_bin\$(fmt_bin \$B)"
-                        if [[ -n "\$UNI" ]]; then
-                            tool="maf.tui\${ftag}\${btag}"
-                            stem="\${tool}_\${sid}_\${N}"
-                            rowfiles[\$stem]="\$LOGDIR/row_\${stem}.tsv"
-                            ( run_cell "\$tool" "\$sid" "\$sci" "\$common" "\$N" "\$TIME_BUDGET" \\
-                                "\$TAFFY" lift -i "\$UNI" -b "\$BED_PREFIXED" -g "\$sid" \\
-                                              --fast --bin "\$B" \\
-                                              -o "\$LOGDIR/mapped_\${stem}.bed" \\
-                              ) > "\${rowfiles[\$stem]}" &
-                            pids[\$stem]=\$!
-                        fi
-                        if [[ -n "\$UNI_TAF" ]]; then
-                            tool="taf.tui\${ftag}\${btag}"
-                            stem="\${tool}_\${sid}_\${N}"
-                            rowfiles[\$stem]="\$LOGDIR/row_\${stem}.tsv"
-                            ( run_cell "\$tool" "\$sid" "\$sci" "\$common" "\$N" "\$TIME_BUDGET" \\
-                                "\$TAFFY" lift -i "\$UNI_TAF" -b "\$BED_PREFIXED" -g "\$sid" \\
-                                              --fast --bin "\$B" \\
-                                              -o "\$LOGDIR/mapped_\${stem}.bed" \\
-                              ) > "\${rowfiles[\$stem]}" &
-                            pids[\$stem]=\$!
-                        fi
+                        for THREADS in "\${THREADS_PER_CELL[@]}"; do
+                            tt="\$(ttag \$THREADS)"
+                            if [[ -n "\$UNI" ]]; then
+                                tool="maf.tui\${ftag}\${btag}\${tt}"
+                                stem="\${tool}_\${sid}_\${N}"
+                                rowfiles[\$stem]="\$LOGDIR/row_\${stem}.tsv"
+                                ( export OMP_NUM_THREADS=\$THREADS; \\
+                                  run_cell "\$tool" "\$sid" "\$sci" "\$common" "\$N" "\$TIME_BUDGET" \\
+                                    "\$TAFFY" lift -i "\$UNI" -b "\$BED_PREFIXED" -g "\$sid" \\
+                                                  --fast --bin "\$B" \\
+                                                  -o "\$LOGDIR/mapped_\${stem}.bed" \\
+                                ) > "\${rowfiles[\$stem]}" &
+                                pids[\$stem]=\$!
+                            fi
+                            if [[ -n "\$UNI_TAF" ]]; then
+                                tool="taf.tui\${ftag}\${btag}\${tt}"
+                                stem="\${tool}_\${sid}_\${N}"
+                                rowfiles[\$stem]="\$LOGDIR/row_\${stem}.tsv"
+                                ( export OMP_NUM_THREADS=\$THREADS; \\
+                                  run_cell "\$tool" "\$sid" "\$sci" "\$common" "\$N" "\$TIME_BUDGET" \\
+                                    "\$TAFFY" lift -i "\$UNI_TAF" -b "\$BED_PREFIXED" -g "\$sid" \\
+                                                  --fast --bin "\$B" \\
+                                                  -o "\$LOGDIR/mapped_\${stem}.bed" \\
+                                ) > "\${rowfiles[\$stem]}" &
+                                pids[\$stem]=\$!
+                            fi
+                        done
                     done
                 fi
             done
@@ -823,10 +875,15 @@ def _parse_bin_suffix(s):
     return int(m.group(1)) * {'G': 10**9, 'M': 10**6, 'k': 10**3, '': 1}[m.group(2)]
 
 def parse_tool(tool):
-    """Return (family, gap, is_fast, bin) for taffy variants like
-    'maf.tui_g1000_fast' / 'maf.tui_fast_bin1M' / 'maf.tui'.
-    Non-tui tools return (tool, None, False, None)."""
-    # _binN is outermost suffix in our naming convention; strip first.
+    """Return (family, gap, is_fast, bin, threads) for taffy variants:
+    'maf.tui' / 'maf.tui_fast' / 'maf.tui_fast_bin1M_t8' / etc.
+    Suffix strip order (outermost first): _t<N>, _bin<S>, _fast, _g<K>.
+    Non-tui tools return (tool, None, False, None, 1)."""
+    threads = 1
+    m = re.search(r'_t(\d+)$', tool)
+    if m:
+        threads = int(m.group(1))
+        tool = tool[:m.start()]
     bin_size = None
     m = re.search(r'_bin(\d+[GMk]?)$', tool)
     if m:
@@ -835,15 +892,15 @@ def parse_tool(tool):
     is_fast = tool.endswith("_fast")
     base = tool[:-len("_fast")] if is_fast else tool
     for fam in ("maf.tui", "taf.tui"):
-        if base == fam:           return fam, 0, is_fast, bin_size
+        if base == fam:           return fam, 0, is_fast, bin_size, threads
         prefix = fam + "_g"
         if base.startswith(prefix):
-            try: return fam, int(base[len(prefix):]), is_fast, bin_size
+            try: return fam, int(base[len(prefix):]), is_fast, bin_size, threads
             except ValueError: pass
-    return tool, None, False, bin_size
+    return tool, None, False, bin_size, threads
 
 def tool_color(tool):
-    fam, gap, _, _ = parse_tool(tool)
+    fam, gap, _, _, _ = parse_tool(tool)
     base = BASE_COLOR.get(fam, "#666666")
     if gap is None or gap == 0:
         return base
@@ -859,12 +916,12 @@ size_marker = {sz: m for sz, m in zip(sizes, ["o", "s", "^", "D", "v", "*"])}
 # Tools present in the data, ordered: non-tui first, then tui families
 # sorted within by K.
 def tool_sort_key(t):
-    fam, gap, is_fast, bin_size = parse_tool(t)
+    fam, gap, is_fast, bin_size, threads = parse_tool(t)
     fam_order = {"liftover": 0, "halLiftover": 1, "maf.tui": 2, "taf.tui": 3}.get(fam, 9)
     # Order within family: by gap, then default-before-fast, then no-bin
-    # before binned variants (ascending bin size after that).
+    # before binned variants (ascending bin size), then ascending thread count.
     return (fam_order, gap if gap is not None else -1, int(is_fast),
-            -1 if bin_size is None else bin_size)
+            -1 if bin_size is None else bin_size, threads)
 tools = sorted({r["tool"] for r in rows}, key=tool_sort_key)
 
 def by_tool_size(tool, size):
@@ -878,7 +935,7 @@ def by_tool_size(tool, size):
 
 for tool in tools:
     color = tool_color(tool)
-    _, _, is_fast, bin_size = parse_tool(tool)
+    _, _, is_fast, bin_size, _ = parse_tool(tool)
     # --fast variants render with dashed line + open marker so they
     # overlay cleanly on top of their column-walk counterpart (same
     # color/marker family).  --bin variants are dotted (":") to stack
