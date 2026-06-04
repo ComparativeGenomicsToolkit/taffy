@@ -153,6 +153,30 @@ int64_t *tui_load_seq_runs(Tui *tui, const char *seq_name, int64_t *n_out);
  */
 stHash *tui_sequence_lengths(const char *tui_path);
 
+/*
+ * Per-resolved-genome metadata, returned by tui_genome_names().  `name` is
+ * malloc'd; free via tui_genome_info_free.
+ */
+typedef struct {
+    char    *name;
+    int64_t  total_bp;
+    int64_t  n_chroms;
+} TuiGenomeInfo;
+
+/*
+ * Enumerate the genome roster (g records) embedded in the .tui at index
+ * time, in writer order.  Returns NULL with *n_out == 0 when the .tui
+ * predates the g-record schema (those callers should fall back to a
+ * heuristic on `tui_sequence_lengths` output).  Caller frees via
+ * tui_genome_info_free.
+ *
+ * The roster is deterministic and resolves the "<genome>.<sequence>"
+ * boundary without ambiguity for genome names that contain dots
+ * themselves (NCBI versioned accessions like "GCA_028858775.2").
+ */
+TuiGenomeInfo *tui_genome_names(const char *tui_path, int64_t *n_out);
+void tui_genome_info_free(TuiGenomeInfo *info, int64_t n);
+
 /////////////////////////////////////////////////////////////////////////////
 // Reverse lookup: universal column -> a target genome's coordinate.
 //

@@ -66,7 +66,17 @@ static const char *TUI_SCHEMA =
                                                    // field count at open and falls
                                                    // back to "decode every chunk" in
                                                    // that case.
-    "D R 2 3 INT 6 STRING\n";                // runs (one per chunk): inflatedLen, deflate(blob)
+    "D R 2 3 INT 6 STRING\n"                 // runs (one per chunk): inflatedLen, deflate(blob)
+    "O g 3 6 STRING 3 INT 3 INT\n";          // genome roster (per resolved genome):
+                                             //   name, total_bp (sum of seqLens),
+                                             //   n_chroms.  Written at the end of
+                                             //   the .tui after all per-seq d/S/C/R
+                                             //   are emitted.  Old .tui (pre-roster)
+                                             //   files lack this line type entirely;
+                                             //   tui_genome_names() detects the
+                                             //   absence via of->info['g']==NULL and
+                                             //   returns NULL so callers can fall
+                                             //   back to a heuristic.
 
 // Writer-side chunk caps.  A chunk closes when EITHER trigger fires:
 //
@@ -1500,6 +1510,23 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
                        nr_saved);
         }
     }
+    // --- Genome roster (g records) -----------------------------------------
+    // One record per resolved genome with (name, total_bp, n_chroms).
+    // Written here -- after every per-seq d/S/C/R is on disk -- so the
+    // reader has a stable, deterministic genome list without having to
+    // guess where the "<genome>.<sequence>" split is in d-line keys
+    // (matters for NCBI-style versioned accessions like
+    // "GCA_028858775.2" where the genome name itself contains a dot).
+    for (int64_t gi = 0; gi < n_genomes; gi++) {
+        int64_t total_bp = 0;
+        int64_t n_chroms = gr[gi].seqks_end - gr[gi].seqks_start;
+        for (int64_t i = gr[gi].seqks_start; i < gr[gi].seqks_end; i++)
+            total_bp += slen_by_idx[i];
+        oneInt(of, 1) = total_bp;
+        oneInt(of, 2) = n_chroms;
+        oneWriteLine(of, 'g', strlen(gr[gi].gname), (void *)gr[gi].gname);
+    }
+
     free(gr);
     free(slen_by_idx);
     st_logInfo("tui: phase 2 done in %" PRIi64 " seconds\n",
@@ -1883,6 +1910,44 @@ stHash *tui_sequence_lengths(const char *tui_path) {
     }
     oneFileClose(of);
     return out;
+}
+
+TuiGenomeInfo *tui_genome_names(const char *tui_path, int64_t *n_out) {
+    if (n_out) *n_out = 0;
+    if (tui_path == NULL) return NULL;
+    OneFile *of = oneFileOpenRead(tui_path, NULL, "tui", 1);
+    if (of == NULL) return NULL;
+    // Backward-compat: old .tui files predating the g-record schema lack
+    // the 'g' line type entirely; ONElib leaves of->info['g']==NULL in
+    // that case.  Return NULL so callers can fall back to a heuristic.
+    if (of->info[(int)'g'] == NULL) { oneFileClose(of); return NULL; }
+    I64 n_g = 0;
+    oneStats(of, 'g', &n_g, NULL, NULL);
+    if (n_g <= 0) { oneFileClose(of); return NULL; }
+    TuiGenomeInfo *arr = (TuiGenomeInfo *) st_calloc((size_t)n_g, sizeof(TuiGenomeInfo));
+    char buf[8192];
+    for (int64_t i = 1; i <= (int64_t)n_g; i++) {
+        if (!oneGoto(of, 'g', i)) { tui_genome_info_free(arr, n_g); oneFileClose(of); return NULL; }
+        if (oneReadLine(of) != 'g') { tui_genome_info_free(arr, n_g); oneFileClose(of); return NULL; }
+        int64_t nl = oneLen(of);
+        if (nl < 0 || nl >= (int64_t)sizeof(buf)) {
+            tui_genome_info_free(arr, n_g); oneFileClose(of); return NULL;
+        }
+        memcpy(buf, oneString(of), (size_t)nl);
+        buf[nl] = '\0';
+        arr[i - 1].name     = stString_copy(buf);
+        arr[i - 1].total_bp = oneInt(of, 1);
+        arr[i - 1].n_chroms = oneInt(of, 2);
+    }
+    oneFileClose(of);
+    if (n_out) *n_out = n_g;
+    return arr;
+}
+
+void tui_genome_info_free(TuiGenomeInfo *info, int64_t n) {
+    if (info == NULL) return;
+    for (int64_t i = 0; i < n; i++) free(info[i].name);
+    free(info);
 }
 
 TuiGenomeLift *tui_genome_lift_load(Tui *tui, const char *genome_name) {
