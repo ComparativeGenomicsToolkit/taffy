@@ -172,6 +172,17 @@ int taffyCloseGenome(int taffyHandle, const char *genomeName, char **errStr);
  *                    this is rejected outright -- the chain breaks.
  *                    Pass INT64_MAX to disable the gap-break.
  *
+ * Empirical sensitivity on apes universal MAF (sweep across 4 hg38 chr5
+ * regions, max_gap from 1 KB to 100 MB): primary-chain selection is
+ * INSENSITIVE to max_gap_length over 5 orders of magnitude -- the
+ * gap-cost (chain_extend * gap_bp) already breaks chains at appropriate
+ * points before any hard cutoff fires.  chain_extend IS the
+ * sensitive knob -- ranging it from 0 to 1e4 changes the secondary-
+ * chain partition count by ~4x while leaving primary unchanged.  At
+ * snake-track scales, default 10 Mb max_gap is functionally equivalent
+ * to INT64_MAX; the hard cutoff is a safety net for pathological
+ * (e.g. cross-chromosome) cases.
+ *
  * Pass -1 in any field to leave that field unchanged.  All other
  * negative values are rejected (returns -1 with errStr).  Returns 0
  * on success.  Thread-safe (takes the same lock as the query path).

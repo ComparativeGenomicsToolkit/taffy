@@ -38,6 +38,9 @@ struct Args {
     int mapBack = 0;
     std::string qChrom;       // "" = unfiltered
     taffy_dup_type_t dupMode = TAFFY_QUERY_AND_TARGET_DUPS;
+    int64_t chainOpen     = -1;     // -1 = leave at handle default
+    int64_t chainExtend   = -1;
+    int64_t chainMaxGap   = -1;
 };
 
 static void usage(const char *prog) {
@@ -45,9 +48,14 @@ static void usage(const char *prog) {
         "usage: %s [options] <tuiPath> <qSpecies> <tSpecies> <tChrom> <tStart> <tEnd>\n"
         "options:\n"
         "  --doSeq                request sequence (no-op in initial cut)\n"
-        "  --doDupes              include target-dupe list (no-op in initial cut)\n"
+        "  --doDupes              include target-dupe list\n"
         "  --verbose              verbose tracing on stderr\n"
+        "  --mapBack              include mapBackAdjacencies off-screen flanks\n"
         "  --filterByChrom <chr>  restrict output to a single qChrom\n"
+        "  --dupMode MODE         noDups | queryDups | all  (default: all)\n"
+        "  --maxGap N             override per-handle chain max_gap_length\n"
+        "  --chainOpen N          override per-handle chain_open\n"
+        "  --chainExtend N        override per-handle chain_extend\n"
         "  -h / --help            this help\n", prog);
 }
 
@@ -71,6 +79,18 @@ static int parse_args(int argc, char **argv, Args *a) {
             else if (m == "all")    a->dupMode = TAFFY_QUERY_AND_TARGET_DUPS;
             else { fprintf(stderr, "--dupMode must be noDups|queryDups|all\n"); return -1; }
             i += 2;
+        }
+        else if (opt == "--maxGap" || opt == "--chainMaxGap") {
+            if (i + 1 >= argc) { fprintf(stderr, "%s needs an integer\n", opt.c_str()); return -1; }
+            a->chainMaxGap = (int64_t) atoll(argv[i + 1]); i += 2;
+        }
+        else if (opt == "--chainOpen") {
+            if (i + 1 >= argc) { fprintf(stderr, "--chainOpen needs an integer\n"); return -1; }
+            a->chainOpen = (int64_t) atoll(argv[i + 1]); i += 2;
+        }
+        else if (opt == "--chainExtend") {
+            if (i + 1 >= argc) { fprintf(stderr, "--chainExtend needs an integer\n"); return -1; }
+            a->chainExtend = (int64_t) atoll(argv[i + 1]); i += 2;
         }
         else if (opt == "-h" || opt == "--help") { usage(argv[0]); return 1; }
         else { fprintf(stderr, "unknown option: %s\n", opt.c_str()); return -1; }
@@ -99,6 +119,19 @@ int main(int argc, char **argv) {
     char *errStr = nullptr;
     int h = taffyOpen(args.path.c_str(), &errStr);
     if (h < 0) die("taffyOpen", errStr);
+
+    if (args.chainOpen >= 0 || args.chainExtend >= 0 || args.chainMaxGap >= 0) {
+        if (taffySetChainParams(h, args.chainOpen, args.chainExtend,
+                                args.chainMaxGap, &errStr) != 0) {
+            die("taffySetChainParams", errStr);
+        }
+        if (args.verbose) {
+            int64_t co = 0, ce = 0, mg = 0;
+            taffyGetChainParams(h, &co, &ce, &mg, nullptr);
+            fprintf(stderr, ">> chain params: open=%ld extend=%ld max_gap=%ld\n",
+                    (long) co, (long) ce, (long) mg);
+        }
+    }
 
     if (args.verbose) {
         fprintf(stderr, ">> opened %s (handle=%d)\n", args.path.c_str(), h);
