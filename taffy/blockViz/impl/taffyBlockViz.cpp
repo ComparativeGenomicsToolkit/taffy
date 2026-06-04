@@ -466,11 +466,49 @@ struct BlockCtx {
     int64_t c_lo = 0;             // column-start of current interval
     int64_t tpos_at_c_lo = 0;     // tSpecies position at c_lo
     const char *qChromFilter = nullptr;  // optional filter
+
+    // ---- bin mode (auto-engaged for wide queries; see get_blocks_impl) ----
+    // When bin_mode == true, the visitor accumulates covered_bp into a
+    // map keyed by (qChrom, strand, bin_idx) instead of allocating a
+    // taffy_block_t + TaffyAln per run.  The emit phase walks the map
+    // and produces one block per (qChrom, strand, bin_idx) entry.
+    // Skips the chain pass + mapBackAdjacencies entirely (they don't
+    // apply to bin aggregates).
+    bool    bin_mode    = false;
+    int64_t bin_size    = 0;
+    int64_t tStart_user = 0;       // origin so bin_idx = (tpos - tStart_user) / bin_size
+    // Key: (qChrom interned ptr, strand ('+' or '-'), bin_idx).
+    // Value: total covered bp in this bin from runs of this qChrom/strand.
+    struct BinKey {
+        const char *qChrom;        // points into qchrom_interns
+        char        strand;
+        int64_t     bin_idx;
+        bool operator<(const BinKey &o) const {
+            if (qChrom != o.qChrom) return qChrom < o.qChrom;
+            if (strand != o.strand) return strand < o.strand;
+            return bin_idx < o.bin_idx;
+        }
+    };
+    std::map<BinKey, int64_t> bins;
 };
+
+// Bin policy.  At wide queries we want O(1000s) of output blocks, not
+// O(millions).  TARGET_BIN_COUNT sets the max bins per chromosome-scale
+// query; binSize = span / TARGET_BIN_COUNT.  MIN_BIN_BP keeps the per-bin
+// resolution coarse enough that the bookkeeping savings dominate the
+// loss of fidelity -- below this, bin mode is not worth engaging and we
+// return per-run blocks as before.
+static const int64_t TARGET_BIN_COUNT = 2000;
+static const int64_t MIN_BIN_BP       = 100;
 
 // Visitor: clip the q run, compute (tStart, qStart, size, strand),
 // and buffer both a taffy_block_t (for the eventual output linked list)
 // and a TaffyAln (for the chain call after the visit loop).
+//
+// In bin_mode the visitor instead accumulates covered_bp into
+// cx->bins keyed by (qChrom, strand, bin_idx).  No per-run allocation,
+// no chain call after the loop -- the bin entries are themselves the
+// output.
 static void block_visit_cb(const TuiRun *r, void *user) {
     BlockCtx *cx = (BlockCtx *) user;
     if (cx->qChromFilter && strcmp(r->seq, cx->qChromFilter) != 0) return;
@@ -482,6 +520,34 @@ static void block_visit_cb(const TuiRun *r, void *user) {
     // tSpecies position at column `cs`: linear within an interval, since
     // an interval is a contiguous run of tSpecies bases.
     int64_t tStart = cx->tpos_at_c_lo + (cs - cx->c_lo);
+    int64_t size = ce - cs;
+
+    if (cx->bin_mode) {
+        // Intern qChrom (same pointer-stable set as the non-bin path) so
+        // the BinKey can hold a stable const char *.
+        auto ins = cx->qchrom_interns.emplace(r->seq);
+        const char *qc_interned = ins.first->c_str();
+        char strand = r->strand ? '+' : '-';
+
+        // Partition the run [tStart, tStart+size) across bins.  Almost
+        // all runs land in one bin (typical run ~76-300 bp, bin >= 100bp
+        // and usually much larger), but a run that straddles a bin
+        // boundary must contribute to BOTH bins.
+        int64_t tEnd_run = tStart + size;
+        int64_t bin_first = (tStart    - cx->tStart_user) / cx->bin_size;
+        int64_t bin_last  = (tEnd_run - 1 - cx->tStart_user) / cx->bin_size;
+        for (int64_t bi = bin_first; bi <= bin_last; bi++) {
+            int64_t bin_lo = cx->tStart_user + bi * cx->bin_size;
+            int64_t bin_hi = bin_lo + cx->bin_size;
+            int64_t lo = tStart    > bin_lo ? tStart    : bin_lo;
+            int64_t hi = tEnd_run  < bin_hi ? tEnd_run  : bin_hi;
+            int64_t covered = hi - lo;
+            if (covered <= 0) continue;
+            BlockCtx::BinKey k{ qc_interned, strand, bi };
+            cx->bins[k] += covered;
+        }
+        return;
+    }
 
     // Compute qStart honouring strand (mirrors taf_lift.c chunk_lift_visit_cb).
     int64_t qStart;
@@ -490,7 +556,6 @@ static void block_visit_cb(const TuiRun *r, void *user) {
     } else {
         qStart = r->t_start + r->length - (ce - r->g_start);
     }
-    int64_t size = ce - cs;
 
     struct taffy_block_t *b = (struct taffy_block_t *) st_calloc(1, sizeof(*b));
     b->qChrom = strdup(r->seq);
@@ -574,6 +639,25 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
     BlockCtx cx;
     cx.qChromFilter = qChrom;
     cx.tFullName    = tFullName;  // stable interned string for chain partition
+
+    // Auto-bin policy: for wide queries (chromosome-scale browser zoom-
+    // out), switch the visitor into bin-accumulator mode so we emit ~2000
+    // coverage bins instead of millions of per-run blocks.  The per-run
+    // path is O(n_runs * pending-bookkeeping); the bin path is O(1) per
+    // run.  On bird-to-chicken whole-chrom lifts that's ~4M runs becoming
+    // ~10k bin entries -- the dominant savings is killing the per-run
+    // taffy_block_t alloc + the chain pass + the mapBackAdjacencies
+    // edge-search, all of which scale with n_runs.
+    {
+        int64_t span = (int64_t) tEnd - (int64_t) tStart;
+        int64_t bs = (span > 0) ? (span / TARGET_BIN_COUNT) : 0;
+        if (bs >= MIN_BIN_BP) {
+            cx.bin_mode    = true;
+            cx.bin_size    = bs;
+            cx.tStart_user = (int64_t) tStart;
+        }
+    }
+
     int64_t cum_tpos = tStart;
     for (int64_t k = 0; k < n_iv; k++) {
         cx.c_lo = iv[k].start;
@@ -585,6 +669,35 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
     free(iv);
 
     struct taffy_block_results_t *res = (struct taffy_block_results_t *) st_calloc(1, sizeof(*res));
+
+    // Bin-mode short-circuit: walk the accumulator and emit one
+    // taffy_block_t per (qChrom, strand, bin_idx) entry.  No chain pass
+    // (bin aggregates don't have per-row semantics) and no
+    // mapBackAdjacencies (a binned region's neighbors aren't a
+    // well-defined block).  targetDupeBlocks stays NULL.
+    if (cx.bin_mode) {
+        struct taffy_block_t *head = nullptr, *tail = nullptr;
+        for (auto &kv : cx.bins) {
+            const BlockCtx::BinKey &k = kv.first;
+            int64_t covered = kv.second;
+            struct taffy_block_t *b = (struct taffy_block_t *) st_calloc(1, sizeof(*b));
+            b->qChrom = strdup(k.qChrom);
+            b->tStart = cx.tStart_user + k.bin_idx * cx.bin_size;
+            // qStart: synthetic monotone surrogate so adjacent bins keep
+            // their relative order on the q-axis if the browser wants to
+            // sort by qStart.  Not a real qSpecies coord.
+            b->qStart = k.bin_idx * cx.bin_size;
+            b->size   = covered;          // Option A: bin coverage in bp
+            b->strand = k.strand;
+            b->next   = nullptr;
+            if (!head) head = b;
+            if (tail) tail->next = b;
+            tail = b;
+        }
+        res->mappedBlocks = head;
+        return res;
+    }
+
     int64_t n = (int64_t) cx.alns.size();
     if (n == 0) return res;  // empty query, nothing to chain
 

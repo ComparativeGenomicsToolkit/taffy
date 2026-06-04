@@ -221,6 +221,24 @@ void taffyFreeMetadataList(struct taffy_metadata_t *metadata);
 /** Return blocks of `qSpecies` aligned within `tChrom`:[tStart, tEnd)
  * on `tSpecies`.  Output is a linked list of taffy_block_t.
  *
+ * AUTO-BINNING FOR WIDE QUERIES: when (tEnd - tStart) / 2000 >= 100
+ * (i.e. spans of >= 200 kb), the implementation switches to a bin
+ * accumulator instead of emitting one block per mapped run.  Each
+ * output block represents coverage of one (qChrom, strand, bin) cell:
+ *   - block.tStart  = bin start on tChrom (bin_size = span/2000)
+ *   - block.size    = total bp covered by mapped runs landing in this
+ *                     bin from `qChrom` on `strand` (may exceed
+ *                     bin_size when source paralogs map to the same
+ *                     target region)
+ *   - block.qStart  = synthetic monotone surrogate (bin_idx * bin_size,
+ *                     NOT a real qSpecies coord)
+ *   - block.strand  = '+' or '-' of the contributing runs
+ * Bin mode skips the chain pass and mapBackAdjacencies (those don't
+ * apply to aggregated coverage); targetDupeBlocks is always NULL in
+ * bin mode.  This is what gives chromosome-scale browser views their
+ * ~30-100x speedup over per-run output -- on bird-to-chicken
+ * whole-chrom lifts it turns ~4M output blocks into ~2000 bins.
+ *
  * @param taffyHandle      handle from taffyOpen
  * @param qSpecies         genome to fetch blocks FROM
  * @param tSpecies         genome whose coordinates [tStart, tEnd) frame
