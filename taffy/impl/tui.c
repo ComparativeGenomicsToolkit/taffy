@@ -2131,49 +2131,76 @@ int64_t tui_genome_lift_n_chunks(const TuiGenomeLift *gl) {
     return gl == NULL ? 0 : gl->n_chunks;
 }
 
+// Visit runs in `ch` intersecting [c_lo, c_hi).  Binary-search for the first
+// run with g_start >= c_lo, then walk backward (catching earlier runs whose
+// length extends past c_lo via max_end_prefix) and forward (until g_start
+// >= c_hi).  Caller must have decoded ch->runs.
+static void visit_chunk_runs(const TGLChunk *ch, const TuiGenomeLift *gl,
+                             int64_t c_lo, int64_t c_hi,
+                             void (*cb)(const TuiRun *run, void *user),
+                             void *user) {
+    if (ch->n_runs == 0) return;
+    int64_t lo = 0, hi = ch->n_runs;
+    while (lo < hi) {
+        int64_t m = lo + (hi - lo) / 2;
+        if (ch->runs[m].g_start < c_lo) lo = m + 1; else hi = m;
+    }
+    // Backward pass: earlier runs that extend into [c_lo, c_hi).
+    for (int64_t j = lo - 1; j >= 0; j--) {
+        const GLRun *r = &ch->runs[j];
+        int64_t r_end = r->g_start + r->length;
+        if (r_end > c_lo && r->g_start < c_hi) {
+            TuiRun out = { gl->seq_names[r->seq_idx],
+                           r->g_start, r->length, r->t_start, r->strand };
+            cb(&out, user);
+        }
+        if (j == 0) break;
+        if (ch->max_end_prefix[j - 1] <= c_lo) break;
+    }
+    // Forward pass: g_start >= c_lo by binary-search result.
+    for (int64_t j = lo; j < ch->n_runs; j++) {
+        const GLRun *r = &ch->runs[j];
+        if (r->g_start >= c_hi) break;
+        TuiRun out = { gl->seq_names[r->seq_idx],
+                       r->g_start, r->length, r->t_start, r->strand };
+        cb(&out, user);
+    }
+}
+
 void tui_genome_lift_visit_runs(TuiGenomeLift *gl, int64_t c_lo, int64_t c_hi,
                                 void (*cb)(const TuiRun *run, void *user),
                                 void *user) {
     if (gl == NULL || cb == NULL || c_lo >= c_hi) return;
     TGLChunk *cs = gl->chunks;
-    // Chunks are sorted by g_min.  Iterate forward; skip chunks whose
-    // g_max <= c_lo (chunk ends before iv) and break when g_min >= c_hi
-    // (chunk and all later ones start past iv).
-    for (int64_t ci = 0; ci < gl->n_chunks; ci++) {
+    // Chunks are sorted by g_min.  Binary-search the lower_bound on
+    // g_min >= c_lo, then handle straddlers (g_min < c_lo but g_max > c_lo)
+    // via a BACKWARD pass terminated by chunk_max_end[j-1] <= c_lo, and the
+    // in-range chunks via a FORWARD pass terminated by g_min >= c_hi.  This
+    // mirrors tui_genome_lift_column's per-column outer scan (this function's
+    // previous ci=0 forward linear scan made --fast O(n_chunks_target) per iv,
+    // which dominated wall on dense intermediate targets on big TUIs).
+    int64_t lo = 0, hi = gl->n_chunks;
+    while (lo < hi) {
+        int64_t m = lo + (hi - lo) / 2;
+        if (cs[m].g_min < c_lo) lo = m + 1; else hi = m;
+    }
+    int64_t start = lo;
+    // Backward pass: straddlers with g_min < c_lo but g_max > c_lo.
+    for (int64_t ci = start - 1; ci >= 0; ci--) {
         TGLChunk *ch = &cs[ci];
-        if (ch->g_max <= c_lo) continue;
+        if (ch->g_max > c_lo) {
+            if (ch->runs == NULL) chunk_decode(ch, gl->of);
+            visit_chunk_runs(ch, gl, c_lo, c_hi, cb, user);
+        }
+        if (ci == 0) break;
+        if (gl->chunk_max_end[ci - 1] <= c_lo) break;
+    }
+    // Forward pass: chunks with g_min in [c_lo, c_hi).
+    for (int64_t ci = start; ci < gl->n_chunks; ci++) {
+        TGLChunk *ch = &cs[ci];
         if (ch->g_min >= c_hi) break;
         if (ch->runs == NULL) chunk_decode(ch, gl->of);
-        if (ch->n_runs == 0) continue;
-        // Within the chunk: binary-search for the first run with
-        // g_start >= c_lo, then walk backward (catching earlier runs
-        // whose length extends past c_lo via max_end_prefix) and forward
-        // (until g_start >= c_hi).
-        int64_t lo = 0, hi = ch->n_runs;
-        while (lo < hi) {
-            int64_t m = lo + (hi - lo) / 2;
-            if (ch->runs[m].g_start < c_lo) lo = m + 1; else hi = m;
-        }
-        // Backward pass: catch earlier runs that extend into [c_lo, c_hi).
-        for (int64_t j = lo - 1; j >= 0; j--) {
-            const GLRun *r = &ch->runs[j];
-            int64_t r_end = r->g_start + r->length;
-            if (r_end > c_lo && r->g_start < c_hi) {
-                TuiRun out = { gl->seq_names[r->seq_idx],
-                               r->g_start, r->length, r->t_start, r->strand };
-                cb(&out, user);
-            }
-            if (j == 0) break;
-            if (ch->max_end_prefix[j - 1] <= c_lo) break;
-        }
-        // Forward pass: g_start >= c_lo by binary-search result.
-        for (int64_t j = lo; j < ch->n_runs; j++) {
-            const GLRun *r = &ch->runs[j];
-            if (r->g_start >= c_hi) break;
-            TuiRun out = { gl->seq_names[r->seq_idx],
-                           r->g_start, r->length, r->t_start, r->strand };
-            cb(&out, user);
-        }
+        visit_chunk_runs(ch, gl, c_lo, c_hi, cb, user);
     }
 }
 
