@@ -7,6 +7,7 @@
 #include "taf.h"
 #include "tai.h"
 #include "tui.h"
+#include "view_chain_dup_filter.h"
 #include "remote_io.h"
 #include "sonLib.h"
 #include "sonLibTree.h"
@@ -33,6 +34,7 @@ static void usage(void) {
     fprintf(stderr, "-r --region  : Region SEQ:START-END (0-based half-open).  SEQ is a row-0 seq name (.tai path), or ANY genome.seq when a <inputFile>.tui is present (universal lift), or the sentinel `tcol` for a universal-column range\n");
     fprintf(stderr, "-U --universal MODE : Output mode for the universal lift {ancestor|tcol|query}.  Universal mode is AUTO-ENGAGED when <inputFile>.tui is present; -U just picks the mode.  ancestor = pass-through (default).  tcol = prepend a `tcol` sentinel row carrying the universal column at this block.  query = reorient blocks onto the queried genome (row-0, '+'); incompatible with `-r tcol:..`.  Blocks are always emitted in universal-column (file) order, which on a '-'-strand queried leaf descends in the queried-forward coordinate.\n");
     fprintf(stderr, "   --noAncestors : Drop rows whose genome label is an internal-node label in the input header's `# hal` tree.  Only valid with -U query (where row-0 is a leaf so dropping ancestors is safe); produces a leaf-only output comparable to cactus-hal2maf's default.  Requires a `# hal` tree in the input header.\n");
+    fprintf(stderr, "   --chainDupFilter[=N] : Per-target-genome dup filter via taffy_chain.  Buffers all emitted blocks for the queried region, partitions each non-row-0 target genome's rows into chains using row-0 coords as the query axis, and keeps only rows belonging to the top N chains (N=1 default = strict primary).  Requires -r (the buffer is O(n_blocks_in_region)).  Runs AFTER --noAncestors and AFTER -U query reorient; row-0 is always preserved.\n");
     fprintf(stderr, "-s --repeatCoordinatesEveryNColumns : Repeat TAF coordinates of each sequence at least every n columns. By default: %" PRIi64 "\n", repeat_coordinates_every_n_columns);
     fprintf(stderr, "-u --runLengthEncodeBases : Run length encode output bases in TAF\n");
     fprintf(stderr, "-a --showOnlyReferenceDifferences : Replace matches with the reference (first row) with a * character\n");
@@ -174,12 +176,13 @@ int taf_view_main(int argc, char *argv[]) {
     bool omit_coordinates = false;
     bool no_ancestors = false;
     int bgzf_threads = 1;
+    int64_t chain_dup_filter = 0;    // 0 = off, >=1 = top-N chains kept per target genome
 
     ///////////////////////////////////////////////////////////////////////////
     // Parse the inputs
     ///////////////////////////////////////////////////////////////////////////
 
-    enum { OPT_NO_ANCESTORS = 256 };
+    enum { OPT_NO_ANCESTORS = 256, OPT_CHAIN_DUP_FILTER = 257 };
     while (1) {
         static struct option long_options[] = { { "logLevel", required_argument, 0, 'l' },
                                                 { "inputFile", required_argument, 0, 'i' },
@@ -200,6 +203,7 @@ int taf_view_main(int argc, char *argv[]) {
                                                 { "useCompression", no_argument, 0, 'c' },
                                                 { "nameMapFile", required_argument, 0, 'n' },
                                                 { "noAncestors", no_argument, 0, OPT_NO_ANCESTORS },
+                                                { "chainDupFilter", optional_argument, 0, OPT_CHAIN_DUP_FILTER },
                                                 { "threads", required_argument, 0, 'T' },
                                                 { "help", no_argument, 0, 'h' },
                                                 { 0, 0, 0, 0 } };
@@ -275,6 +279,20 @@ int taf_view_main(int argc, char *argv[]) {
             case OPT_NO_ANCESTORS:
                 no_ancestors = true;
                 break;
+            case OPT_CHAIN_DUP_FILTER:
+                /* `optional_argument` only attaches optarg when the user
+                 * writes `--chainDupFilter=N`; a bare `--chainDupFilter`
+                 * means "default to 1". */
+                if (optarg != NULL && optarg[0] != '\0') {
+                    chain_dup_filter = atoll(optarg);
+                    if (chain_dup_filter < 1) {
+                        fprintf(stderr, "--chainDupFilter requires N >= 1 (got %s)\n", optarg);
+                        return 1;
+                    }
+                } else {
+                    chain_dup_filter = 1;
+                }
+                break;
             case 'T':
                 bgzf_threads = atoi(optarg);
                 break;
@@ -312,6 +330,12 @@ int taf_view_main(int argc, char *argv[]) {
 
     if (paf_cs && !paf_output) {
         fprintf(stderr, "-C/--cs cannot be used without either -p or -P\n");
+        return 1;
+    }
+    if (chain_dup_filter > 0 && region == NULL) {
+        fprintf(stderr, "--chainDupFilter requires -r REGION (the chain filter "
+                "buffers the whole emitted region in memory; full-file scans "
+                "would be unbounded -- v2 may add sliding-window flush)\n");
         return 1;
     }
 
@@ -445,10 +469,17 @@ int taf_view_main(int argc, char *argv[]) {
     }
     tag_destruct(tag);
 
+    // --chainDupFilter buffer: one entry per emitted block in scan order.
+    // NULL when the filter is off (chain_dup_filter == 0).  Default list
+    // dtor leaves elements alone -- the post-loop walk below consumes
+    // them via alignment_destruct.  Filter is rejected pre-loop when
+    // -r isn't set (the buffer is bounded by the region's block count).
+    stList *chain_dup_buf = (chain_dup_filter > 0) ? stList_construct() : NULL;
+
     // three cases below:
     // 1) generic maf/taf index lookup if (region)
     // 2) scan whole taf
-    // 3) scan whole maf    
+    // 3) scan whole maf
     if (region) {
         int64_t region_start;
         int64_t region_length;
@@ -567,6 +598,13 @@ int taf_view_main(int argc, char *argv[]) {
                     filter_out_ancestor_rows(alignment, internal_labels);
                 }
             }
+            // --chainDupFilter: defer modify_alignment + emit; buffer the
+            // post-name-map post-mode-transform block.  Chain pass runs
+            // after the loop exits, then a second walk emits survivors.
+            if (chain_dup_buf != NULL) {
+                stList_append(chain_dup_buf, alignment);
+                continue;
+            }
             modify_alignment(alignment);
             if (taf_output) {
                 // Match consecutive blocks' rows via WFA so the writer
@@ -627,6 +665,16 @@ int taf_view_main(int argc, char *argv[]) {
         Alignment *p_alignment = NULL;
 
         while ((alignment = tai_next(tai_it, li)) != NULL) {
+            // --chainDupFilter: apply name mapping (needed for partition
+            // keys) then buffer; modify_alignment + emit happen after the
+            // loop in the post-chain walk.
+            if (chain_dup_buf != NULL) {
+                if (genome_name_map) {
+                    apply_genome_name_mapping_to_alignment(genome_name_map, alignment);
+                }
+                stList_append(chain_dup_buf, alignment);
+                continue;
+            }
             modify_alignment(alignment); // Make any changes to the alignment for output
 
             // apply the name mapping to the alignment block
@@ -715,7 +763,39 @@ int taf_view_main(int argc, char *argv[]) {
             alignment_destruct(p_alignment, 1);
         }
     }
-    
+
+    // --chainDupFilter: chain pass over the buffered region, then a
+    // second walk to apply modify_alignment + write + destruct in scan
+    // order.  prev_alignment carry is required for TAF link_adjacent.
+    if (chain_dup_buf != NULL) {
+        int64_t n_buf = stList_length(chain_dup_buf);
+        if (n_buf > 0) {
+            view_chain_dup_filter(chain_dup_buf, chain_dup_filter);
+            Alignment *p_alignment = NULL;
+            for (int64_t i = 0; i < n_buf; i++) {
+                Alignment *aln = (Alignment*) stList_get(chain_dup_buf, i);
+                modify_alignment(aln);
+                if (taf_output) {
+                    if (p_alignment != NULL) {
+                        alignment_link_adjacent(p_alignment, aln, 1);
+                    }
+                    taf_write_block2(p_alignment, aln, run_length_encode_output_bases,
+                                     repeat_coordinates_every_n_columns, output,
+                                     color_bases, omit_coordinates);
+                } else if (maf_output) {
+                    maf_write_block2(aln, output, color_bases);
+                } else {
+                    assert(paf_output == true);
+                    paf_write_block(aln, output, all_to_all_paf, paf_cs);
+                }
+                if (p_alignment != NULL) alignment_destruct(p_alignment, 1);
+                p_alignment = aln;
+            }
+            if (p_alignment != NULL) alignment_destruct(p_alignment, 1);
+        }
+        stList_destruct(chain_dup_buf);
+    }
+
     //////////////////////////////////////////////
     // Cleanup
     //////////////////////////////////////////////

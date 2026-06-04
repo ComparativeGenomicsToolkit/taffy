@@ -21,6 +21,7 @@ CuSuite* gerp_test_suite(void);
 CuSuite* gerp_stats_test_suite(void);
 CuSuite* chain_test_suite(void);
 CuSuite* blockviz_test_suite(void);
+CuSuite* view_chain_dup_filter_test_suite(void);
 
 static int allTests(void) {
     CuString *output = CuStringNew();
@@ -39,6 +40,7 @@ static int allTests(void) {
     CuSuiteAddSuite(suite, gerp_stats_test_suite());
     CuSuiteAddSuite(suite, chain_test_suite());
     CuSuiteAddSuite(suite, blockviz_test_suite());
+    CuSuiteAddSuite(suite, view_chain_dup_filter_test_suite());
 
     CuSuiteRun(suite);
     CuSuiteSummary(suite, output);
