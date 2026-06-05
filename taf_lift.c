@@ -790,6 +790,28 @@ static void flush_pending(FILE *fh, PendingBed *pending, int n_pending,
 // Output BED strand: (run.strand=='+' XOR input.strand=='-').
 
 // Context passed through the tui visitor callback for the chunk lift.
+// --bin hash key: (gl-owned seq pointer, bin index).  seq is pointer-
+// stable across the lift so identity-compare is safe.
+typedef struct {
+    const char *seq;
+    int64_t     bin;
+} BinKey;
+
+static uint64_t bin_key_hash(const void *k) {
+    const BinKey *bk = (const BinKey *) k;
+    /* Mix the pointer + bin with a Fibonacci-style multiplier so adjacent
+     * bins of the same seq spread across the table; identity on (seq, bin)
+     * tuples is preserved by the equal-fn below. */
+    return ((uint64_t) (uintptr_t) bk->seq) * 0x9E3779B97F4A7C15ULL
+         ^ ((uint64_t) bk->bin);
+}
+
+static int bin_key_equal(const void *a, const void *b) {
+    const BinKey *p = (const BinKey *) a;
+    const BinKey *q = (const BinKey *) b;
+    return p->seq == q->seq && p->bin == q->bin;
+}
+
 typedef struct {
     FILE       *fh;
     PendingBed *pending;
@@ -803,16 +825,14 @@ typedef struct {
     const char *score;
     int64_t    *n_out_p;
     // --bin coarse-grained bedGraph mode.  When bin_size > 0 the visitor
-    // does NOT touch pending[]/pending_push at all -- it accumulates a
-    // flat array of (target_seq, bin_idx, bp) tuples here, which is
-    // sorted, merged, and emitted as bedGraph at end-of-lift.
+    // does NOT touch pending[]/pending_push at all -- it consolidates
+    // (target_seq, bin_idx) -> bp into a hash on insert.  Memory is
+    // O(unique bins), bounded by genome_bp / bin_size; the prior flat
+    // append-per-visit array grew to O(n_visited_runs) which on a Mouse
+    // whole-genome lift hit ~1.5 GB just for the dedup-pending tuples
+    // (~63M visited runs).  Sorted + emitted at end-of-lift.
     int64_t     bin_size;
-    struct BinEntry {
-        const char *seq;   // borrowed from gl->seq_names; pointer-stable per gl
-        int64_t     bin;   // bin_idx = target_pos / bin_size
-        int64_t     bp;    // source bp contributed to this bin by one clipped run
-    } *bins;
-    size_t      n_bins, cap_bins;
+    stHash     *bins;       // key = BinKey { seq, bin }; value = int64_t* bp
     // --chainFilter: keep only the top-N highest-scoring chains.  When
     // chain_filter > 0 the visitor BUFFERS each clipped run instead of
     // calling pending_push; bed_lift_chunk_impl runs the chain at the
@@ -853,9 +873,10 @@ static void chunk_lift_visit_cb(const TuiRun *r, void *user) {
         t_out_start = r->t_start + r->length - (ce - r->g_start);
         t_out_end   = r->t_start + r->length - (cs - r->g_start);
     }
-    // --bin coarse-grained bedGraph path: accumulate per-(target_seq, bin)
-    // bp directly, skip the pending_push / open-merge machinery entirely.
-    // Strand is irrelevant for bp coverage so we ignore emit_strand here.
+    // --bin coarse-grained bedGraph path: consolidate per-(target_seq, bin)
+    // bp into the hash on insert.  Skip the pending_push / open-merge
+    // machinery entirely.  Strand is irrelevant for bp coverage so we
+    // ignore emit_strand here.
     if (cx->bin_size > 0) {
         int64_t bs = cx->bin_size;
         int64_t bin_lo = t_out_start / bs;
@@ -867,14 +888,17 @@ static void chunk_lift_visit_cb(const TuiRun *r, void *user) {
             int64_t ce2 = (t_out_end   < b_end)   ? t_out_end   : b_end;
             int64_t bp = ce2 - cs2;
             if (bp <= 0) continue;
-            if (cx->n_bins == cx->cap_bins) {
-                cx->cap_bins = cx->cap_bins ? cx->cap_bins * 2 : 4096;
-                cx->bins = st_realloc(cx->bins, cx->cap_bins * sizeof(*cx->bins));
+            BinKey probe = { r->seq, b };
+            int64_t *bp_p = (int64_t *) stHash_search(cx->bins, &probe);
+            if (bp_p != NULL) {
+                *bp_p += bp;
+            } else {
+                BinKey *k = (BinKey *) st_malloc(sizeof(BinKey));
+                *k = probe;
+                int64_t *v = (int64_t *) st_malloc(sizeof(int64_t));
+                *v = bp;
+                stHash_insert(cx->bins, k, v);
             }
-            cx->bins[cx->n_bins].seq = r->seq;
-            cx->bins[cx->n_bins].bin = b;
-            cx->bins[cx->n_bins].bp  = bp;
-            cx->n_bins++;
         }
         return;
     }
@@ -909,12 +933,16 @@ static void chunk_lift_visit_cb(const TuiRun *r, void *user) {
                                cx->name, cx->score, cx->n_out_p);
 }
 
-// Comparator for the bin-accumulator array: sort by (seq name lexically,
-// bin index ascending).  seq names are interned in gl->seq_names so
-// pointer-equal seq strings compare equal under strcmp too -- the
-// post-sort merge can use either pointer or strcmp equality.
-static int bin_entry_cmp(const void *a, const void *b) {
-    const struct BinEntry *x = a, *y = b;
+// Comparator for the bin-accumulator emit array: sort by (seq name
+// lexically, bin index ascending).
+typedef struct {
+    const char *seq;
+    int64_t     bin;
+    int64_t     bp;
+} EmitBin;
+
+static int emit_bin_cmp(const void *a, const void *b) {
+    const EmitBin *x = (const EmitBin *) a, *y = (const EmitBin *) b;
     int c = strcmp(x->seq, y->seq);
     if (c) return c;
     return (x->bin < y->bin) ? -1 : (x->bin > y->bin) ? 1 : 0;
@@ -948,6 +976,9 @@ static int bed_lift_chunk_impl(Tui *tui, TuiGenomeLift *gl,
     cx.max_gap = max_gap;
     cx.min_size = min_size;
     cx.bin_size = bin_size;
+    cx.bins = bin_size > 0
+        ? stHash_construct3(bin_key_hash, bin_key_equal, free, free)
+        : NULL;
     cx.chain_filter = chain_filter;
     cx.n_out_p = &n_out;
 
@@ -1087,31 +1118,36 @@ static int bed_lift_chunk_impl(Tui *tui, TuiGenomeLift *gl,
     }
 
     if (cx.bin_size > 0) {
-        // bedGraph emit: sort all bin entries by (seq, bin), then merge-
-        // and-emit consecutive same-key entries.  All BED input records
-        // contribute to one combined bedGraph (lift "this whole region of
-        // source -> coverage on target"), so output is *across* records,
-        // not per-record.
-        qsort(cx.bins, cx.n_bins, sizeof(*cx.bins), bin_entry_cmp);
-        size_t i = 0;
-        while (i < cx.n_bins) {
-            const char *seq = cx.bins[i].seq;
-            int64_t bin = cx.bins[i].bin, bp_total = 0;
-            size_t j = i;
-            // Pointer equality is safe here: seq strings are interned in
-            // gl->seq_names, so equal strings (post-sort neighbours) point
-            // to the same buffer.  Falls back to strcmp implicitly via the
-            // sort -- if pointer-equal fails, the bin index also differs.
-            while (j < cx.n_bins && cx.bins[j].seq == seq && cx.bins[j].bin == bin) {
-                bp_total += cx.bins[j].bp;
-                j++;
-            }
-            fprintf(fh, "%s\t%" PRIi64 "\t%" PRIi64 "\t%" PRIi64 "\n",
-                    seq, bin * cx.bin_size, (bin + 1) * cx.bin_size, bp_total);
-            n_out++;
-            i = j;
+        // bedGraph emit: walk the consolidated hash, materialize a flat
+        // array of (seq, bin, bp) tuples, sort by (seq, bin), emit.  All
+        // BED input records contribute to one combined bedGraph (lift
+        // "this whole region of source -> coverage on target"), so output
+        // is *across* records, not per-record.  Bp totals are already
+        // summed by the visitor's hash-insert path -- the emit just
+        // sorts and prints.
+        int64_t n_uniq = stHash_size(cx.bins);
+        EmitBin *arr = (EmitBin *) st_malloc((size_t) n_uniq * sizeof(EmitBin));
+        int64_t idx = 0;
+        stHashIterator *it = stHash_getIterator(cx.bins);
+        BinKey *k;
+        while ((k = (BinKey *) stHash_getNext(it)) != NULL) {
+            int64_t *v = (int64_t *) stHash_search(cx.bins, k);
+            arr[idx].seq = k->seq;
+            arr[idx].bin = k->bin;
+            arr[idx].bp  = *v;
+            idx++;
         }
-        free(cx.bins);
+        stHash_destructIterator(it);
+        qsort(arr, (size_t) n_uniq, sizeof(EmitBin), emit_bin_cmp);
+        for (int64_t i = 0; i < n_uniq; i++) {
+            fprintf(fh, "%s\t%" PRIi64 "\t%" PRIi64 "\t%" PRIi64 "\n",
+                    arr[i].seq, arr[i].bin * cx.bin_size,
+                    (arr[i].bin + 1) * cx.bin_size, arr[i].bp);
+            n_out++;
+        }
+        free(arr);
+        stHash_destruct(cx.bins);
+        cx.bins = NULL;
     }
 
     free(cx.pending);
