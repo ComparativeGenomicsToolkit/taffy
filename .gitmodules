@@ -7,4 +7,4 @@
 	url = https://github.com/yangao07/abPOA.git
 [submodule "taffy/submodules/ONEcode"]
 	path = taffy/submodules/ONEcode
-	url = https://github.com/thegenemyers/ONEcode
+	url = https://github.com/glennhickey/ONEcode
