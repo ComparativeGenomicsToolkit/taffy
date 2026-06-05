@@ -970,6 +970,13 @@ static int bed_lift_chunk_impl(Tui *tui, TuiGenomeLift *gl,
     int64_t lineno = 0, n_in = 0, n_out = 0, n_unmapped = 0, n_filtered = 0;
     int64_t n_chain_filtered = 0;  // runs dropped by chainFilter (only meaningful when chain_filter > 0)
     time_t t0 = time(NULL);
+    /* Phase timers (cumulative, seconds).  Logged at end alongside the
+     * existing summary line so a single --logLevel INFO run shows where
+     * time goes.  Cost of clock_gettime per record is negligible. */
+    struct timespec _ts;
+    #define NOW_S ( (clock_gettime(CLOCK_MONOTONIC, &_ts), \
+                     _ts.tv_sec + _ts.tv_nsec * 1e-9) )
+    double t_query = 0, t_visit = 0, t_emit = 0, t_phase;
     ChunkLiftCtx cx;
     memset(&cx, 0, sizeof(cx));
     cx.fh = fh;
@@ -1013,7 +1020,9 @@ static int bed_lift_chunk_impl(Tui *tui, TuiGenomeLift *gl,
 
         n_in++;
         int64_t n_iv = 0;
+        t_phase = NOW_S;
         TuiInterval *iv = tui_query(tui, chrom, start, end, &n_iv);
+        t_query += NOW_S - t_phase;
         if (iv == NULL || n_iv == 0) {
             free(iv);
             n_unmapped++;
@@ -1026,12 +1035,14 @@ static int bed_lift_chunk_impl(Tui *tui, TuiGenomeLift *gl,
         if (cx.bin_size == 0)
             for (int s = 0; s < cx.pending_cap; s++) cx.pending[s].active = 0;
 
+        t_phase = NOW_S;
         for (int64_t k = 0; k < n_iv; k++) {
             cx.c_lo = iv[k].start;
             cx.c_hi = iv[k].end;
             tui_genome_lift_visit_runs(gl, cx.c_lo, cx.c_hi,
                                        chunk_lift_visit_cb, &cx);
         }
+        t_visit += NOW_S - t_phase;
 
         // --chainFilter post-visit pass: chain the buffered runs of THIS
         // record, pick the top-N chains by total_score, and replay the
@@ -1118,6 +1129,7 @@ static int bed_lift_chunk_impl(Tui *tui, TuiGenomeLift *gl,
     }
 
     if (cx.bin_size > 0) {
+        t_phase = NOW_S;
         // bedGraph emit: walk the consolidated hash, materialize a flat
         // array of (seq, bin, bp) tuples, sort by (seq, bin), emit.  All
         // BED input records contribute to one combined bedGraph (lift
@@ -1147,6 +1159,7 @@ static int bed_lift_chunk_impl(Tui *tui, TuiGenomeLift *gl,
         }
         free(arr);
         stHash_destruct(cx.bins);
+        t_emit += NOW_S - t_phase;
         cx.bins = NULL;
     }
 
@@ -1156,25 +1169,30 @@ static int bed_lift_chunk_impl(Tui *tui, TuiGenomeLift *gl,
     fclose(bf);
     if (output_file) fclose(fh);
 
+    double t_total = (double)(time(NULL) - t0);
+    double t_other = t_total - t_query - t_visit - t_emit;
+    if (t_other < 0) t_other = 0;  /* clock-resolution slop */
     if (cx.bin_size > 0) {
         st_logInfo("BED lift (--fast --bin %" PRIi64 "): %" PRIi64 " input -> %" PRIi64 " bedGraph rows "
-                   "(%" PRIi64 " unmapped) in %" PRIi64 " s\n",
-                   cx.bin_size, n_in, n_out, n_unmapped,
-                   (int64_t)(time(NULL) - t0));
+                   "(%" PRIi64 " unmapped) in %.1f s "
+                   "(tui_query=%.2fs visit=%.2fs emit=%.2fs other=%.2fs)\n",
+                   cx.bin_size, n_in, n_out, n_unmapped, t_total,
+                   t_query, t_visit, t_emit, t_other);
     } else if (cx.chain_filter > 0) {
         st_logInfo("BED lift (--fast --chainFilter %" PRIi64 "): %" PRIi64 " input -> "
                    "%" PRIi64 " output intervals (%" PRIi64 " unmapped, "
                    "%" PRIi64 " dropped < --minSize, %" PRIi64 " dropped by chain) "
-                   "in %" PRIi64 " s\n",
+                   "in %.1f s (tui_query=%.2fs visit=%.2fs other=%.2fs)\n",
                    cx.chain_filter, n_in, n_out, n_unmapped, n_filtered,
-                   n_chain_filtered, (int64_t)(time(NULL) - t0));
+                   n_chain_filtered, t_total, t_query, t_visit, t_other);
     } else {
         st_logInfo("BED lift (--fast): %" PRIi64 " input -> %" PRIi64 " output intervals "
                    "(%" PRIi64 " unmapped, %" PRIi64 " dropped < --minSize) "
-                   "in %" PRIi64 " s\n",
+                   "in %.1f s (tui_query=%.2fs visit=%.2fs other=%.2fs)\n",
                    n_in, n_out, n_unmapped, n_filtered,
-                   (int64_t)(time(NULL) - t0));
+                   t_total, t_query, t_visit, t_other);
     }
+    #undef NOW_S
     return 0;
 }
 
