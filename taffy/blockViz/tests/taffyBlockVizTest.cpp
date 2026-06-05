@@ -197,11 +197,25 @@ int main(int argc, char **argv) {
     // numeric columns line up for direct diff after sorting.)
     int64_t n = 0;
     for (struct taffy_block_t *b = res->mappedBlocks; b; b = b->next) {
-        printf("%s\t%ld\t%ld\t%ld\t%c\n",
-               b->qChrom, (long) b->tStart, (long) b->qStart, (long) b->size, b->strand);
+        printf("%s\t%ld\t%ld\t%ld\t%c\t%ld\n",
+               b->qChrom, (long) b->tStart, (long) b->qStart, (long) b->size,
+               b->strand, (long) b->chainId);
         n++;
     }
-    if (args.verbose) fprintf(stderr, ">> emitted %ld mapped blocks\n", (long) n);
+    if (args.verbose) fprintf(stderr, ">> emitted %ld mapped blocks "
+                                       "(last column = chainId; 0 = bin or flank)\n",
+                                       (long) n);
+
+    if (args.verbose && res->chainSummaries) {
+        fprintf(stderr, ">> chainSummaries (score-desc; primary first):\n");
+        int64_t cn = 0;
+        for (struct taffy_chain_summary_t *c = res->chainSummaries; c; c = c->next) {
+            fprintf(stderr, "      id=%ld score=%ld bp=%ld n_alns=%ld\n",
+                    (long) c->id, (long) c->totalScore,
+                    (long) c->totalBp, (long) c->nAlns);
+            if (++cn >= 10) { fprintf(stderr, "      ...\n"); break; }
+        }
+    }
 
     if (args.doDupes) {
         int64_t nd = 0, nr = 0;

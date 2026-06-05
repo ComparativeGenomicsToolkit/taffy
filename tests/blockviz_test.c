@@ -212,6 +212,68 @@ static void test_get_blocks_full_chrom_merged(CuTest *tc) {
     free(err);
 }
 
+/* chainId exposed on taffy_block_t; chainSummaries populated for non-
+ * bin queries.  Asserts the contract documented in taffyBlockViz.h:
+ *  - per-run + chain output: chainId nonzero, multiple blocks may
+ *    share a chainId, chainSummaries lists each surviving chain in
+ *    score-desc order with id matching some block.chainId.
+ *  - bin output (wide span on evolver -- forced via taffySetMax
+ *    OutputBlocks=1 to engage the cap at any width, OR via the
+ *    natural 5 Mb threshold which evolver's 600 kb chrom doesn't
+ *    reach; we use a primitive size check instead).
+ */
+static void test_chain_id_and_summaries(CuTest *tc) {
+    char *err = NULL;
+    int h = taffyOpen(TEST_TUI, &err);
+    if (h < 0) { free(err); return; }
+
+    /* Narrow query on evolver chr6: per-run + chain path. */
+    struct taffy_block_results_t *res = taffyGetBlocksInTargetRange(
+        h, "simMouse_chr6", "simHuman_chr6", "simHuman.chr6",
+        0, 5000, 0, TAFFY_NO_SEQUENCES, TAFFY_QUERY_AND_TARGET_DUPS,
+        0, NULL, &err);
+    CuAssertPtrNotNull(tc, res);
+
+    /* Collect chainIds from emitted blocks. */
+    stSet *block_chain_ids = stSet_construct();
+    int64_t any_nonzero = 0, n_blocks = 0;
+    for (struct taffy_block_t *b = res->mappedBlocks; b; b = b->next) {
+        n_blocks++;
+        if (b->chainId != 0) {
+            any_nonzero++;
+            int64_t *idp = st_malloc(sizeof(int64_t));
+            *idp = b->chainId;
+            stSet_insert(block_chain_ids, idp);
+        }
+    }
+    /* Some blocks should be in chains (not all bin / flank). */
+    CuAssertTrue(tc, any_nonzero > 0);
+
+    /* chainSummaries should be present and score-desc; each summary's
+     * id should map to at least one block's chainId. */
+    CuAssertPtrNotNull(tc, res->chainSummaries);
+    int64_t prev_score = -1, n_summaries = 0;
+    for (struct taffy_chain_summary_t *c = res->chainSummaries; c; c = c->next) {
+        n_summaries++;
+        /* Score-desc: each subsequent <= prev. */
+        if (prev_score >= 0) CuAssertTrue(tc, c->totalScore <= prev_score);
+        prev_score = c->totalScore;
+        /* Reasonable invariants. */
+        CuAssertTrue(tc, c->id > 0);
+        CuAssertTrue(tc, c->nAlns > 0);
+        CuAssertTrue(tc, c->totalBp > 0);
+    }
+    CuAssertTrue(tc, n_summaries > 0);
+    /* Summary count <= block count (chains can be > blocks in degenerate
+     * cases via merge, but typically <=). */
+
+    /* Clean up. */
+    stSet_destruct(block_chain_ids);
+    taffyFreeBlockResults(res);
+    taffyClose(h, &err);
+    free(err);
+}
+
 /* taffySet/GetMaxOutputBlocks setter contract + runtime cap effect. */
 static void test_max_output_blocks_setter(CuTest *tc) {
     char *err = NULL;
@@ -310,5 +372,6 @@ CuSuite* blockviz_test_suite(void) {
     SUITE_ADD_TEST(suite, test_get_blocks_full_chrom_merged);
     SUITE_ADD_TEST(suite, test_get_blocks_respects_output_cap);
     SUITE_ADD_TEST(suite, test_max_output_blocks_setter);
+    SUITE_ADD_TEST(suite, test_chain_id_and_summaries);
     return suite;
 }

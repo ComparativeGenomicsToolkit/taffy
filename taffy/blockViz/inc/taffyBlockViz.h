@@ -66,11 +66,29 @@ struct taffy_target_dupe_list_t {
     char *qChrom;
 };
 
+/** Per-chain summary returned alongside the block lists.  One entry
+ * per chain that survived the budget cull (primary chain is always
+ * included; non-primary chains follow in score-descending order).
+ * Use the id field to look up which mappedBlocks (via taffy_block_t.
+ * chainId) belong to this chain.  bp is the chain's total covered bp;
+ * total_score is the chain's chain.c score (sum aln scores - gap
+ * costs); nAlns is the chain's aln count BEFORE post-chain merge --
+ * useful for browser stats but doesn't equal the emitted block count.
+ * NULL when no chain pass ran (bin mode). */
+struct taffy_chain_summary_t {
+    struct taffy_chain_summary_t *next;
+    taffy_int_t id;
+    taffy_int_t totalScore;
+    taffy_int_t totalBp;
+    taffy_int_t nAlns;
+};
+
 /** Mapped + target-dupe block results from a single
  * taffyGetBlocksInTargetRange() call. */
 struct taffy_block_results_t {
     struct taffy_block_t *mappedBlocks;
     struct taffy_target_dupe_list_t *targetDupeBlocks;
+    struct taffy_chain_summary_t *chainSummaries;   /* score-desc; primary first; NULL in bin mode */
 };
 
 /** One contiguous aligned block (one gap-free run of qChrom that
@@ -84,6 +102,18 @@ struct taffy_block_t {
     taffy_int_t qStart;
     taffy_int_t size;
     char strand;                /* '+' or '-' */
+    /* Opaque group id for the taffy_chain partition this block belongs
+     * to.  Blocks of the same chain share chainId.  Stable WITHIN one
+     * taffyGetBlocksInTargetRange result; NOT stable across queries
+     * (chain.c assigns 1-based monotonic ids in qsort order).  Use this
+     * to group mappedBlocks for snake-trace rendering instead of
+     * inferring adjacency from qChrom+strand+tStart (which collides on
+     * paralog chains sharing qChrom+strand).  Matches the id field of
+     * taffy_target_dupe_list_t for non-primary chains; the primary
+     * chain's id has no separate surface today (see chainSummaries).
+     * 0 for bin-mode output (one block per coverage bin, no chain).
+     */
+    taffy_int_t chainId;
     char *qSequence;            /* query DNA, NULL unless seqMode != NO_SEQUENCES */
     char *tSequence;            /* target DNA, NULL unless seqMode != NO_SEQUENCES */
 };

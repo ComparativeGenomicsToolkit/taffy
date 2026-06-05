@@ -239,10 +239,19 @@ extern "C" void taffyFreeTargetDupeLists(struct taffy_target_dupe_list_t *d) {
     }
 }
 
+static void free_chain_summaries(struct taffy_chain_summary_t *c) {
+    while (c) {
+        struct taffy_chain_summary_t *nx = c->next;
+        free(c);
+        c = nx;
+    }
+}
+
 extern "C" void taffyFreeBlockResults(struct taffy_block_results_t *res) {
     if (!res) return;
     taffyFreeBlocks(res->mappedBlocks);
     taffyFreeTargetDupeLists(res->targetDupeBlocks);
+    free_chain_summaries(res->chainSummaries);
     free(res);
 }
 
@@ -1003,6 +1012,11 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
             continue;
         }
 
+        // Stamp the chain id so the browser can group blocks of the
+        // same chain for snake-trace rendering.  Post-merge survivors
+        // inherit naturally (they carry the same cid via chain_id[i]).
+        b->chainId = cid;
+
         // Always append to mappedBlocks under QUERY_DUPS / QUERY_AND_TARGET_DUPS.
         append_mapped(b);
 
@@ -1124,6 +1138,27 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
 
     res->mappedBlocks     = mapped_head;
     res->targetDupeBlocks = dupe_head;
+
+    // Build chainSummaries: one entry per kept chain, score-desc order
+    // (chains[] is already sorted that way by taffy_chain).  Includes
+    // the primary chain (kept_chains is built primary-first) so the
+    // primary's id+score becomes browser-visible for the first time.
+    struct taffy_chain_summary_t *cs_head = nullptr, *cs_tail = nullptr;
+    for (int64_t k = 0; k < n_chains; k++) {
+        if (!kept_chains.count(chains[k].id)) continue;
+        struct taffy_chain_summary_t *cs = (struct taffy_chain_summary_t *)
+            st_calloc(1, sizeof(*cs));
+        cs->id         = chains[k].id;
+        cs->totalScore = chains[k].total_score;
+        cs->totalBp    = chains[k].total_bp;
+        cs->nAlns      = chains[k].n_alns;
+        cs->next       = nullptr;
+        if (!cs_head) cs_head = cs;
+        if (cs_tail) cs_tail->next = cs;
+        cs_tail = cs;
+    }
+    res->chainSummaries = cs_head;
+
     free(chains);
     return res;
 }
