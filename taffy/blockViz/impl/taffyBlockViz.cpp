@@ -523,6 +523,23 @@ struct BlockCtx {
     std::map<BinKey, int64_t> bins;
 };
 
+// Aln-count threshold for runtime bin-engage.  When the per-run
+// visitor crosses this aln count without bin mode already being on
+// (i.e. span was below the 5 Mb static threshold), the visitor bails
+// to bin mode: existing alns are migrated into bins, per-run
+// taffy_block_t's are freed, and subsequent visits accumulate into
+// the bin map.  This bounds chain-pass + merge cost, which scales
+// O(N log N) with a heavy constant and becomes the dominant wall at
+// dense-species + moderate-zoom (e.g. 1 Mb chicken->quail on the
+// 577-way takes ~13 s in pure per-run+chain+merge; runtime bin-
+// engage brings it under 1 s).
+//
+// 20000 is the empirical safe ceiling: below this on apes-scale
+// (~8 species) we never engage and snake-track renders correctly;
+// above this on 577-way bird->bird, the chain pass starts to
+// dominate and we want to coarsen anyway.
+static const int64_t MAX_ALNS_FOR_CHAIN = 20000;
+
 // Output policy.  All output paths are capped so the browser snake-
 // track renderer (HAL's halSnakeTrack.c caps at NUM_LEVELS=1000) is
 // never close to its limit.  The cap is per-handle (H->max_output_blocks,
@@ -545,6 +562,44 @@ struct BlockCtx {
 static const int64_t TARGET_BIN_COUNT = 500;
 static const int64_t MIN_BIN_BP       = 10000;
 
+// Migrate already-accumulated per-run blocks/alns into the bin
+// accumulator and free the per-run state.  Called when N_alns crosses
+// MAX_ALNS_FOR_CHAIN at moderate-zoom on dense-species TUIs (the cliff
+// case: 1 Mb chicken->quail on 577-way produces ~5M alns; chain pass
+// + merge would dominate).  After this returns, cx->bin_mode is true
+// and subsequent visitor calls go straight into the bin path.
+static void migrate_alns_to_bins(BlockCtx *cx) {
+    for (size_t i = 0; i < cx->alns.size(); i++) {
+        const TaffyAln &a = cx->alns[i];
+        char strand = (a.strand > 0) ? '+' : '-';
+        // a.t_name is already interned in qchrom_interns (set in the
+        // per-run path); reuse.  a.q_start/q_end are the tStart/tEnd
+        // on tChrom (the bin's t-axis).
+        int64_t tStart_a = a.q_start;
+        int64_t tEnd_a   = a.q_end;
+        int64_t bin_first = (tStart_a    - cx->tStart_user) / cx->bin_size;
+        int64_t bin_last  = (tEnd_a - 1 - cx->tStart_user) / cx->bin_size;
+        for (int64_t bi = bin_first; bi <= bin_last; bi++) {
+            int64_t bin_lo = cx->tStart_user + bi * cx->bin_size;
+            int64_t bin_hi = bin_lo + cx->bin_size;
+            int64_t lo = tStart_a > bin_lo ? tStart_a : bin_lo;
+            int64_t hi = tEnd_a   < bin_hi ? tEnd_a   : bin_hi;
+            int64_t covered = hi - lo;
+            if (covered <= 0) continue;
+            BlockCtx::BinKey k{ a.t_name, strand, bi };
+            cx->bins[k] += covered;
+        }
+    }
+    // Free the per-run taffy_block_t's; we're emitting from cx->bins now.
+    for (struct taffy_block_t *b : cx->blocks) {
+        free(b->qChrom);
+        free(b);
+    }
+    cx->blocks.clear();
+    cx->alns.clear();
+    cx->bin_mode = true;
+}
+
 // Visitor: clip the q run, compute (tStart, qStart, size, strand),
 // and buffer both a taffy_block_t (for the eventual output linked list)
 // and a TaffyAln (for the chain call after the visit loop).
@@ -553,6 +608,12 @@ static const int64_t MIN_BIN_BP       = 10000;
 // cx->bins keyed by (qChrom, strand, bin_idx).  No per-run allocation,
 // no chain call after the loop -- the bin entries are themselves the
 // output.
+//
+// Runtime bin-engage: if the per-run path's aln count crosses
+// MAX_ALNS_FOR_CHAIN, we migrate the existing alns into bins and
+// continue in bin mode for the rest of the visit.  This bails out of
+// the chain pass + merge work that would otherwise dominate wall on
+// dense-species + moderate-zoom queries (the 1 Mb bird->bird cliff).
 static void block_visit_cb(const TuiRun *r, void *user) {
     BlockCtx *cx = (BlockCtx *) user;
     if (cx->qChromFilter && strcmp(r->seq, cx->qChromFilter) != 0) return;
@@ -577,6 +638,32 @@ static void block_visit_cb(const TuiRun *r, void *user) {
         // all runs land in one bin (typical run ~76-300 bp, bin >= 100bp
         // and usually much larger), but a run that straddles a bin
         // boundary must contribute to BOTH bins.
+        int64_t tEnd_run = tStart + size;
+        int64_t bin_first = (tStart    - cx->tStart_user) / cx->bin_size;
+        int64_t bin_last  = (tEnd_run - 1 - cx->tStart_user) / cx->bin_size;
+        for (int64_t bi = bin_first; bi <= bin_last; bi++) {
+            int64_t bin_lo = cx->tStart_user + bi * cx->bin_size;
+            int64_t bin_hi = bin_lo + cx->bin_size;
+            int64_t lo = tStart    > bin_lo ? tStart    : bin_lo;
+            int64_t hi = tEnd_run  < bin_hi ? tEnd_run  : bin_hi;
+            int64_t covered = hi - lo;
+            if (covered <= 0) continue;
+            BlockCtx::BinKey k{ qc_interned, strand, bi };
+            cx->bins[k] += covered;
+        }
+        return;
+    }
+
+    // Runtime bin-engage: if we've accumulated enough per-run alns
+    // that the chain pass + merge will dominate wall, migrate to bin
+    // mode in place and emit this run as a bin update.
+    if ((int64_t) cx->alns.size() >= MAX_ALNS_FOR_CHAIN) {
+        migrate_alns_to_bins(cx);
+        // Fall through to the bin path below (this run still needs to
+        // be counted into the bins we just built).
+        auto ins = cx->qchrom_interns.emplace(r->seq);
+        const char *qc_interned = ins.first->c_str();
+        char strand = r->strand ? '+' : '-';
         int64_t tEnd_run = tStart + size;
         int64_t bin_first = (tStart    - cx->tStart_user) / cx->bin_size;
         int64_t bin_last  = (tEnd_run - 1 - cx->tStart_user) / cx->bin_size;
@@ -695,10 +782,13 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
     {
         int64_t span = (int64_t) tEnd - (int64_t) tStart;
         int64_t bs = (span > 0) ? (span / TARGET_BIN_COUNT) : 0;
+        // tStart_user + bin_size are always set so the runtime bin-
+        // engage path in the visitor (when N_alns crosses
+        // MAX_ALNS_FOR_CHAIN) has them ready without a re-check.
+        cx.tStart_user = (int64_t) tStart;
+        cx.bin_size    = bs > 0 ? bs : 1;
         if (bs >= MIN_BIN_BP) {
-            cx.bin_mode    = true;
-            cx.bin_size    = bs;
-            cx.tStart_user = (int64_t) tStart;
+            cx.bin_mode = true;
         }
     }
 
