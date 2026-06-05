@@ -281,6 +281,22 @@ void tui_genome_lift_visit_runs(TuiGenomeLift *gl, int64_t c_lo, int64_t c_hi,
                                 void (*cb)(const TuiRun *run, void *user),
                                 void *user);
 
+/*
+ * Stream every run of every chunk in this genome's lift table in g_min
+ * order.  Unlike tui_genome_lift_visit_runs, decoded chunks are FREED
+ * immediately after the visit (no per-chunk caching) -- peak memory is
+ * one decoded chunk (~3 MB) rather than the full lift table (tens of GB
+ * on giant ancestors).  Chunks that were ALREADY decoded by an earlier
+ * caller are left intact -- safe to interleave with visit_runs callers.
+ *
+ * For one-shot whole-genome scans (taf_coarsen) where each chunk is
+ * touched exactly once and the visit_runs cache would only inflate
+ * peak RSS.  The cb callback contract matches visit_runs.
+ */
+void tui_genome_lift_stream_runs(TuiGenomeLift *gl,
+                                 void (*cb)(const TuiRun *run, void *user),
+                                 void *user);
+
 /////////////////////////////////////////////////////////////////////////////
 // Universal-column block extractor (replaces the .tai for the -U path).
 //
@@ -316,6 +332,56 @@ void tui_extract_take_ownership(TuiExtractIt *it);
 /* Universal column of the FIRST column of the sub-block just returned by
  * tui_extract_next() (i.e. tcol of its row-0).  Call right after _next(). */
 int64_t tui_extract_col_start(const TuiExtractIt *it);
+
+/////////////////////////////////////////////////////////////////////////////
+// internal: shared writer-side primitives.  Exported so secondary writers
+// (currently taf_coarsen.c, which builds LOD-resolution .tui files from
+// existing .tui inputs) reuse the same on-disk encoding without copy-paste
+// of the encode/cleanup logic.  NOT part of the stable public API; format
+// changes here must update BOTH tui_create AND every other writer.
+//
+// Pulls in ONElib.h for OneFile / OneSchema -- these types ride the writer
+// API.  Public callers (taffy view / lift / blockViz) already see ONElib
+// transitively; this just makes the inclusion explicit.
+/////////////////////////////////////////////////////////////////////////////
+
+#include "ONElib.h"
+
+/* Per-chunk caps used by tui_create's phase-2 chunk-boundary loop.  Match
+ * these in coarsened writers so the reader's per-chunk t-range skip + the
+ * "TuiRun is at most 65k per chunk" invariant hold.  Comment block at
+ * tui.c:81-108 explains the rationale. */
+#define TUI_CHUNK_RUNS   65536
+#define TUI_CHUNK_G_MAX  1000000   /* universal-column span per chunk */
+
+/* Open a new .tui in WRITE mode, register a crash-cleanup atexit hook,
+ * stamp the OneCode provenance record.  Returns the OneFile* on success
+ * and writes *schema_out (caller frees via oneSchemaDestroy AFTER
+ * oneFileClose).  Returns NULL on open failure; *schema_out is set NULL.
+ * Caller is responsible for any pre-open state cleanup + calling
+ * tui_atexit_disarm() on the error path.  prog/what/blurb populate the
+ * provenance record (e.g. "taffy", "tui-coarsen", "LOD B=1000000"). */
+OneFile *tui_open_write(const char *out_path, const char *prog,
+                        const char *what, const char *blurb,
+                        OneSchema **schema_out);
+
+/* Encode `m` (t, g, lenc) triples in `buf` (m*3 int64) as the standard
+ * .tui R-record payload: header + three SoA varint streams (gap | gsk |
+ * lenc) + zlib deflate.  Caller frees the returned buffer.  *raw_len and
+ * *def_len are set to the uncompressed and compressed sizes. */
+uint8_t *tui_encode_runs(const int64_t *buf, int64_t m,
+                         int64_t *raw_len, int64_t *def_len);
+
+/* Encode `n` (col, fpos) anchor pairs as the standard .tui X-record
+ * payload (delta-varint per stream + zlib).  Caller frees. */
+uint8_t *tui_encode_idx(const int64_t *col, const int64_t *fpos, int64_t n,
+                        int64_t *raw_len, int64_t *def_len);
+
+/* Register/clear the crash-cleanup hook that removes a half-written .tui
+ * on SIGINT / st_errAbort.  Idempotent.  Both should bracket the
+ * tui_open_write / oneFileClose pair. */
+void tui_atexit_track_tui(const char *path);
+void tui_atexit_disarm(void);
 
 #endif /* TAF_TUI_H_ */
 

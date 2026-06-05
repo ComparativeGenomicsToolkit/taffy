@@ -194,14 +194,16 @@ static void tui_atexit_track_spill(const char *path) {
 
 // Track the .tui output path so a half-written file is removed on crash.
 // Called after oneFileOpenWriteNew() succeeds; cleared by tui_atexit_disarm().
-static void tui_atexit_track_tui(const char *path) {
+// Exported (extern in tui.h) so secondary writers (taf_coarsen) can use the
+// same crash-cleanup safety net.
+void tui_atexit_track_tui(const char *path) {
     if (atexit_tui_path != NULL) { free(atexit_tui_path); }
     atexit_tui_path = stString_copy(path);
 }
 
 // Disarm the crash cleanup on the normal success path, BEFORE tui_cleanup()
-// frees its path strings.  Idempotent.
-static void tui_atexit_disarm(void) {
+// frees its path strings.  Idempotent.  Exported for taf_coarsen.
+void tui_atexit_disarm(void) {
     if (atexit_spill_paths != NULL) {
         stList_destruct(atexit_spill_paths);
         atexit_spill_paths = NULL;
@@ -792,8 +794,9 @@ static Run *load_genome_runs(const char *path, int64_t *n_out,
 //
 // Raw layout: header [uvarint m, uvarint |gap bytes|, uvarint |gsk bytes|]
 // then gap||gsk||lenc.  raw_len bounds the inflate buffer; m bounds decode.
-static uint8_t *encode_runs(const int64_t *buf, int64_t m,
-                            int64_t *raw_len, int64_t *def_len) {
+/* Exported via tui.h (internal-but-shared with taf_coarsen). */
+uint8_t *tui_encode_runs(const int64_t *buf, int64_t m,
+                         int64_t *raw_len, int64_t *def_len) {
     uint8_t *G = st_malloc((size_t)(m * 10 + 1));   // gap stream
     uint8_t *K = st_malloc((size_t)(m * 10 + 1));   // gsk stream
     uint8_t *L = st_malloc((size_t)(m * 10 + 1));   // lenc stream
@@ -862,8 +865,9 @@ static int64_t decode_runs(const uint8_t *def, int64_t def_len,
 // increasing in anchor order, so plain non-negative uvarint deltas (no
 // zigzag).  Two SoA streams C|F; header = uvarint(n), uvarint(|C bytes|);
 // one zlib deflate.  Same shape as encode_runs but tuned for the index pairs.
-static uint8_t *encode_idx(const int64_t *col, const int64_t *fpos, int64_t n,
-                           int64_t *raw_len, int64_t *def_len) {
+/* Exported via tui.h (internal-but-shared with taf_coarsen). */
+uint8_t *tui_encode_idx(const int64_t *col, const int64_t *fpos, int64_t n,
+                        int64_t *raw_len, int64_t *def_len) {
     uint8_t *C = st_malloc((size_t)(n * 10 + 1));
     uint8_t *F = st_malloc((size_t)(n * 10 + 1));
     size_t cn = 0, fn = 0;
@@ -1097,7 +1101,7 @@ static Phase2Genome *phase2_genome_work(const P2GenomeRange *gr,
             c->g_min = g_min; c->g_max = g_max;
             c->t_min = t_min; c->t_max = t_max;
             c->cm = cm;
-            c->def = encode_runs(cb, cm, &c->raw_len, &c->def_len);
+            c->def = tui_encode_runs(cb, cm, &c->raw_len, &c->def_len);
             // Per-chunk codec self-check (same as serial path).
             int64_t *chk = st_malloc((cm ? 3 * cm : 1) * sizeof(int64_t));
             int64_t dm = decode_runs(c->def, c->def_len, c->raw_len, chk, 3 * cm);
@@ -1152,6 +1156,33 @@ static void phase2_genome_write(OneFile *of, Phase2Genome *g, int64_t *c_ord_emi
     }
     free(g->seqs);
     free(g);
+}
+
+/* Open a new .tui in WRITE mode, install the crash-cleanup atexit hook,
+ * stamp the provenance line.  Returns the OneFile* on success (caller
+ * owns); writes *schema_out (caller-owned via oneSchemaDestroy after
+ * oneFileClose).  Returns NULL on open failure -- caller is responsible
+ * for any pre-allocated state cleanup and calling tui_atexit_disarm().
+ *
+ * Exported via tui.h (internal-but-shared with taf_coarsen) so any tool
+ * writing a .tui-format file uses the same boilerplate and the same
+ * crash safety net.  prog/what/blurb populate the OneCode provenance
+ * record (oneAddProvenance) -- same call shape tui_create uses. */
+OneFile *tui_open_write(const char *out_path, const char *prog,
+                        const char *what, const char *blurb,
+                        OneSchema **schema_out) {
+    OneSchema *schema = oneSchemaCreateFromText(TUI_SCHEMA);
+    OneFile *of = oneFileOpenWriteNew(out_path, schema, "tui", true, 1);
+    if (of == NULL) {
+        fprintf(stderr, "tui: cannot write %s\n", out_path);
+        oneSchemaDestroy(schema);
+        if (schema_out) *schema_out = NULL;
+        return NULL;
+    }
+    tui_atexit_track_tui(out_path);
+    oneAddProvenance(of, prog, what, blurb, 0);
+    if (schema_out) *schema_out = schema;
+    return of;
 }
 
 int tui_create(LI *li, const char *out_path, const char *tmp_dir,
@@ -1346,17 +1377,14 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
     }
     qsort(seqks, n_seqs, sizeof(SeqKey), seqkey_cmp);
 
-    OneSchema *schema = oneSchemaCreateFromText(TUI_SCHEMA);
-    OneFile *of = oneFileOpenWriteNew(out_path, schema, "tui", true, 1);
+    OneSchema *schema = NULL;
+    OneFile *of = tui_open_write(out_path, "taffy", "tui",
+                                 "universal column index", &schema);
     if (of == NULL) {
-        fprintf(stderr, "tui: cannot write %s\n", out_path);
-        oneSchemaDestroy(schema);
         tui_cleanup(&p1, seqks, n_seqs, eff_tmp, tree_map);
         tui_atexit_disarm();
         return 1;
     }
-    tui_atexit_track_tui(out_path);
-    oneAddProvenance(of, "taffy", "tui", "universal column index", 0);
 
     // t: total columns
     oneInt(of, 0) = p1.T;
@@ -1387,7 +1415,7 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
             fclose(xf);
         }
         int64_t x_raw = 0, x_def = 0;
-        uint8_t *xdef = encode_idx(ic, iff, in, &x_raw, &x_def);
+        uint8_t *xdef = tui_encode_idx(ic, iff, in, &x_raw, &x_def);
         int64_t *cc = st_malloc((in?in:1)*sizeof(int64_t));
         int64_t *cf = st_malloc((in?in:1)*sizeof(int64_t));
         int64_t dn = decode_idx(xdef, x_def, x_raw, cc, cf);
@@ -2301,6 +2329,34 @@ void tui_genome_lift_visit_runs(TuiGenomeLift *gl, int64_t c_lo, int64_t c_hi,
         visit_chunk_runs(ch, gl, c_lo, c_hi, cb, user);
     }
     free(visited);
+}
+
+void tui_genome_lift_stream_runs(TuiGenomeLift *gl,
+                                 void (*cb)(const TuiRun *run, void *user),
+                                 void *user) {
+    if (gl == NULL || cb == NULL) return;
+    /* One-shot scan: visit each chunk in g_min order, decode-visit-free.
+     * Unlike tui_genome_lift_visit_runs (which caches decoded chunks
+     * forever on the assumption that browser pan/zoom will hit them
+     * again), this trades cache reuse for bounded memory -- only one
+     * chunk's decoded runs are resident at a time (~3 MB peak).  For
+     * whole-genome scanning workloads (taf_coarsen) where each chunk
+     * is touched exactly once and the cache would only inflate peak
+     * RSS to many tens of GB on giant ancestors. */
+    for (int64_t ci = 0; ci < gl->n_chunks; ci++) {
+        TGLChunk *ch = &gl->chunks[ci];
+        int was_cached = (ch->runs != NULL);
+        if (!was_cached) chunk_decode(ch, gl->of);
+        visit_chunk_runs(ch, gl, ch->g_min, ch->g_max + 1, cb, user);
+        if (!was_cached) {
+            free(ch->runs);          ch->runs          = NULL;
+            free(ch->max_end_prefix); ch->max_end_prefix = NULL;
+            ch->n_runs = 0;
+        }
+        /* If the chunk was already cached before this call, leave it
+         * alone -- a concurrent / earlier caller (e.g. a browser query)
+         * may rely on it. */
+    }
 }
 
 /////////////////////////////////////////////////////////////////////////////
