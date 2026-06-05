@@ -212,6 +212,56 @@ static void test_get_blocks_full_chrom_merged(CuTest *tc) {
     free(err);
 }
 
+/* taffySet/GetMaxOutputBlocks setter contract + runtime cap effect. */
+static void test_max_output_blocks_setter(CuTest *tc) {
+    char *err = NULL;
+    int h = taffyOpen(TEST_TUI, &err);
+    if (h < 0) { free(err); return; }
+
+    /* Default cap is 500. */
+    int64_t cap = 0;
+    CuAssertIntEquals(tc, 0, taffyGetMaxOutputBlocks(h, &cap, &err));
+    CuAssertTrue(tc, cap == 500);
+
+    /* Set + roundtrip. */
+    CuAssertIntEquals(tc, 0, taffySetMaxOutputBlocks(h, 47, &err));
+    CuAssertIntEquals(tc, 0, taffyGetMaxOutputBlocks(h, &cap, &err));
+    CuAssertTrue(tc, cap == 47);
+
+    /* Reject 0 / negative. */
+    CuAssertIntEquals(tc, -1, taffySetMaxOutputBlocks(h, 0, &err));
+    CuAssertPtrNotNull(tc, err); free(err); err = NULL;
+    CuAssertIntEquals(tc, -1, taffySetMaxOutputBlocks(h, -3, &err));
+    CuAssertPtrNotNull(tc, err); free(err); err = NULL;
+    /* Cap unchanged after rejected attempts. */
+    CuAssertIntEquals(tc, 0, taffyGetMaxOutputBlocks(h, &cap, &err));
+    CuAssertTrue(tc, cap == 47);
+
+    /* Cap actually constrains output.  Full evolver chr6 query at
+     * cap=10 must produce <= 10 blocks. */
+    struct taffy_block_results_t *res = taffyGetBlocksInTargetRange(
+        h, "simMouse_chr6", "simHuman_chr6", "simHuman.chr6",
+        0, 0, 0, TAFFY_NO_SEQUENCES, TAFFY_QUERY_AND_TARGET_DUPS,
+        0, NULL, &err);
+    CuAssertPtrNotNull(tc, res);
+    int64_t n = 0;
+    for (struct taffy_block_t *b = res->mappedBlocks; b; b = b->next) n++;
+    CuAssertTrue(tc, n <= 47);
+    taffyFreeBlockResults(res);
+
+    /* Invalid handle errors. */
+    CuAssertIntEquals(tc, -1, taffySetMaxOutputBlocks(99999, 100, &err));
+    CuAssertPtrNotNull(tc, err); free(err); err = NULL;
+    CuAssertIntEquals(tc, -1, taffyGetMaxOutputBlocks(99999, &cap, &err));
+    CuAssertPtrNotNull(tc, err); free(err); err = NULL;
+
+    /* NULL out-ptr in getter is a no-op (no crash). */
+    CuAssertIntEquals(tc, 0, taffyGetMaxOutputBlocks(h, NULL, &err));
+
+    taffyClose(h, &err);
+    free(err);
+}
+
 /* Output-cap invariant: every dupMode must yield mappedBlocks <= 500.
  * Tests the budget logic by including paralogs (which on a small
  * fixture won't actually exceed the cap, but the assertion is the
@@ -259,5 +309,6 @@ CuSuite* blockviz_test_suite(void) {
     SUITE_ADD_TEST(suite, test_get_blocks_narrow_per_run);
     SUITE_ADD_TEST(suite, test_get_blocks_full_chrom_merged);
     SUITE_ADD_TEST(suite, test_get_blocks_respects_output_cap);
+    SUITE_ADD_TEST(suite, test_max_output_blocks_setter);
     return suite;
 }

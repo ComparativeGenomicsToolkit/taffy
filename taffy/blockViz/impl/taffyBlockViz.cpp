@@ -42,6 +42,13 @@ struct SeqRun {
     int     strand;    // +1 / -1
 };
 
+// Browser-conservative default cap on per-query mappedBlocks count.
+// Per-handle, tunable at runtime via taffySetMaxOutputBlocks.  Sized
+// well under HAL's halSnakeTrack.c NUM_LEVELS=1000 so the snake
+// renderer is never close to its cap.  See taffyGetBlocksInTargetRange
+// for how the cap is enforced across the per-run+merge and bin paths.
+#define TAFFY_DEFAULT_MAX_OUTPUT_BLOCKS ((int64_t) 500)
+
 struct TaffyHandle {
     Tui *tui = nullptr;
     std::string tui_path_str;   // resolved .tui path (for tui_sequence_lengths)
@@ -51,6 +58,10 @@ struct TaffyHandle {
     int64_t chain_open      = TAFFY_CHAIN_DEFAULT_OPEN;
     int64_t chain_extend    = TAFFY_CHAIN_DEFAULT_EXTEND;
     int64_t max_gap_length  = TAFFY_CHAIN_DEFAULT_MAX_GAP;
+    // Hard cap on mappedBlocks length per query.  Default is the
+    // browser-conservative TAFFY_DEFAULT_MAX_OUTPUT_BLOCKS (500);
+    // tunable at runtime via taffySetMaxOutputBlocks.
+    int64_t max_output_blocks = TAFFY_DEFAULT_MAX_OUTPUT_BLOCKS;
     // mapBackAdjacencies: per-(qSpecies, qChrom) sorted run table.
     // Key is the fully-qualified "<genome>.<chrom>" string the .tui
     // uses for d-line lookups.  Lazily populated on first flank scan
@@ -179,6 +190,26 @@ extern "C" int taffyGetChainParams(int h,
     if (chain_open)     *chain_open     = H->chain_open;
     if (chain_extend)   *chain_extend   = H->chain_extend;
     if (max_gap_length) *max_gap_length = H->max_gap_length;
+    return 0;
+}
+
+extern "C" int taffySetMaxOutputBlocks(int h, int64_t n, char **errStr) {
+    if (n < 1) {
+        set_err(errStr, "taffyBlockViz: max_output_blocks must be >= 1");
+        return -1;
+    }
+    std::lock_guard<std::mutex> lock(g_mutex);
+    TaffyHandle *H = get_handle(h, errStr);
+    if (!H) return -1;
+    H->max_output_blocks = n;
+    return 0;
+}
+
+extern "C" int taffyGetMaxOutputBlocks(int h, int64_t *n, char **errStr) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    TaffyHandle *H = get_handle(h, errStr);
+    if (!H) return -1;
+    if (n) *n = H->max_output_blocks;
     return 0;
 }
 
@@ -494,18 +525,17 @@ struct BlockCtx {
 
 // Output policy.  All output paths are capped so the browser snake-
 // track renderer (HAL's halSnakeTrack.c caps at NUM_LEVELS=1000) is
-// never close to its limit.  MAX_OUTPUT_BLOCKS is the hard cap on
-// emitted taffy_block_t per query; primary chain is always kept in
-// full, and dupe chains are added in score-desc order until the
-// remaining budget is exhausted (lower-score dupes are silently
-// dropped).
-static const int64_t MAX_OUTPUT_BLOCKS = 500;
+// never close to its limit.  The cap is per-handle (H->max_output_blocks,
+// default TAFFY_DEFAULT_MAX_OUTPUT_BLOCKS=500, tunable via
+// taffySetMaxOutputBlocks).  Primary chain is always kept in full;
+// dupe chains are added in score-desc order until the remaining budget
+// is exhausted (lower-score dupes are silently dropped).
 //
 // Bin policy.  Bin mode is for spans wide enough that the per-run +
 // chain + merge path would push primary block count toward the cap;
 // at vertebrate scale that's spans >= 5 Mb.  Bin mode emits at most
 // TARGET_BIN_COUNT coverage cells (one per qChrom+strand+bin entry),
-// so its output is always under MAX_OUTPUT_BLOCKS as well.
+// so its output is always under H->max_output_blocks as well.
 //
 //   bin_size = span / TARGET_BIN_COUNT
 //   bin_mode = bin_size >= MIN_BIN_BP
@@ -690,7 +720,7 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
     // mapBackAdjacencies (a binned region's neighbors aren't a
     // well-defined block).  targetDupeBlocks stays NULL.
     //
-    // Cap at MAX_OUTPUT_BLOCKS: per-bin output can include multiple
+    // Cap at H->max_output_blocks: per-bin output can include multiple
     // (qChrom, strand) entries, so total blocks isn't bounded by
     // TARGET_BIN_COUNT alone -- a 500-bin × 2-qChrom workload would
     // emit ~1000.  Walking the std::map in key order, the higher-
@@ -701,7 +731,7 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
         struct taffy_block_t *head = nullptr, *tail = nullptr;
         int64_t emitted = 0;
         for (auto &kv : cx.bins) {
-            if (emitted >= MAX_OUTPUT_BLOCKS) break;
+            if (emitted >= H->max_output_blocks) break;
             const BlockCtx::BinKey &k = kv.first;
             int64_t covered = kv.second;
             struct taffy_block_t *b = (struct taffy_block_t *) st_calloc(1, sizeof(*b));
@@ -805,7 +835,7 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
         }
     }
 
-    // Output budget: cap total emitted blocks at MAX_OUTPUT_BLOCKS so the
+    // Output budget: cap total emitted blocks at H->max_output_blocks so the
     // browser snake-track renderer stays well under its NUM_LEVELS=1000
     // cap.  Primary chain is always kept in full (the user queried it);
     // dupe chains are added in score-desc order until the budget is
@@ -821,7 +851,7 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
         }
         int64_t primary_blocks = blocks_per_chain[primary_id];
         kept_chains.insert(primary_id);
-        int64_t budget = MAX_OUTPUT_BLOCKS - primary_blocks;
+        int64_t budget = H->max_output_blocks - primary_blocks;
         // chains[] is already score-desc sorted by taffy_chain.
         for (int64_t k = 0; k < n_chains; k++) {
             int64_t cid = chains[k].id;
@@ -848,7 +878,7 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
         // Hard cap: belt-and-suspenders for the budget set up above.
         // Catches mapBackAdjacencies flanks that would push us past the
         // cap (the budget pre-cull doesn't reserve flank slots).
-        if (mapped_count >= MAX_OUTPUT_BLOCKS) {
+        if (mapped_count >= H->max_output_blocks) {
             free(b->qChrom);
             free(b);
             return;

@@ -203,6 +203,22 @@ int taffyGetChainParams(int taffyHandle,
                         int64_t *max_gap_length,
                         char **errStr);
 
+/** Per-query hard cap on mappedBlocks linked-list length.  Default 500
+ * (browser-conservative; sits well under HAL's halSnakeTrack.c
+ * NUM_LEVELS=1000).  Raise if you have a renderer with more headroom
+ * or are rendering coverage tracks where block count doesn't map to a
+ * level array.  Primary chain is always kept in full; dupes and bin
+ * cells get silently truncated when the cap is hit.  Must be >= 1
+ * (smaller values are rejected with errStr set).
+ *
+ * Returns 0 on success, -1 on invalid handle or invalid n. */
+int taffySetMaxOutputBlocks(int taffyHandle, int64_t n, char **errStr);
+
+/** Read back the currently-configured cap.  *n receives the value;
+ * NULL is accepted as a no-op.  Returns 0 on success, -1 on invalid
+ * handle. */
+int taffyGetMaxOutputBlocks(int taffyHandle, int64_t *n, char **errStr);
+
 /* ------------------------------------------------------------------ */
 /* Free functions for the returned linked lists.                       */
 /* ------------------------------------------------------------------ */
