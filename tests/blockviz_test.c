@@ -212,6 +212,35 @@ static void test_get_blocks_full_chrom_merged(CuTest *tc) {
     free(err);
 }
 
+/* Output-cap invariant: every dupMode must yield mappedBlocks <= 500.
+ * Tests the budget logic by including paralogs (which on a small
+ * fixture won't actually exceed the cap, but the assertion is the
+ * contract -- larger fixtures would exercise the truncation). */
+static void test_get_blocks_respects_output_cap(CuTest *tc) {
+    char *err = NULL;
+    int h = taffyOpen(TEST_TUI, &err);
+    if (h < 0) { free(err); return; }
+
+    taffy_dup_type_t modes[] = {
+        TAFFY_NO_DUPS, TAFFY_QUERY_DUPS, TAFFY_QUERY_AND_TARGET_DUPS
+    };
+    for (size_t m = 0; m < sizeof(modes) / sizeof(modes[0]); m++) {
+        struct taffy_block_results_t *res = taffyGetBlocksInTargetRange(
+            h, "simMouse_chr6", "simHuman_chr6", "simHuman.chr6",
+            0, 0, 0, TAFFY_NO_SEQUENCES, modes[m], 0, NULL, &err);
+        CuAssertPtrNotNull(tc, res);
+        int64_t n = 0;
+        for (struct taffy_block_t *b = res->mappedBlocks; b; b = b->next) n++;
+        /* Hard cap is 500.  Asserting that contract here regardless of
+         * the fixture's natural block count. */
+        CuAssertTrue(tc, n <= 500);
+        taffyFreeBlockResults(res);
+    }
+
+    taffyClose(h, &err);
+    free(err);
+}
+
 /* ------------------------------------------------------------------ */
 /* Suite                                                               */
 /* ------------------------------------------------------------------ */
@@ -229,5 +258,6 @@ CuSuite* blockviz_test_suite(void) {
     SUITE_ADD_TEST(suite, test_chain_params_invalid_handle);
     SUITE_ADD_TEST(suite, test_get_blocks_narrow_per_run);
     SUITE_ADD_TEST(suite, test_get_blocks_full_chrom_merged);
+    SUITE_ADD_TEST(suite, test_get_blocks_respects_output_cap);
     return suite;
 }

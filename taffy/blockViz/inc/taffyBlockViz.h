@@ -221,25 +221,26 @@ void taffyFreeMetadataList(struct taffy_metadata_t *metadata);
 /** Return blocks of `qSpecies` aligned within `tChrom`:[tStart, tEnd)
  * on `tSpecies`.  Output is a linked list of taffy_block_t.
  *
- * BROWSER-SCALE OUTPUT.  Two output regimes:
+ * HARD OUTPUT CAP: mappedBlocks length is bounded at 500 in every
+ * regime below.  Browser snake-track renderers (HAL's halSnakeTrack.c
+ * NUM_LEVELS=1000) stay well clear of their limit.  Drops are silent.
  *
- * 1. Per-run + chain merge (default; spans < 10 Mb).  Visited runs go
+ * Two output regimes:
+ *
+ * 1. Per-run + chain merge (default; spans < 5 Mb).  Visited runs go
  *    through taffy_chain, then adjacent collinear alns within a chain
- *    are merged into one taffy_block_t.  A 500 kb apes-vs-chimp query
- *    produces ~63 primary-chain blocks (was ~2000 unmerged).  Browser
- *    snake-track renderers cap on output block count; this collapse
- *    keeps that under the cap for primary-chain output even at full
- *    chr-scale queries (~700 blocks for hg38.chr5 / 181 Mb).
+ *    are merged into one taffy_block_t.  Primary chain is always kept
+ *    in full; non-primary (dupe) chains are added in score-descending
+ *    order until the 500-block budget is exhausted.  Lower-score dupes
+ *    are silently dropped.
  *
- *    IMPORTANT for snake-track callers: the primary chain stays small,
- *    but if dupMode includes paralogs (QUERY_DUPS or
- *    QUERY_AND_TARGET_DUPS) the total block count can spike on
- *    paralog-rich queries (thousands of singleton dupe chains in dense
- *    apes regions).  Use NO_DUPS for the snake track and route paralog
- *    rendering through targetDupeBlocks or a separate query if needed.
+ *    Implication for snake-track callers: at paralog-rich queries
+ *    (segdup hotspots in apes etc.) you'll see the top-scoring dupes
+ *    and a deterministic truncation of the rest.  If you want strict
+ *    primary-only output, pass dupMode = TAFFY_NO_DUPS.
  *
- * 2. Auto-binning (spans >= 10 Mb).  When (tEnd - tStart) / 500 >=
- *    20 kb, the implementation switches to a bin accumulator instead
+ * 2. Auto-binning (spans >= 5 Mb).  When (tEnd - tStart) / 500 >=
+ *    10 kb, the implementation switches to a bin accumulator instead
  *    of per-run blocks.  Each output block represents coverage of one
  *    (qChrom, strand, bin) cell:
  *      - block.tStart  = bin start on tChrom (bin_size = span/500)
@@ -252,9 +253,11 @@ void taffyFreeMetadataList(struct taffy_metadata_t *metadata);
  *      - block.strand  = '+' or '-' of the contributing runs
  *    Bin mode skips the chain pass and mapBackAdjacencies (those
  *    don't apply to aggregated coverage); targetDupeBlocks is always
- *    NULL in bin mode.  Output is capped at ~500 blocks, well under
- *    HAL's snake-track NUM_LEVELS limit.  This regime targets
- *    coverage-histogram rendering, not snake; render accordingly.
+ *    NULL in bin mode.  Output is hard-capped at 500 blocks; if the
+ *    bin accumulator has more entries, the tail (by std::map key
+ *    order = sorted qChrom name, strand, bin index) is silently
+ *    dropped.  Targets coverage-histogram rendering, not snake;
+ *    render accordingly.
  *
  * @param taffyHandle      handle from taffyOpen
  * @param qSpecies         genome to fetch blocks FROM

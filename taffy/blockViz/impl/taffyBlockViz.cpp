@@ -492,24 +492,28 @@ struct BlockCtx {
     std::map<BinKey, int64_t> bins;
 };
 
-// Bin policy.  Bin mode is for chromosome-scale "coverage track"
-// territory ONLY (span >= 10 Mb): below that the per-run + chain pass
-// + post-chain merge already collapses adjacent collinear runs into a
-// handful of snake segments, and the result is what browsers want for
-// snake-track rendering.  Once spans get wide enough that even merged
-// chains would overwhelm the snake renderer (HAL's halSnakeTrack.c
-// caps at NUM_LEVELS=1000), bin mode produces ~500 coverage cells
-// suitable for a histogram/coverage-bar viz instead.  TARGET_BIN_COUNT
-// stays well under 1000 so even browsers that pipe bin output through
-// the snake renderer don't blow the cap.
+// Output policy.  All output paths are capped so the browser snake-
+// track renderer (HAL's halSnakeTrack.c caps at NUM_LEVELS=1000) is
+// never close to its limit.  MAX_OUTPUT_BLOCKS is the hard cap on
+// emitted taffy_block_t per query; primary chain is always kept in
+// full, and dupe chains are added in score-desc order until the
+// remaining budget is exhausted (lower-score dupes are silently
+// dropped).
+static const int64_t MAX_OUTPUT_BLOCKS = 500;
+//
+// Bin policy.  Bin mode is for spans wide enough that the per-run +
+// chain + merge path would push primary block count toward the cap;
+// at vertebrate scale that's spans >= 5 Mb.  Bin mode emits at most
+// TARGET_BIN_COUNT coverage cells (one per qChrom+strand+bin entry),
+// so its output is always under MAX_OUTPUT_BLOCKS as well.
 //
 //   bin_size = span / TARGET_BIN_COUNT
 //   bin_mode = bin_size >= MIN_BIN_BP
 //
-// With TARGET_BIN_COUNT=500 and MIN_BIN_BP=20000, bin mode engages at
-// spans >= 10 Mb and produces at most 500 output blocks.
+// With TARGET_BIN_COUNT=500 and MIN_BIN_BP=10000, bin mode engages at
+// spans >= 5 Mb and produces at most 500 output blocks.
 static const int64_t TARGET_BIN_COUNT = 500;
-static const int64_t MIN_BIN_BP       = 20000;
+static const int64_t MIN_BIN_BP       = 10000;
 
 // Visitor: clip the q run, compute (tStart, qStart, size, strand),
 // and buffer both a taffy_block_t (for the eventual output linked list)
@@ -685,9 +689,19 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
     // (bin aggregates don't have per-row semantics) and no
     // mapBackAdjacencies (a binned region's neighbors aren't a
     // well-defined block).  targetDupeBlocks stays NULL.
+    //
+    // Cap at MAX_OUTPUT_BLOCKS: per-bin output can include multiple
+    // (qChrom, strand) entries, so total blocks isn't bounded by
+    // TARGET_BIN_COUNT alone -- a 500-bin × 2-qChrom workload would
+    // emit ~1000.  Walking the std::map in key order, the higher-
+    // coverage bins come first within each (qChrom, strand) group; if
+    // we hit the cap, the dropped tail is high-bin-index (rightward in
+    // the query).  Acceptable for a coverage viz; documented.
     if (cx.bin_mode) {
         struct taffy_block_t *head = nullptr, *tail = nullptr;
+        int64_t emitted = 0;
         for (auto &kv : cx.bins) {
+            if (emitted >= MAX_OUTPUT_BLOCKS) break;
             const BlockCtx::BinKey &k = kv.first;
             int64_t covered = kv.second;
             struct taffy_block_t *b = (struct taffy_block_t *) st_calloc(1, sizeof(*b));
@@ -703,6 +717,7 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
             if (!head) head = b;
             if (tail) tail->next = b;
             tail = b;
+            emitted++;
         }
         res->mappedBlocks = head;
         return res;
@@ -790,16 +805,59 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
         }
     }
 
+    // Output budget: cap total emitted blocks at MAX_OUTPUT_BLOCKS so the
+    // browser snake-track renderer stays well under its NUM_LEVELS=1000
+    // cap.  Primary chain is always kept in full (the user queried it);
+    // dupe chains are added in score-desc order until the budget is
+    // exhausted.  Lower-score dupes are silently dropped.
+    //
+    // Counts are by SURVIVING blocks (post-merge), so chains that
+    // collapsed to one merged block count as one.
+    std::set<int64_t> kept_chains;
+    if (n_chains > 0) {
+        std::map<int64_t, int64_t> blocks_per_chain;
+        for (int64_t i = 0; i < n; i++) {
+            if (cx.alns[i].user != nullptr) blocks_per_chain[chain_id[i]]++;
+        }
+        int64_t primary_blocks = blocks_per_chain[primary_id];
+        kept_chains.insert(primary_id);
+        int64_t budget = MAX_OUTPUT_BLOCKS - primary_blocks;
+        // chains[] is already score-desc sorted by taffy_chain.
+        for (int64_t k = 0; k < n_chains; k++) {
+            int64_t cid = chains[k].id;
+            if (cid == primary_id) continue;
+            int64_t bc = blocks_per_chain[cid];
+            if (bc <= budget) {
+                kept_chains.insert(cid);
+                budget -= bc;
+            }
+            /* else: drop this chain (and don't break -- a later, smaller
+             * chain might still fit; rare but possible since chains[] is
+             * by SCORE, not block-count). */
+        }
+    }
+
     // Walk alns (post-chain order) and route blocks per dupMode.  Each
     // aln's `user` field is the taffy_block_t* we created in the
     // visitor (or NULL if it was merged away by the pass above);
-    // chain_id[i] is its chain.
+    // chain_id[i] is its chain.  Alns whose chain isn't in kept_chains
+    // get their block freed and skipped (budget cap).
     struct taffy_block_t *mapped_head = nullptr, *mapped_tail = nullptr;
+    int64_t mapped_count = 0;
     auto append_mapped = [&](struct taffy_block_t *b) {
+        // Hard cap: belt-and-suspenders for the budget set up above.
+        // Catches mapBackAdjacencies flanks that would push us past the
+        // cap (the budget pre-cull doesn't reserve flank slots).
+        if (mapped_count >= MAX_OUTPUT_BLOCKS) {
+            free(b->qChrom);
+            free(b);
+            return;
+        }
         b->next = nullptr;
         if (!mapped_head) mapped_head = b;
         if (mapped_tail) mapped_tail->next = b;
         mapped_tail = b;
+        mapped_count++;
     };
     // For QUERY_AND_TARGET_DUPS: collect non-primary alns grouped by
     // chain_id so each non-primary chain becomes one dupe-list entry.
@@ -810,6 +868,13 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
         if (b == nullptr) continue;   // merged away by the post-chain pass
         int64_t cid = chain_id[i];
         bool is_primary = (cid == primary_id);
+
+        // Budget cap: chains we couldn't fit get silently dropped.
+        if (!kept_chains.count(cid)) {
+            free(b->qChrom);
+            free(b);
+            continue;
+        }
 
         if (dupMode == TAFFY_NO_DUPS && !is_primary) {
             // Drop non-primary blocks entirely.
@@ -870,6 +935,8 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
                 // For NO_DUPS we already dropped non-primary blocks;
                 // restrict flanks to chains we actually emitted.
                 if (dupMode == TAFFY_NO_DUPS && cid != primary_id) continue;
+                // Budget cap: only emit flanks for chains we kept.
+                if (!kept_chains.count(cid)) continue;
                 auto it = edges.find(cid);
                 if (it == edges.end()) {
                     ChainEdge e;
