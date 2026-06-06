@@ -337,3 +337,87 @@ void taffy_chain(TaffyAln *alns, int64_t n,
     qsort(*chains_out, (size_t) *n_chains_out, sizeof(TaffyChainInfo),
           chain_info_cmp_by_score_desc);
 }
+
+/* ------------------------------------------------------------------ */
+/* Post-chain collinear merge.  See chain.h for the rule + contract.  */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    int64_t chain_id;
+    int64_t q_start;
+    int64_t idx;
+} TaffyMergeKey;
+
+static int taffy_merge_key_cmp(const void *a, const void *b) {
+    const TaffyMergeKey *p = (const TaffyMergeKey *) a;
+    const TaffyMergeKey *q = (const TaffyMergeKey *) b;
+    if (p->chain_id != q->chain_id) return p->chain_id < q->chain_id ? -1 : 1;
+    if (p->q_start  != q->q_start)  return p->q_start  < q->q_start  ? -1 : 1;
+    return 0;
+}
+
+int64_t taffy_chain_merge_collinear(TaffyAln *alns, int64_t n,
+                                    const int64_t *chain_id,
+                                    void (*on_merge)(TaffyAln *kept,
+                                                     TaffyAln *absorbed,
+                                                     void *user),
+                                    void *user) {
+    if (n <= 1) return n;
+
+    /* Group by chain_id, then walk each chain's alns in q_start order.
+     * Within a chain, taffy_chain's invariant already guarantees
+     * q_start order -- so we could skip the per-chain re-sort -- but
+     * we don't rely on that here: alns[] may have been mutated by an
+     * earlier caller pass.  The combined sort is O(n log n). */
+    TaffyMergeKey *keys = (TaffyMergeKey *) st_malloc((size_t) n * sizeof(TaffyMergeKey));
+    for (int64_t i = 0; i < n; i++) {
+        keys[i].chain_id = chain_id[i];
+        keys[i].q_start  = alns[i].q_start;
+        keys[i].idx      = i;
+    }
+    qsort(keys, (size_t) n, sizeof(TaffyMergeKey), taffy_merge_key_cmp);
+
+    int64_t n_merges = 0;
+    int64_t i = 0;
+    while (i < n) {
+        /* Find the end of this chain_id group. */
+        int64_t j = i + 1;
+        while (j < n && keys[j].chain_id == keys[i].chain_id) j++;
+
+        /* Walk [i, j) in q_start order, extending `kept` through
+         * consecutive abutting neighbors. */
+        int64_t kept_idx = keys[i].idx;
+        for (int64_t p = i + 1; p < j; p++) {
+            int64_t cur_idx = keys[p].idx;
+            TaffyAln *prev = &alns[kept_idx];
+            TaffyAln *cur  = &alns[cur_idx];
+            /* Within one chain, q_name / t_name / strand are
+             * guaranteed identical by taffy_chain (chain.h invariant);
+             * only the coord abut needs checking. */
+            int abut_q = (prev->q_end == cur->q_start);
+            int abut_t = (prev->strand > 0)
+                       ? (prev->t_end  == cur->t_start)
+                       : (cur->t_end   == prev->t_start);
+            if (abut_q && abut_t) {
+                /* Grow kept's extents to cover both.  + strand: t_end
+                 * advances; - strand: t_start slides down (the target
+                 * range still spans [t_start, t_end) post-merge). */
+                prev->q_end = cur->q_end;
+                if (prev->strand > 0) prev->t_end   = cur->t_end;
+                else                  prev->t_start = cur->t_start;
+                prev->score += cur->score;
+                if (on_merge) on_merge(prev, cur, user);
+                n_merges++;
+                /* kept_idx stays the same: the merged prev may chain
+                 * with the next p, too (consecutive merges). */
+            } else {
+                /* No merge: cur becomes the new kept for subsequent
+                 * abut checks within this chain. */
+                kept_idx = cur_idx;
+            }
+        }
+        i = j;
+    }
+    free(keys);
+    return n - n_merges;
+}

@@ -50,6 +50,16 @@ struct SeqRun {
 #define TAFFY_DEFAULT_MAX_OUTPUT_BLOCKS ((int64_t) 500)
 
 struct TaffyHandle {
+    // Per-handle mutex.  All non-trivial public entries lock this for
+    // the duration of their work.  Two threads on DIFFERENT handles run
+    // fully concurrent (they only meet at the small g_table_mutex when
+    // looking the handle up).  Two threads on the SAME handle still
+    // serialize -- correct, since Tui*, TuiGenomeLift*, lift_cache and
+    // qseq_runs_cache are NOT thread-safe across calls on one Tui*
+    // (tui.h:97-104 and tui.h:200-205).  The kent halSnakeTrack flow
+    // gives each track-thread its own taffyOpen handle, so per-handle
+    // locking captures the full parallel-load win.
+    std::mutex mu;
     Tui *tui = nullptr;
     std::string tui_path_str;   // resolved .tui path (for tui_sequence_lengths)
     std::map<std::string, TuiGenomeLift *> lift_cache;
@@ -71,13 +81,21 @@ struct TaffyHandle {
 
 static std::map<int, TaffyHandle *> g_handles;
 static int  g_next_handle = 1;
-static std::mutex g_mutex;
+// Guards ONLY the g_handles map + g_next_handle.  Per-query work locks
+// the handle's own H->mu instead, so two threads on different handles
+// don't contend here except for the brief lookup.
+static std::mutex g_table_mutex;
 
 static void set_err(char **errStr, const char *msg) {
     if (errStr) *errStr = strdup(msg);
 }
 
-static TaffyHandle *get_handle(int h, char **errStr) {
+// Look up a handle's TaffyHandle* under g_table_mutex and return it.
+// The caller then locks H->mu for the duration of its work.  Safe
+// because TaffyHandle pointers are stable for the handle's lifetime
+// (only taffyClose removes them, and it drains H->mu before delete).
+static TaffyHandle *lookup_handle(int h, char **errStr) {
+    std::lock_guard<std::mutex> lock(g_table_mutex);
     auto it = g_handles.find(h);
     if (it == g_handles.end()) {
         set_err(errStr, "taffyBlockViz: invalid handle");
@@ -87,7 +105,7 @@ static TaffyHandle *get_handle(int h, char **errStr) {
 }
 
 // Cache the per-genome lift table across calls (browser pans + zooms
-// hit the same target/query pair repeatedly).  Caller must hold g_mutex.
+// hit the same target/query pair repeatedly).  Caller holds H->mu.
 static TuiGenomeLift *get_or_load_gl(TaffyHandle *H, const std::string &genome,
                                      char **errStr) {
     auto it = H->lift_cache.find(genome);
@@ -119,36 +137,45 @@ extern "C" int taffyOpen(const char *path, char **errStr) {
         return -1;
     }
 
-    std::lock_guard<std::mutex> lock(g_mutex);
-    int h = g_next_handle++;
     TaffyHandle *H = new TaffyHandle();
     H->tui = tui;
     H->tui_path_str = p;
     free(p);
+    std::lock_guard<std::mutex> lock(g_table_mutex);
+    int h = g_next_handle++;
     g_handles[h] = H;
     return h;
 }
 
 extern "C" int taffyClose(int h, char **errStr) {
-    std::lock_guard<std::mutex> lock(g_mutex);
-    auto it = g_handles.find(h);
-    if (it == g_handles.end()) {
-        set_err(errStr, "taffyBlockViz: invalid handle");
-        return -1;
+    // Erase from the handle table FIRST so no new query can find this
+    // handle, then briefly take H->mu to drain any concurrent in-flight
+    // query, then destruct.  This is the standard "remove-then-drain"
+    // pattern; correct as long as callers don't call taffyClose racing
+    // with their own ongoing query on the same handle.
+    TaffyHandle *H = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_table_mutex);
+        auto it = g_handles.find(h);
+        if (it == g_handles.end()) {
+            set_err(errStr, "taffyBlockViz: invalid handle");
+            return -1;
+        }
+        H = it->second;
+        g_handles.erase(it);
     }
-    TaffyHandle *H = it->second;
+    { std::lock_guard<std::mutex> drain(H->mu); }   // wait for in-flight
     for (auto &kv : H->lift_cache) tui_genome_lift_destruct(kv.second);
     tui_destruct(H->tui);
     delete H;
-    g_handles.erase(it);
     return 0;
 }
 
 extern "C" int taffyCloseGenome(int h, const char *genome, char **errStr) {
     if (!genome) { set_err(errStr, "taffyBlockViz: NULL genome"); return -1; }
-    std::lock_guard<std::mutex> lock(g_mutex);
-    TaffyHandle *H = get_handle(h, errStr);
+    TaffyHandle *H = lookup_handle(h, errStr);
     if (!H) return -1;
+    std::lock_guard<std::mutex> lock(H->mu);
     auto it = H->lift_cache.find(genome);
     if (it != H->lift_cache.end()) {
         tui_genome_lift_destruct(it->second);
@@ -170,9 +197,9 @@ extern "C" int taffySetChainParams(int h,
     if (chain_open      < -1) { set_err(errStr, "taffyBlockViz: chain_open must be >= 0 or -1"); return -1; }
     if (chain_extend    < -1) { set_err(errStr, "taffyBlockViz: chain_extend must be >= 0 or -1"); return -1; }
     if (max_gap_length  < -1) { set_err(errStr, "taffyBlockViz: max_gap_length must be >= 0 or -1"); return -1; }
-    std::lock_guard<std::mutex> lock(g_mutex);
-    TaffyHandle *H = get_handle(h, errStr);
+    TaffyHandle *H = lookup_handle(h, errStr);
     if (!H) return -1;
+    std::lock_guard<std::mutex> lock(H->mu);
     if (chain_open     != -1) H->chain_open     = chain_open;
     if (chain_extend   != -1) H->chain_extend   = chain_extend;
     if (max_gap_length != -1) H->max_gap_length = max_gap_length;
@@ -184,9 +211,9 @@ extern "C" int taffyGetChainParams(int h,
                                    int64_t *chain_extend,
                                    int64_t *max_gap_length,
                                    char **errStr) {
-    std::lock_guard<std::mutex> lock(g_mutex);
-    TaffyHandle *H = get_handle(h, errStr);
+    TaffyHandle *H = lookup_handle(h, errStr);
     if (!H) return -1;
+    std::lock_guard<std::mutex> lock(H->mu);
     if (chain_open)     *chain_open     = H->chain_open;
     if (chain_extend)   *chain_extend   = H->chain_extend;
     if (max_gap_length) *max_gap_length = H->max_gap_length;
@@ -198,17 +225,17 @@ extern "C" int taffySetMaxOutputBlocks(int h, int64_t n, char **errStr) {
         set_err(errStr, "taffyBlockViz: max_output_blocks must be >= 1");
         return -1;
     }
-    std::lock_guard<std::mutex> lock(g_mutex);
-    TaffyHandle *H = get_handle(h, errStr);
+    TaffyHandle *H = lookup_handle(h, errStr);
     if (!H) return -1;
+    std::lock_guard<std::mutex> lock(H->mu);
     H->max_output_blocks = n;
     return 0;
 }
 
 extern "C" int taffyGetMaxOutputBlocks(int h, int64_t *n, char **errStr) {
-    std::lock_guard<std::mutex> lock(g_mutex);
-    TaffyHandle *H = get_handle(h, errStr);
+    TaffyHandle *H = lookup_handle(h, errStr);
     if (!H) return -1;
+    std::lock_guard<std::mutex> lock(H->mu);
     if (n) *n = H->max_output_blocks;
     return 0;
 }
@@ -335,9 +362,9 @@ static std::map<std::string, GenomeRow> enumerate_genomes(TaffyHandle *H) {
 }
 
 extern "C" struct taffy_species_t *taffyGetSpecies(int h, char **errStr) {
-    std::lock_guard<std::mutex> lock(g_mutex);
-    TaffyHandle *H = get_handle(h, errStr);
+    TaffyHandle *H = lookup_handle(h, errStr);
     if (!H) return nullptr;
+    std::lock_guard<std::mutex> lock(H->mu);
     auto rows = enumerate_genomes(H);
 
     struct taffy_species_t *head = nullptr, *tail = nullptr;
@@ -357,9 +384,9 @@ extern "C" struct taffy_species_t *taffyGetSpecies(int h, char **errStr) {
 
 extern "C" struct taffy_chromosome_t *taffyGetChroms(int h, const char *species, char **errStr) {
     if (!species) { set_err(errStr, "taffyBlockViz: NULL speciesName"); return nullptr; }
-    std::lock_guard<std::mutex> lock(g_mutex);
-    TaffyHandle *H = get_handle(h, errStr);
+    TaffyHandle *H = lookup_handle(h, errStr);
     if (!H) return nullptr;
+    std::lock_guard<std::mutex> lock(H->mu);
 
     stHash *seqs = tui_sequence_lengths(H->tui_path_str.c_str());
     if (!seqs) return nullptr;
@@ -402,7 +429,7 @@ extern "C" struct taffy_chromosome_t *taffyGetChroms(int h, const char *species,
 static const int MAX_ADJ_SCAN = 10;
 
 // Lazily load + cache the qSpecies sequence's runs table.  Key is
-// "<qSpecies>.<qChrom>" (the .tui's d-line name).  Caller holds g_mutex.
+// "<qSpecies>.<qChrom>" (the .tui's d-line name).  Caller holds H->mu.
 static const std::vector<SeqRun> *get_seq_runs(TaffyHandle *H,
                                                const std::string &full_seq_name) {
     auto it = H->qseq_runs_cache.find(full_seq_name);
@@ -742,9 +769,9 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
     if (!qSpecies || !tSpecies || !tChrom) { set_err(errStr, "taffyBlockViz: missing required arg"); return nullptr; }
     if (tEnd < 0 || (tEnd > 0 && tEnd <= tStart)) { set_err(errStr, "taffyBlockViz: bad tStart/tEnd"); return nullptr; }
 
-    std::lock_guard<std::mutex> lock(g_mutex);
-    TaffyHandle *H = get_handle(h, errStr);
+    TaffyHandle *H = lookup_handle(h, errStr);
     if (!H) return nullptr;
+    std::lock_guard<std::mutex> lock(H->mu);
 
     // Resolve the .tui d-line key for tChrom: "<tSpecies>.<tChrom>".
     std::string tFullName = std::string(tSpecies) + "." + tChrom;
@@ -883,56 +910,27 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
     // collinear stretch.  With this merge, a typical syntenic 500 kb
     // window emits tens of blocks instead of thousands.
     //
-    // alns are sorted by (q_name, strand, q_start) post-chain; within a
-    // single chain they're contiguous in q_start order.  Two alns merge
-    // if they share chain + qChrom + strand AND abut on both axes.
-    // The strand-aware q-axis (qSpecies forward coord) check:
-    //   +: prev.t_end == cur.t_start (qStart strictly increases)
-    //   -: cur.t_end   == prev.t_start (qStart strictly decreases on -)
-    {
-        std::map<int64_t, std::vector<int64_t>> chain_alns;
-        for (int64_t i = 0; i < n; i++) chain_alns[chain_id[i]].push_back(i);
-
-        for (auto &kv : chain_alns) {
-            auto &v = kv.second;
-            /* alns within a chain are already q_start-sorted (chain_partition
-             * walks in that order); v inherits the same order. */
-            for (size_t j = 1; j < v.size(); ) {
-                int64_t pi = v[j-1], ci = v[j];
-                TaffyAln *p = &cx.alns[pi];
-                TaffyAln *c = &cx.alns[ci];
-                /* chain.c only joins same-(t_name, strand) alns, so those
-                 * match by construction within one chain.  Only the
-                 * coordinate abut needs checking. */
-                bool abut_q = (p->q_end == c->q_start);
-                bool abut_t = (p->strand > 0)
-                            ? (p->t_end   == c->t_start)
-                            : (c->t_end   == p->t_start);
-                if (abut_q && abut_t) {
-                    struct taffy_block_t *pb = (struct taffy_block_t *) p->user;
-                    struct taffy_block_t *cb = (struct taffy_block_t *) c->user;
-                    /* Grow pb to cover both.  + strand: extend size.
-                     * - strand: qStart slides down to cb's qStart and
-                     * size grows. */
-                    pb->size += cb->size;
-                    if (p->strand < 0) pb->qStart = cb->qStart;
-                    /* Update p's TaffyAln extents so the NEXT iteration
-                     * checks abut against the merged boundary. */
-                    p->q_end = c->q_end;
-                    if (p->strand > 0) p->t_end   = c->t_end;
-                    else               p->t_start = c->t_start;
-                    /* Drop cb; mark c as consumed so the routing loop
-                     * below skips it. */
-                    free(cb->qChrom);
-                    free(cb);
-                    c->user = nullptr;
-                    v.erase(v.begin() + j);
-                } else {
-                    j++;
-                }
-            }
-        }
-    }
+    // The chain-side merge logic lives in chain.c
+    // (taffy_chain_merge_collinear).  Our callback below folds the
+    // browser-facing taffy_block_t* records that ride along on each
+    // TaffyAln's `user` slot.  Merged-away alns get user=nullptr so
+    // the routing loop further down can skip them.
+    auto bv_on_merge = [](TaffyAln *kept, TaffyAln *absorbed, void *) {
+        struct taffy_block_t *kb = (struct taffy_block_t *) kept->user;
+        struct taffy_block_t *ab = (struct taffy_block_t *) absorbed->user;
+        /* kept's extents have already been grown by the shared merge
+         * to cover both alns; we just have to keep its taffy_block_t
+         * in sync.  + strand: just extend size.  - strand: kept's
+         * qStart slides down to absorbed's qStart (since absorbed had
+         * the later q-coord = smaller forward-q on - strand). */
+        kb->size += ab->size;
+        if (kept->strand < 0) kb->qStart = ab->qStart;
+        free(ab->qChrom);
+        free(ab);
+        absorbed->user = nullptr;
+    };
+    taffy_chain_merge_collinear(cx.alns.data(), n, chain_id.data(),
+                                bv_on_merge, nullptr);
 
     // Output budget: cap total emitted blocks at H->max_output_blocks so the
     // browser snake-track renderer stays well under its NUM_LEVELS=1000

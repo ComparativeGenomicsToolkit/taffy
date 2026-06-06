@@ -74,20 +74,67 @@ typedef struct {
     int64_t chain_extend;
 } TaffyChainCostParams;
 
-/* Browser/blockViz tuning preset, shared by taffyBlockViz's
- * get_blocks_impl and taffy lift --chainFilter so the constants live
- * in one place.  open=0 + extend=1 chains aggressively (any forward-
- * collinear runs join; nothing is dropped on cost alone); max_gap of
- * 10 Mb breaks chains only across truly large rearrangements.  These
- * differ from the lastz-style 5000/1 defaults baked into
- * taffy_chain_default_gap_cost() -- those are tuned for whole-genome
- * PAF chaining where alignment scores are kbs, not tens of bp.
+/* Default constant sets in taffy chaining:
+ *
+ * 1. TAFFY_CHAIN_DEFAULT_OPEN/EXTEND/MAX_GAP (below): the CANONICAL
+ *    taffy preset.  open=0 + extend=1 chains aggressively (any forward-
+ *    collinear runs join; nothing is dropped on cost alone); max_gap
+ *    of 10 Mb breaks chains only across truly large rearrangements.
+ *    Used by taffyBlockViz get_blocks_impl, taffy lift --chainFilter,
+ *    view_chain_dup_filter.  Tuned for short, dense, gap-free runs as
+ *    emitted by the .tui visitor.
+ *
+ * 2. taffy_chain_default_gap_cost()'s NULL-params fallback: open=5000,
+ *    extend=1.  Legacy: matches paffy's whole-genome-PAF chaining
+ *    defaults where per-aln scores are kbs.  Only fires when callers
+ *    pass NULL for gap_cost_params -- callers using
+ *    TaffyChainCostParams get the (1) preset via TAFFY_CHAIN_DEFAULT_*.
+ *
+ * 3. taf_chain.c's --maxGap=1000 default: sidecar-specific (axtChain-
+ *    equivalent).  taf_chain.c does NOT use this gap-cost machinery --
+ *    it's a streaming greedy merge with a symmetric maxGap on both
+ *    axes, no scoring, no top-N.  The constant lives in that file's
+ *    CLI parser and intentionally matches axtChain so output is
+ *    comparable to UCSC chain files.
  */
 #define TAFFY_CHAIN_DEFAULT_OPEN     ((int64_t) 0)
 #define TAFFY_CHAIN_DEFAULT_EXTEND   ((int64_t) 1)
 #define TAFFY_CHAIN_DEFAULT_MAX_GAP  ((int64_t) 10 * 1000 * 1000)
 
 int64_t taffy_chain_default_gap_cost(int64_t q_gap, int64_t t_gap, void *params);
+
+/* Post-chain collinear merge.  After taffy_chain has assigned chain
+ * IDs, this folds adjacent alns within the same chain whose extents
+ * abut on BOTH axes (forward-collinear runs) into a single merged
+ * entry.  Without this, the browser snake renderer / view block
+ * emitter can produce thousands of one-block-per-run outputs for
+ * what is logically a single gap-free alignment.
+ *
+ * MERGE RULE: two alns A (earlier in q) and B (later) merge iff
+ *   - chain_id[A] == chain_id[B]
+ *   - A.q_end == B.q_start (q-axis abut, strict)
+ *   - + strand: A.t_end   == B.t_start  (t-axis abut, forward)
+ *   - - strand: B.t_end   == A.t_start  (t-axis abut, reverse)
+ *   - same (q_name, t_name, strand) -- guaranteed within a chain by
+ *     taffy_chain's invariant, so checked only via chain_id match.
+ *
+ * On merge: the EARLIER aln (A) is kept and its extents grow to cover
+ * both; its `score` is accumulated.  The LATER aln (B) is logically
+ * removed.  Callers that maintain per-aln auxiliary records (eg
+ * blockViz's taffy_block_t* via TaffyAln.user) supply an `on_merge`
+ * callback to fold or free those records.  Pass NULL to skip.
+ *
+ * Returns the count of surviving alns (n - n_merges).  alns[] is
+ * mutated in place; the removed entries' contents are undefined --
+ * downstream code must use the returned count, OR walk all n entries
+ * and detect removal via the user-supplied marker (eg user==NULL).
+ */
+int64_t taffy_chain_merge_collinear(TaffyAln *alns, int64_t n,
+                                    const int64_t *chain_id,
+                                    void (*on_merge)(TaffyAln *kept,
+                                                     TaffyAln *absorbed,
+                                                     void *user),
+                                    void *user);
 
 /* Chain alignments and assign chain IDs.
  *
