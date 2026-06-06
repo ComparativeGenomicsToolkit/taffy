@@ -36,7 +36,10 @@ static void usage(void) {
     fprintf(stderr, "-S --minSize   [INT]       : (bed mode) Drop output rows whose target length is < INT bp.  Default 1 (no filter).  Applied AFTER --maxGap so small fragments that would coalesce don't get filtered prematurely; reported in the summary log as 'dropped < --minSize'.\n");
     fprintf(stderr, "-F --fast                  : (bed mode) Use chunk-iteration lift instead of per-column open/close.  O(runs_in_range) vs O(columns_in_range); 10-1000x faster on chromosome-scale queries.  Output is equivalent modulo merge order (use with --maxGap N for browser-style block collapse).\n");
     fprintf(stderr, "-B --bin       [INT]       : (bed mode, requires --fast) Emit coarse-grained bedGraph: for every N-bp window on the TARGET genome, the value is the total source-bp lifted into that window.  Output is `seq<TAB>bin_start<TAB>bin_end<TAB>bp_covered`, sorted by (seq, bin).  Skips the per-row merge + filter machinery -- mutually exclusive with --maxGap / --minSize.  Intended for browser chromosome-scale tracks where per-base accuracy isn't needed.\n");
-    fprintf(stderr, "-C --chainFilter [INT]     : (bed mode, requires --fast; mutex with --bin) Keep only the top N chains per BED record.  Buffers the visited runs, runs the taffy chainer (chain_open=0, chain_extend=1, max_gap=10Mb), and replays survivors through --maxGap / --minSize.  N=1 = primary chain only; useful for browser-snake-style filtering of paralog noise.  Drops are counted in the summary log.  Memory is O(n_runs_per_BED_record); a whole-chromosome record on a large alignment can buffer millions of runs (~50 bytes each).  Narrow the input BED if the working set must be bounded.\n");
+    fprintf(stderr, "-C --chainFilter [INT]     : (bed mode, requires --fast; mutex with --bin) Keep only the top N chains per BED record.  Buffers the visited runs, runs the taffy chainer (defaults: chain_open=0, chain_extend=1, max_gap=10Mb -- override via --chainOpen / --chainExtend / --chainMaxGap), and replays survivors through --maxGap / --minSize.  N=1 = primary chain only; useful for browser-snake-style filtering of paralog noise.  Drops are counted in the summary log.  Memory is O(n_runs_per_BED_record); a whole-chromosome record on a large alignment can buffer millions of runs (~50 bytes each).  Narrow the input BED if the working set must be bounded.\n");
+    fprintf(stderr, "--chainOpen [INT]          : (with --chainFilter) lastz-style chain-open cost (default 0).  Larger values discourage starting new chains so adjacent runs are more likely to merge.\n");
+    fprintf(stderr, "--chainExtend [INT]        : (with --chainFilter) lastz-style chain-extend cost per bp of gap (default 1).  Larger values penalize gappy chains more heavily.\n");
+    fprintf(stderr, "--chainMaxGap [INT]        : (with --chainFilter) hard gap-length cap in bp on either axis above which a chain must break (default 10000000).\n");
     fprintf(stderr, "-l --logLevel  : Set log level\n");
     fprintf(stderr, "-h --help      : Print this help\n");
 }
@@ -840,6 +843,12 @@ typedef struct {
     // and replays surviving entries through pending_push so --maxGap /
     // --minSize / strand merge still fire on the kept subset.
     int64_t     chain_filter;
+    // Chain-cost params: TaffyChainCostParams.{open,extend} + max_gap.
+    // Defaults match TAFFY_CHAIN_DEFAULT_* but can be overridden from
+    // the CLI via --chainOpen / --chainExtend / --chainMaxGap.
+    int64_t     chain_open;
+    int64_t     chain_extend;
+    int64_t     chain_max_gap;
     struct LiftRun {
         const char *seq;          // target seq (gl-owned, pointer stable)
         int64_t     c_start, c_end; // column range (chain q-axis)
@@ -952,7 +961,10 @@ static int bed_lift_chunk_impl(Tui *tui, TuiGenomeLift *gl,
                                const char *bed_file, const char *output_file,
                                int64_t max_gap, int64_t min_size,
                                int64_t bin_size,
-                               int64_t chain_filter) {
+                               int64_t chain_filter,
+                               int64_t chain_open,
+                               int64_t chain_extend,
+                               int64_t chain_max_gap) {
     FILE *bf = fopen(bed_file, "r");
     if (bf == NULL) {
         fprintf(stderr, "ERROR: failed to open bed %s: %s\n", bed_file, strerror(errno));
@@ -987,6 +999,9 @@ static int bed_lift_chunk_impl(Tui *tui, TuiGenomeLift *gl,
         ? stHash_construct3(bin_key_hash, bin_key_equal, free, free)
         : NULL;
     cx.chain_filter = chain_filter;
+    cx.chain_open    = chain_open;
+    cx.chain_extend  = chain_extend;
+    cx.chain_max_gap = chain_max_gap;
     cx.n_out_p = &n_out;
 
     ssize_t got;
@@ -1063,15 +1078,13 @@ static int bed_lift_chunk_impl(Tui *tui, TuiGenomeLift *gl,
                 alns[i].score   = L->c_end - L->c_start;
                 alns[i].user    = (void *) (intptr_t) i;   // buf index
             }
-            TaffyChainCostParams cost = {
-                TAFFY_CHAIN_DEFAULT_OPEN, TAFFY_CHAIN_DEFAULT_EXTEND
-            };
+            TaffyChainCostParams cost = { cx.chain_open, cx.chain_extend };
             int64_t *chain_id = st_calloc((size_t) n_buf, sizeof(int64_t));
             TaffyChainInfo *chains_out = NULL;
             int64_t n_chains_out = 0;
             taffy_chain(alns, n_buf,
                         taffy_chain_default_gap_cost, &cost,
-                        TAFFY_CHAIN_DEFAULT_MAX_GAP,
+                        cx.chain_max_gap,
                         chain_id, &chains_out, &n_chains_out);
 
             // Mark the top-N chain ids by score; taffy_chain returns
@@ -1457,6 +1470,13 @@ int taf_lift_main(int argc, char *argv[]) {
     int     fast_mode    = 0;      // --fast (bed mode), 0 = legacy column walk
     int64_t bin_size     = 0;      // --bin (bed mode, requires --fast), 0 = off
     int64_t chain_filter = 0;      // --chainFilter N (bed mode, requires --fast), 0 = off
+    // Chain-cost params (used only when chain_filter > 0).  Defaults match
+    // chain.h's TAFFY_CHAIN_DEFAULT_* preset (the same constants blockViz
+    // uses); CLI overrides let the user tune chaining aggressiveness from
+    // the command line just like taffySetChainParams does for blockViz.
+    int64_t chain_open    = TAFFY_CHAIN_DEFAULT_OPEN;
+    int64_t chain_extend  = TAFFY_CHAIN_DEFAULT_EXTEND;
+    int64_t chain_max_gap = TAFFY_CHAIN_DEFAULT_MAX_GAP;
 
     while (1) {
         static struct option long_options[] = {
@@ -1472,6 +1492,9 @@ int taf_lift_main(int argc, char *argv[]) {
             { "fast",       no_argument,       0, 'F' },
             { "bin",        required_argument, 0, 'B' },
             { "chainFilter", required_argument, 0, 'C' },
+            { "chainOpen",   required_argument, 0, 1001 },
+            { "chainExtend", required_argument, 0, 1002 },
+            { "chainMaxGap", required_argument, 0, 1003 },
             { "help",       no_argument,       0, 'h' },
             { 0, 0, 0, 0 }
         };
@@ -1549,6 +1572,38 @@ int taf_lift_main(int argc, char *argv[]) {
                 chain_filter = (int64_t)v;
                 break;
             }
+            case 1001: {  // --chainOpen
+                errno = 0; char *ep = NULL;
+                long long v = strtoll(optarg, &ep, 10);
+                if (errno == ERANGE || ep == optarg || *ep != 0 || v < 0) {
+                    fprintf(stderr, "ERROR: --chainOpen must be >= 0 (got '%s')\n", optarg);
+                    return 1;
+                }
+                chain_open = (int64_t)v;
+                break;
+            }
+            case 1002: {  // --chainExtend
+                errno = 0; char *ep = NULL;
+                long long v = strtoll(optarg, &ep, 10);
+                if (errno == ERANGE || ep == optarg || *ep != 0 || v < 0) {
+                    fprintf(stderr, "ERROR: --chainExtend must be >= 0 (got '%s')\n", optarg);
+                    return 1;
+                }
+                chain_extend = (int64_t)v;
+                break;
+            }
+            case 1003: {  // --chainMaxGap
+                errno = 0; char *ep = NULL;
+                long long v = strtoll(optarg, &ep, 10);
+                if (errno == ERANGE || ep == optarg || *ep != 0 ||
+                    v < 0 || v > ((long long)1 << 60)) {
+                    fprintf(stderr, "ERROR: --chainMaxGap must be in [0, 2^60] "
+                                    "(got '%s')\n", optarg);
+                    return 1;
+                }
+                chain_max_gap = (int64_t)v;
+                break;
+            }
             case 'h': usage(); return 0;
             default:  usage(); return 1;
         }
@@ -1623,7 +1678,8 @@ int taf_lift_main(int argc, char *argv[]) {
     // manageable in O(open paralog count) memory).
     if (bed_file != NULL) {
         int rc = fast_mode
-            ? bed_lift_chunk_impl(tui, gl, bed_file, output_file, max_gap, min_size, bin_size, chain_filter)
+            ? bed_lift_chunk_impl(tui, gl, bed_file, output_file, max_gap, min_size, bin_size,
+                                  chain_filter, chain_open, chain_extend, chain_max_gap)
             : bed_lift_main_impl (tui, gl, bed_file, output_file, max_gap, min_size);
         tui_genome_lift_destruct(gl);
         tui_destruct(tui);
