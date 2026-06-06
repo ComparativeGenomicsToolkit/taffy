@@ -1645,6 +1645,10 @@ void tui_destruct(Tui *tui) {
 
 int64_t tui_total_columns(const Tui *tui) { return tui->T; }
 
+int64_t        tui_idx_n   (const Tui *tui) { return tui->idxN; }
+const int64_t *tui_idx_cols(const Tui *tui) { return tui->idxCol; }
+const int64_t *tui_idx_fpos(const Tui *tui) { return tui->idxFpos; }
+
 // Binary-search the d-lines (name-sorted by the writer) for `seq_name`.
 // Returns the S-ordinal (0-indexed; position in the genome-major S/R order),
 // or -1 if not found.  Optionally fills *seqlen.

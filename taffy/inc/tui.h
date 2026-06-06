@@ -109,6 +109,15 @@ void tui_destruct(Tui *tui);
 /* Total number of universal columns T (the global column count). */
 int64_t tui_total_columns(const Tui *tui);
 
+/* X-record (universal-column -> source MAF file-position) accessors.
+ * Used by sidecar writers (tui-chain) that need to copy the X-track from
+ * a source .tui forward into a derived .tui so that view -r still works
+ * against the original .maf.gz.  Returned arrays alias internal storage;
+ * do not free or modify. */
+int64_t        tui_idx_n   (const Tui *tui);
+const int64_t *tui_idx_cols(const Tui *tui);
+const int64_t *tui_idx_fpos(const Tui *tui);
+
 /*
  * Map the forward-coordinate interval [start, end) of sequence `seq_name` to
  * universal columns.  Loads that one sequence's runs (via oneGoto on the
