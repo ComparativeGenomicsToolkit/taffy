@@ -36,10 +36,11 @@ static void usage(void) {
     fprintf(stderr, "-S --minSize   [INT]       : (bed mode) Drop output rows whose target length is < INT bp.  Default 1 (no filter).  Applied AFTER --maxGap so small fragments that would coalesce don't get filtered prematurely; reported in the summary log as 'dropped < --minSize'.\n");
     fprintf(stderr, "-F --fast                  : (bed mode) Use chunk-iteration lift instead of per-column open/close.  O(runs_in_range) vs O(columns_in_range); 10-1000x faster on chromosome-scale queries.  Output is equivalent modulo merge order (use with --maxGap N for browser-style block collapse).\n");
     fprintf(stderr, "-B --bin       [INT]       : (bed mode, requires --fast) Emit coarse-grained bedGraph: for every N-bp window on the TARGET genome, the value is the total source-bp lifted into that window.  Output is `seq<TAB>bin_start<TAB>bin_end<TAB>bp_covered`, sorted by (seq, bin).  Skips the per-row merge + filter machinery -- mutually exclusive with --maxGap / --minSize.  Intended for browser chromosome-scale tracks where per-base accuracy isn't needed.\n");
-    fprintf(stderr, "-C --chainFilter [INT]     : (bed mode, requires --fast; mutex with --bin) Keep only the top N chains per BED record.  Buffers the visited runs, runs the taffy chainer (defaults: chain_open=0, chain_extend=1, max_gap=10Mb -- override via --chainOpen / --chainExtend / --chainMaxGap), and replays survivors through --maxGap / --minSize.  N=1 = primary chain only; useful for browser-snake-style filtering of paralog noise.  Drops are counted in the summary log.  Memory is O(n_runs_per_BED_record); a whole-chromosome record on a large alignment can buffer millions of runs (~50 bytes each).  Narrow the input BED if the working set must be bounded.\n");
-    fprintf(stderr, "--chainOpen [INT]          : (with --chainFilter) lastz-style chain-open cost (default 0).  Larger values discourage starting new chains so adjacent runs are more likely to merge.\n");
-    fprintf(stderr, "--chainExtend [INT]        : (with --chainFilter) lastz-style chain-extend cost per bp of gap (default 1).  Larger values penalize gappy chains more heavily.\n");
-    fprintf(stderr, "--chainMaxGap [INT]        : (with --chainFilter) hard gap-length cap in bp on either axis above which a chain must break (default 10000000).\n");
+    fprintf(stderr, "--chainOverlapFrac [FLOAT] : (bed mode, requires --fast; mutex with --bin) Paralogy filter via chaining.  Buffers the visited runs, chains them (taffy_chain), then accepts chains in score order only if their union-of-aln q-coverage overlaps the already-kept chains' q-coverage by at most this fraction of the candidate chain's q-bp.  True paralogs (same query bp mapping to multiple targets) hit ~100%% overlap and drop; inversions / disjoint-q runs hit 0%% and stay (any strand).  F=0 = strict (drop on any overlap, recommended); F=1 = essentially no-op.  Drops counted in the summary log.  Memory is O(n_runs_per_BED_record); narrow the input BED if needed.\n");
+    fprintf(stderr, "-C --chainFilter [INT]     : (with --chainOverlapFrac) Hard safety cap on survivor count.  0 = unbounded (recommended in nearly all cases; --chainOverlapFrac alone is principled).\n");
+    fprintf(stderr, "--chainOpen [INT]          : (with --chainOverlapFrac) lastz-style chain-open cost (default 0).  Larger values discourage starting new chains so adjacent runs are more likely to merge.\n");
+    fprintf(stderr, "--chainExtend [INT]        : (with --chainOverlapFrac) lastz-style chain-extend cost per bp of gap (default 1).  Larger values penalize gappy chains more heavily.\n");
+    fprintf(stderr, "--chainMaxGap [INT]        : (with --chainOverlapFrac) hard gap-length cap in bp on either axis above which a chain must break (default 10000000).\n");
     fprintf(stderr, "-l --logLevel  : Set log level\n");
     fprintf(stderr, "-h --help      : Print this help\n");
 }
@@ -843,6 +844,18 @@ typedef struct {
     // and replays surviving entries through pending_push so --maxGap /
     // --minSize / strand merge still fire on the kept subset.
     int64_t     chain_filter;
+    // Overlap-aware paralogy filter.  When > 0, chains are accepted in
+    // score order only if their union-of-aln q-coverage overlaps the
+    // already-kept chains' q-coverage by at most this fraction of the
+    // candidate chain's own q-bp.  Distinguishes paralogs (same query
+    // bp mapping to multiple targets -- HIGH overlap, dropped) from
+    // inversions / co-linear runs on disjoint query bp (zero overlap,
+    // kept).  Sentinel: < 0 = filter OFF (legacy top-N path); value in
+    // [0, 1] = filter ON with that threshold (0 = drop on ANY overlap,
+    // 1 = essentially keep-all).  When both chain_filter > 0 and
+    // chain_overlap_frac >= 0, the overlap filter picks survivors and
+    // chain_filter acts as a safety cap.
+    double      chain_overlap_frac;
     // Chain-cost params: TaffyChainCostParams.{open,extend} + max_gap.
     // Defaults match TAFFY_CHAIN_DEFAULT_* but can be overridden from
     // the CLI via --chainOpen / --chainExtend / --chainMaxGap.
@@ -916,9 +929,9 @@ static void chunk_lift_visit_cb(const TuiRun *r, void *user) {
         int sign = (r->strand ? +1 : -1) * cx->input_strand_sign;
         out_strand = (sign >= 0) ? '+' : '-';
     }
-    // --chainFilter path: buffer for the post-record chain pass.
-    // Don't touch pending_push; replay happens after chaining.
-    if (cx->chain_filter > 0) {
+    // --chainFilter / --chainOverlapFrac path: buffer for the post-record
+    // chain pass.  Don't touch pending_push; replay happens after chaining.
+    if (cx->chain_overlap_frac >= 0) {
         if (cx->n_run_buf == cx->cap_run_buf) {
             cx->cap_run_buf = cx->cap_run_buf ? cx->cap_run_buf * 2 : 4096;
             cx->run_buf = st_realloc(cx->run_buf,
@@ -962,6 +975,7 @@ static int bed_lift_chunk_impl(Tui *tui, TuiGenomeLift *gl,
                                int64_t max_gap, int64_t min_size,
                                int64_t bin_size,
                                int64_t chain_filter,
+                               double  chain_overlap_frac,
                                int64_t chain_open,
                                int64_t chain_extend,
                                int64_t chain_max_gap) {
@@ -998,7 +1012,8 @@ static int bed_lift_chunk_impl(Tui *tui, TuiGenomeLift *gl,
     cx.bins = bin_size > 0
         ? stHash_construct3(bin_key_hash, bin_key_equal, free, free)
         : NULL;
-    cx.chain_filter = chain_filter;
+    cx.chain_filter       = chain_filter;
+    cx.chain_overlap_frac = chain_overlap_frac;
     cx.chain_open    = chain_open;
     cx.chain_extend  = chain_extend;
     cx.chain_max_gap = chain_max_gap;
@@ -1059,11 +1074,11 @@ static int bed_lift_chunk_impl(Tui *tui, TuiGenomeLift *gl,
         }
         t_visit += NOW_S - t_phase;
 
-        // --chainFilter post-visit pass: chain the buffered runs of THIS
-        // record, pick the top-N chains by total_score, and replay the
-        // survivors through pending_push so --maxGap / --minSize / strand
-        // merge still fire on the kept subset.
-        if (cx.chain_filter > 0 && cx.n_run_buf > 0) {
+        // --chainFilter / --chainOverlapFrac post-visit pass: chain the
+        // buffered runs of THIS record, pick survivors (by top-N or by
+        // q-overlap fraction), and replay through pending_push so
+        // --maxGap / --minSize / strand merge still fire on the kept set.
+        if ((cx.chain_overlap_frac >= 0) && cx.n_run_buf > 0) {
             int64_t n_buf = (int64_t) cx.n_run_buf;
             TaffyAln *alns = st_malloc((size_t) n_buf * sizeof(TaffyAln));
             for (int64_t i = 0; i < n_buf; i++) {
@@ -1087,18 +1102,20 @@ static int bed_lift_chunk_impl(Tui *tui, TuiGenomeLift *gl,
                         cx.chain_max_gap,
                         chain_id, &chains_out, &n_chains_out);
 
-            // Mark the top-N chain ids by score; taffy_chain returns
-            // chains_out sorted desc, so chains_out[0..min(N,nc)) are
-            // the winners.  Use a flat bool[] keyed on (max id + 1) for
-            // O(1) membership.
+            // Pick surviving chain ids via the shared overlap-frac filter
+            // (chain.h).  keep_chain is a flat bool[] keyed on (max id + 1)
+            // for O(1) membership in the replay.  cx.chain_filter > 0 caps
+            // survivor count as a belt-and-braces safety on top of the
+            // overlap test.
             int64_t max_id = 0;
             for (int64_t k = 0; k < n_chains_out; k++)
                 if (chains_out[k].id > max_id) max_id = chains_out[k].id;
             char *keep_chain = st_calloc((size_t)(max_id + 1), sizeof(char));
-            int64_t n_keep_chains = cx.chain_filter < n_chains_out
-                                       ? cx.chain_filter : n_chains_out;
-            for (int64_t k = 0; k < n_keep_chains; k++)
-                keep_chain[chains_out[k].id] = 1;
+            taffy_chain_overlap_frac_select(alns, n_buf, chain_id,
+                                            chains_out, n_chains_out, max_id,
+                                            cx.chain_overlap_frac,
+                                            cx.chain_filter,
+                                            keep_chain);
 
             // taffy_chain SORTS alns in place by (q_name, strand, q_start),
             // destroying the input order.  Walk alns post-sort and use
@@ -1191,12 +1208,13 @@ static int bed_lift_chunk_impl(Tui *tui, TuiGenomeLift *gl,
                    "(tui_query=%.2fs visit=%.2fs emit=%.2fs other=%.2fs)\n",
                    cx.bin_size, n_in, n_out, n_unmapped, t_total,
                    t_query, t_visit, t_emit, t_other);
-    } else if (cx.chain_filter > 0) {
-        st_logInfo("BED lift (--fast --chainFilter %" PRIi64 "): %" PRIi64 " input -> "
-                   "%" PRIi64 " output intervals (%" PRIi64 " unmapped, "
+    } else if (cx.chain_overlap_frac >= 0) {
+        st_logInfo("BED lift (--fast --chainFilter %" PRIi64 " --chainOverlapFrac %.3f): "
+                   "%" PRIi64 " input -> %" PRIi64 " output intervals (%" PRIi64 " unmapped, "
                    "%" PRIi64 " dropped < --minSize, %" PRIi64 " dropped by chain) "
                    "in %.1f s (tui_query=%.2fs visit=%.2fs other=%.2fs)\n",
-                   cx.chain_filter, n_in, n_out, n_unmapped, n_filtered,
+                   cx.chain_filter, cx.chain_overlap_frac,
+                   n_in, n_out, n_unmapped, n_filtered,
                    n_chain_filtered, t_total, t_query, t_visit, t_other);
     } else {
         st_logInfo("BED lift (--fast): %" PRIi64 " input -> %" PRIi64 " output intervals "
@@ -1470,10 +1488,11 @@ int taf_lift_main(int argc, char *argv[]) {
     int     fast_mode    = 0;      // --fast (bed mode), 0 = legacy column walk
     int64_t bin_size     = 0;      // --bin (bed mode, requires --fast), 0 = off
     int64_t chain_filter = 0;      // --chainFilter N (bed mode, requires --fast), 0 = off
-    // Chain-cost params (used only when chain_filter > 0).  Defaults match
-    // chain.h's TAFFY_CHAIN_DEFAULT_* preset (the same constants blockViz
-    // uses); CLI overrides let the user tune chaining aggressiveness from
-    // the command line just like taffySetChainParams does for blockViz.
+    double  chain_overlap_frac = -1.0;  // --chainOverlapFrac F: < 0 = off (legacy top-N), [0, 1] = filter active
+    // Chain-cost params (used only when chain_filter > 0 or chain_overlap_frac > 0).
+    // Defaults match chain.h's TAFFY_CHAIN_DEFAULT_* preset (the same constants
+    // blockViz uses); CLI overrides let the user tune chaining aggressiveness
+    // from the command line just like taffySetChainParams does for blockViz.
     int64_t chain_open    = TAFFY_CHAIN_DEFAULT_OPEN;
     int64_t chain_extend  = TAFFY_CHAIN_DEFAULT_EXTEND;
     int64_t chain_max_gap = TAFFY_CHAIN_DEFAULT_MAX_GAP;
@@ -1491,10 +1510,11 @@ int taf_lift_main(int argc, char *argv[]) {
             { "minSize",    required_argument, 0, 'S' },
             { "fast",       no_argument,       0, 'F' },
             { "bin",        required_argument, 0, 'B' },
-            { "chainFilter", required_argument, 0, 'C' },
-            { "chainOpen",   required_argument, 0, 1001 },
-            { "chainExtend", required_argument, 0, 1002 },
-            { "chainMaxGap", required_argument, 0, 1003 },
+            { "chainFilter",      required_argument, 0, 'C' },
+            { "chainOverlapFrac", required_argument, 0, 1004 },
+            { "chainOpen",        required_argument, 0, 1001 },
+            { "chainExtend",      required_argument, 0, 1002 },
+            { "chainMaxGap",      required_argument, 0, 1003 },
             { "help",       no_argument,       0, 'h' },
             { 0, 0, 0, 0 }
         };
@@ -1604,6 +1624,18 @@ int taf_lift_main(int argc, char *argv[]) {
                 chain_max_gap = (int64_t)v;
                 break;
             }
+            case 1004: {  // --chainOverlapFrac
+                errno = 0; char *ep = NULL;
+                double v = strtod(optarg, &ep);
+                if (errno == ERANGE || ep == optarg || *ep != 0 ||
+                    !(v >= 0.0 && v <= 1.0)) {
+                    fprintf(stderr, "ERROR: --chainOverlapFrac must be in [0.0, 1.0] "
+                                    "(got '%s')\n", optarg);
+                    return 1;
+                }
+                chain_overlap_frac = v;
+                break;
+            }
             case 'h': usage(); return 0;
             default:  usage(); return 1;
         }
@@ -1636,17 +1668,28 @@ int taf_lift_main(int argc, char *argv[]) {
                         "(bin output is fixed-width bedGraph; merge / drop don't apply)\n");
         return 1;
     }
-    if (chain_filter > 0 && !fast_mode) {
-        fprintf(stderr, "ERROR: --chainFilter requires --fast\n");
+    // --chainFilter is a survivor-count cap that ONLY makes sense
+    // alongside --chainOverlapFrac (which selects survivors).  On its
+    // own it's a leftover hook from the dropped top-N path; refuse
+    // rather than silently no-op.
+    if (chain_filter > 0 && chain_overlap_frac < 0) {
+        fprintf(stderr, "ERROR: --chainFilter is a cap on the --chainOverlapFrac "
+                        "filter; pass --chainOverlapFrac F (e.g. 0 for strict "
+                        "paralogy filtering) as well\n");
         return 1;
     }
-    if (chain_filter > 0 && bin_size > 0) {
-        fprintf(stderr, "ERROR: --chainFilter is mutually exclusive with --bin "
+    int chain_active = (chain_overlap_frac >= 0);
+    if (chain_active && !fast_mode) {
+        fprintf(stderr, "ERROR: --chainOverlapFrac requires --fast\n");
+        return 1;
+    }
+    if (chain_active && bin_size > 0) {
+        fprintf(stderr, "ERROR: --chainOverlapFrac is mutually exclusive with --bin "
                         "(bin output isn't per-block, so chain filtering doesn't apply)\n");
         return 1;
     }
-    if (chain_filter > 0 && wig_file != NULL) {
-        fprintf(stderr, "ERROR: --chainFilter is BED-mode only\n");
+    if (chain_active && wig_file != NULL) {
+        fprintf(stderr, "ERROR: --chainOverlapFrac is BED-mode only\n");
         return 1;
     }
 
@@ -1679,7 +1722,8 @@ int taf_lift_main(int argc, char *argv[]) {
     if (bed_file != NULL) {
         int rc = fast_mode
             ? bed_lift_chunk_impl(tui, gl, bed_file, output_file, max_gap, min_size, bin_size,
-                                  chain_filter, chain_open, chain_extend, chain_max_gap)
+                                  chain_filter, chain_overlap_frac,
+                                  chain_open, chain_extend, chain_max_gap)
             : bed_lift_main_impl (tui, gl, bed_file, output_file, max_gap, min_size);
         tui_genome_lift_destruct(gl);
         tui_destruct(tui);

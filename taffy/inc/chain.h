@@ -166,6 +166,46 @@ void taffy_chain(TaffyAln *alns, int64_t n,
                  int64_t *chain_id,
                  TaffyChainInfo **chains_out, int64_t *n_chains_out);
 
+/* Overlap-aware paralogy filter: pick chain survivors based on q-axis
+ * overlap with already-kept chains.  Walks chains_out in (score desc)
+ * order; for each candidate chain, computes its union-of-aln q-coverage
+ * and accepts iff the q-bp intersection with the running union of kept
+ * chains' q-coverage is at most overlap_frac of the candidate's own
+ * q-bp.  Paralogs (same q bp mapped to multiple t loci) hit ~100% and
+ * drop; inversions / disjoint-q runs hit 0% and stay.
+ *
+ * Inputs:
+ *   alns/n           result of a prior taffy_chain() call.  alns are
+ *                    expected to be (q_name, strand, q_start)-sorted
+ *                    -- if you just returned from taffy_chain that is
+ *                    already true.
+ *   chain_id         length-n; the chain id per aln (1-based).
+ *   chains_out       sorted by score desc (as taffy_chain returns).
+ *   n_chains_out     length of chains_out.
+ *   max_id           max chain id; keep_chain must have (max_id + 1)
+ *                    bytes.
+ *   overlap_frac     threshold in [0, 1].  0 = drop on ANY overlap.
+ *                    Negative is treated as "off" by the caller; this
+ *                    function doesn't check.
+ *   cap              optional safety cap on survivor count.  0 = no cap.
+ *
+ * Output:
+ *   keep_chain[cid]  set to 1 for accepted chain ids, otherwise 0.
+ *                    Caller must zero-init (st_calloc) before calling.
+ *
+ * Complexity: O(n log n) total in the typical case (CSR bucketing in
+ * O(n), merged kept-union maintained in O(m) per merge with proper
+ * 2-list union).  Tractable at chromosome scale.
+ */
+void taffy_chain_overlap_frac_select(const TaffyAln *alns, int64_t n,
+                                     const int64_t *chain_id,
+                                     const TaffyChainInfo *chains_out,
+                                     int64_t n_chains_out,
+                                     int64_t max_id,
+                                     double overlap_frac,
+                                     int64_t cap,
+                                     char *keep_chain);
+
 #ifdef __cplusplus
 }
 #endif

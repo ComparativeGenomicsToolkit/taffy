@@ -421,3 +421,129 @@ int64_t taffy_chain_merge_collinear(TaffyAln *alns, int64_t n,
     free(keys);
     return n - n_merges;
 }
+
+/* Overlap-aware paralogy filter -- see chain.h.
+ *
+ * Implementation:
+ *   - CSR-style chain bucket built in one O(n) pass: bucket_off[cid..
+ *     cid+1) is the contiguous index range in bucket_aln for chain cid,
+ *     in q_start order (inherited from taffy_chain's global sort).
+ *   - kept_iv is maintained sorted+disjoint via proper 2-list union
+ *     (O(m+n) per accept) into a ping-pong buffer; both buffers grow
+ *     geometrically on demand.
+ *   - O(n log n) total in the common case.  Earlier "rescan all alns
+ *     per chain" was O(n_chains * n) and intractable for chromosome
+ *     lifts. */
+void taffy_chain_overlap_frac_select(const TaffyAln *alns, int64_t n,
+                                     const int64_t *chain_id,
+                                     const TaffyChainInfo *chains_out,
+                                     int64_t n_chains_out,
+                                     int64_t max_id,
+                                     double overlap_frac,
+                                     int64_t cap,
+                                     char *keep_chain) {
+    if (n == 0 || n_chains_out == 0) return;
+    typedef struct { int64_t lo, hi; } QIv;
+
+    /* CSR bucket of alns by chain id. */
+    int64_t *bucket_off = st_calloc((size_t)(max_id + 2), sizeof(int64_t));
+    int64_t *bucket_aln = st_malloc((size_t) n * sizeof(int64_t));
+    for (int64_t i = 0; i < n; i++) bucket_off[chain_id[i] + 1]++;
+    for (int64_t k = 1; k <= max_id + 1; k++) bucket_off[k] += bucket_off[k-1];
+    {
+        int64_t *cursor = st_malloc((size_t)(max_id + 2) * sizeof(int64_t));
+        memcpy(cursor, bucket_off, (size_t)(max_id + 2) * sizeof(int64_t));
+        for (int64_t i = 0; i < n; i++)
+            bucket_aln[cursor[chain_id[i]]++] = i;
+        free(cursor);
+    }
+
+    /* Ping-pong kept_iv buffers + growable candidate buffer. */
+    int64_t cap_kept = 4096, cap_cand = 4096;
+    QIv *kept_a   = st_malloc((size_t)cap_kept * sizeof(QIv));
+    QIv *kept_b   = st_malloc((size_t)cap_kept * sizeof(QIv));
+    QIv *cand_iv  = st_malloc((size_t)cap_cand * sizeof(QIv));
+    QIv *kept_iv  = kept_a;
+    QIv *kept_nxt = kept_b;
+    int64_t n_kept_iv = 0;
+    int64_t survivor_cap = (cap > 0 && cap < n_chains_out) ? cap : n_chains_out;
+    int64_t n_kept_chains = 0;
+
+    for (int64_t k = 0; k < n_chains_out; k++) {
+        int64_t cid = chains_out[k].id;
+        int64_t b_lo = bucket_off[cid];
+        int64_t b_hi = bucket_off[cid + 1];
+        if (b_lo == b_hi) continue;
+        int64_t n_in = b_hi - b_lo;
+        if (n_in > cap_cand) {
+            while (cap_cand < n_in) cap_cand *= 2;
+            cand_iv = st_realloc(cand_iv, (size_t)cap_cand * sizeof(QIv));
+        }
+        /* Merge candidate q-intervals in one forward pass (alns are
+         * already in q_start order within a chain). */
+        int64_t nm = 0;
+        for (int64_t z = b_lo; z < b_hi; z++) {
+            int64_t lo = alns[bucket_aln[z]].q_start;
+            int64_t hi = alns[bucket_aln[z]].q_end;
+            if (nm > 0 && lo <= cand_iv[nm-1].hi) {
+                if (hi > cand_iv[nm-1].hi) cand_iv[nm-1].hi = hi;
+            } else {
+                cand_iv[nm].lo = lo;
+                cand_iv[nm].hi = hi;
+                nm++;
+            }
+        }
+        int64_t cand_bp = 0;
+        for (int64_t i = 0; i < nm; i++) cand_bp += cand_iv[i].hi - cand_iv[i].lo;
+        if (cand_bp == 0) continue;
+        /* Overlap with kept_iv (both sorted+disjoint). */
+        int64_t ovr_bp = 0;
+        {
+            int64_t i = 0, j = 0;
+            while (i < n_kept_iv && j < nm) {
+                int64_t lo = kept_iv[i].lo > cand_iv[j].lo
+                                ? kept_iv[i].lo : cand_iv[j].lo;
+                int64_t hi = kept_iv[i].hi < cand_iv[j].hi
+                                ? kept_iv[i].hi : cand_iv[j].hi;
+                if (hi > lo) ovr_bp += hi - lo;
+                if (kept_iv[i].hi < cand_iv[j].hi) i++;
+                else j++;
+            }
+        }
+        if ((double) ovr_bp > overlap_frac * (double) cand_bp)
+            continue;  /* drop */
+        /* Accept: merge cand_iv into kept_iv via 2-list union. */
+        int64_t need = n_kept_iv + nm;
+        if (need > cap_kept) {
+            int kept_is_a = (kept_iv == kept_a);
+            while (cap_kept < need) cap_kept *= 2;
+            kept_a = st_realloc(kept_a, (size_t)cap_kept * sizeof(QIv));
+            kept_b = st_realloc(kept_b, (size_t)cap_kept * sizeof(QIv));
+            kept_iv  = kept_is_a ? kept_a : kept_b;
+            kept_nxt = kept_is_a ? kept_b : kept_a;
+        }
+        int64_t i = 0, j = 0, k_out = 0;
+        while (i < n_kept_iv || j < nm) {
+            QIv pick;
+            if (j >= nm || (i < n_kept_iv && kept_iv[i].lo <= cand_iv[j].lo)) {
+                pick = kept_iv[i++];
+            } else {
+                pick = cand_iv[j++];
+            }
+            if (k_out > 0 && pick.lo <= kept_nxt[k_out-1].hi) {
+                if (pick.hi > kept_nxt[k_out-1].hi)
+                    kept_nxt[k_out-1].hi = pick.hi;
+            } else {
+                kept_nxt[k_out++] = pick;
+            }
+        }
+        n_kept_iv = k_out;
+        QIv *swap = kept_iv; kept_iv = kept_nxt; kept_nxt = swap;
+
+        keep_chain[cid] = 1;
+        n_kept_chains++;
+        if (n_kept_chains >= survivor_cap) break;
+    }
+    free(kept_a); free(kept_b); free(cand_iv);
+    free(bucket_off); free(bucket_aln);
+}

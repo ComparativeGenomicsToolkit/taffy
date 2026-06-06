@@ -23,8 +23,9 @@ typedef struct {
     Alignment_Row *row;
 } RowRef;
 
-void view_chain_dup_filter(stList *blocks, int64_t top_n) {
-    if (top_n < 1) top_n = 1;
+void view_chain_dup_filter(stList *blocks, double overlap_frac, int64_t cap) {
+    if (overlap_frac < 0) return;            /* disabled */
+    if (overlap_frac > 1) overlap_frac = 1;
     int64_t n_blocks = stList_length(blocks);
     if (n_blocks == 0) return;
 
@@ -160,18 +161,23 @@ void view_chain_dup_filter(stList *blocks, int64_t top_n) {
                     TAFFY_CHAIN_DEFAULT_MAX_GAP,
                     chain_id, &chains, &n_chains);
 
-        /* chains[] is sorted by total_score desc; top_n wins. */
-        int64_t keep = (top_n < n_chains) ? top_n : n_chains;
+        /* Run the shared overlap-frac selector: keep_chain[cid] flags
+         * surviving chain ids (1-based, sized max_id + 1). */
+        int64_t max_id = 0;
+        for (int64_t k = 0; k < n_chains; k++)
+            if (chains[k].id > max_id) max_id = chains[k].id;
+        char *keep_chain = st_calloc((size_t)(max_id + 1), sizeof(char));
+        taffy_chain_overlap_frac_select(alns, n, chain_id,
+                                        chains, n_chains, max_id,
+                                        overlap_frac, cap,
+                                        keep_chain);
         for (int64_t i = 0; i < n; i++) {
-            int64_t cid = chain_id[i];
-            for (int64_t k = 0; k < keep; k++) {
-                if (chains[k].id == cid) {
-                    RowRef *rr = (RowRef*) alns[i].user;
-                    stSet_insert(survivors, rr->row);
-                    break;
-                }
+            if (keep_chain[chain_id[i]]) {
+                RowRef *rr = (RowRef*) alns[i].user;
+                stSet_insert(survivors, rr->row);
             }
         }
+        free(keep_chain);
         free(chain_id);
         free(chains);
         free(alns);

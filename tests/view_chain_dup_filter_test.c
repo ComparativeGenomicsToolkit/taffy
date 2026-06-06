@@ -1,10 +1,9 @@
 /*
  * Unit tests for taffy/impl/view_chain_dup_filter.c -- the per-region
  * chain-based duplicate-row filter that drives taffy view's
- * --chainDupFilter[=N].  Focused on the per-block dup semantics
- * (genome appears 2+ times in same block triggers chain pass; lone
- * occurrences are never dropped), top_n selection, and row-0
- * pinning.
+ * --chainOverlapFrac.  Focused on the per-block dup semantics (genome
+ * appears 2+ times in same block triggers chain pass; lone occurrences
+ * are never dropped), overlap-frac selection, and row-0 pinning.
  *
  *  Released under the MIT license, see LICENSE.txt
  */
@@ -87,10 +86,12 @@ static void test_view_chain_dup_filter_per_block_paralog(CuTest *tc) {
     stList_append(blocks, blkA);
     stList_append(blocks, blkB);
 
-    view_chain_dup_filter(blocks, /*top_n=*/1);
+    view_chain_dup_filter(blocks, /*overlap_frac=*/0.0, /*cap=*/0);
 
-    /* Block A had a per-block dog dup (chr1 + chr2).  After top-1, exactly
-     * one dog row survives in block A.  Row-0 is always preserved. */
+    /* Block A had a per-block dog dup (chr1 + chr2).  With strict overlap
+     * filter (frac=0), each dog row in block A is its own chain on q-axis
+     * [0,1) — they 100% q-overlap, so only the highest-score one survives.
+     * Row-0 is always preserved. */
     CuAssertIntEquals(tc, 2, (int) count_rows(blkA));
     CuAssertPtrNotNull(tc, find_row_by_genome(blkA, "Anc"));      /* row-0 */
     CuAssertPtrNotNull(tc, find_row_by_genome(blkA, "dog"));      /* one of chr1/chr2 */
@@ -131,7 +132,7 @@ static void test_view_chain_dup_filter_singletons_preserved(CuTest *tc) {
     stList_append(blocks, blkA);
     stList_append(blocks, blkB);
 
-    view_chain_dup_filter(blocks, 1);
+    view_chain_dup_filter(blocks, 0.0, 0);
 
     /* Both blocks unchanged: cat appears once per block; not a per-block
      * dup; the filter must NOT touch it regardless of chain breakage. */
@@ -164,7 +165,7 @@ static void test_view_chain_dup_filter_row0_pinned(CuTest *tc) {
     stList_append(blocks, blkA);
     stList_append(blocks, blkB);
 
-    view_chain_dup_filter(blocks, 1);
+    view_chain_dup_filter(blocks, 0.0, 0);
 
     /* Row-0 (hg.chrA in each block) must survive. */
     CuAssertStrEquals(tc, "hg.chrA", blkA->row->sequence_name);
@@ -181,8 +182,11 @@ static void test_view_chain_dup_filter_row0_pinned(CuTest *tc) {
     stList_destruct(blocks);
 }
 
-/* top_n >= n_chains: every row survives (no-op even with per-block dups). */
-static void test_view_chain_dup_filter_top_n_unbounded(CuTest *tc) {
+/* overlap_frac=1: every row survives (filter is a no-op since overlap
+ * of an aln with itself is bounded by its own bp, so any chain passes
+ * cand_bp <= cand_bp threshold).  Verifies the filter's permissive
+ * end of the spectrum is actually permissive. */
+static void test_view_chain_dup_filter_overlap_frac_one_keeps_all(CuTest *tc) {
     Alignment_Row *aA[3] = {
         mk_row("Anc.refA", 0, 100, 10000, 1),
         mk_row("dog.chr1", 0, 100, 100000, 1),
@@ -192,8 +196,7 @@ static void test_view_chain_dup_filter_top_n_unbounded(CuTest *tc) {
     stList *blocks = stList_construct();
     stList_append(blocks, blkA);
 
-    /* Both paralogs form distinct chains; top_n=100 keeps all. */
-    view_chain_dup_filter(blocks, 100);
+    view_chain_dup_filter(blocks, 1.0, 0);
 
     CuAssertIntEquals(tc, 3, (int) count_rows(blkA));
 
@@ -204,13 +207,13 @@ static void test_view_chain_dup_filter_top_n_unbounded(CuTest *tc) {
 /* Empty input: no crash, no work. */
 static void test_view_chain_dup_filter_empty(CuTest *tc) {
     stList *blocks = stList_construct();
-    view_chain_dup_filter(blocks, 1);
+    view_chain_dup_filter(blocks, 0.0, 0);
     CuAssertIntEquals(tc, 0, (int) stList_length(blocks));
     stList_destruct(blocks);
 }
 
-/* top_n < 1 is clamped to 1 (no crash, no underflow). */
-static void test_view_chain_dup_filter_top_n_zero_clamps(CuTest *tc) {
+/* overlap_frac < 0 = filter off: input unchanged even with per-block dups. */
+static void test_view_chain_dup_filter_negative_frac_is_off(CuTest *tc) {
     Alignment_Row *aA[3] = {
         mk_row("Anc.refA", 0, 100, 10000, 1),
         mk_row("dog.chr1", 0, 100, 100000, 1),
@@ -220,11 +223,10 @@ static void test_view_chain_dup_filter_top_n_zero_clamps(CuTest *tc) {
     stList *blocks = stList_construct();
     stList_append(blocks, blkA);
 
-    /* top_n=0 should behave like top_n=1 (clamped). */
-    view_chain_dup_filter(blocks, 0);
+    view_chain_dup_filter(blocks, -1.0, 0);
 
-    /* Row-0 + one survivor = 2. */
-    CuAssertIntEquals(tc, 2, (int) count_rows(blkA));
+    /* All 3 rows remain when the filter is off. */
+    CuAssertIntEquals(tc, 3, (int) count_rows(blkA));
 
     alignment_destruct(blkA, 1);
     stList_destruct(blocks);
@@ -235,8 +237,8 @@ CuSuite *view_chain_dup_filter_test_suite(void) {
     SUITE_ADD_TEST(s, test_view_chain_dup_filter_per_block_paralog);
     SUITE_ADD_TEST(s, test_view_chain_dup_filter_singletons_preserved);
     SUITE_ADD_TEST(s, test_view_chain_dup_filter_row0_pinned);
-    SUITE_ADD_TEST(s, test_view_chain_dup_filter_top_n_unbounded);
+    SUITE_ADD_TEST(s, test_view_chain_dup_filter_overlap_frac_one_keeps_all);
     SUITE_ADD_TEST(s, test_view_chain_dup_filter_empty);
-    SUITE_ADD_TEST(s, test_view_chain_dup_filter_top_n_zero_clamps);
+    SUITE_ADD_TEST(s, test_view_chain_dup_filter_negative_frac_is_off);
     return s;
 }
