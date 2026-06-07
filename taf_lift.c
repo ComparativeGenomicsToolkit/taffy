@@ -41,6 +41,8 @@ static void usage(void) {
     fprintf(stderr, "--chainOpen [INT]          : (with --chainOverlapFrac) lastz-style chain-open cost (default 0).  Larger values discourage starting new chains so adjacent runs are more likely to merge.\n");
     fprintf(stderr, "--chainExtend [INT]        : (with --chainOverlapFrac) lastz-style chain-extend cost per bp of gap (default 1).  Larger values penalize gappy chains more heavily.\n");
     fprintf(stderr, "--chainMaxGap [INT]        : (with --chainOverlapFrac) hard gap-length cap in bp on either axis above which a chain must break (default 10000000).\n");
+    fprintf(stderr, "--chainWindow [INT]        : (with --chainOverlapFrac) Window size in q-axis bp for streaming chain filter.  Buffer up to W bp of runs, chain + filter + emit survivors past (W - overlap), then slide.  Bounds memory at ~50 bytes/run within W.  Default 100000000 (100 Mb).  Set 0 to disable (buffer the whole BED record -- OOM risk on chr-scale records).\n");
+    fprintf(stderr, "--chainWindowOverlap [INT] : (with --chainOverlapFrac) Carryover size K in bp at each window boundary.  Tail K bp of buffered runs are retained for the next window so cross-boundary chains re-form.  Must be < --chainWindow and >= --chainMaxGap (recommended) to avoid boundary chain splits.  Default 10000000 (10 Mb).\n");
     fprintf(stderr, "-l --logLevel  : Set log level\n");
     fprintf(stderr, "-h --help      : Print this help\n");
 }
@@ -828,6 +830,8 @@ typedef struct {
     const char *name;
     const char *score;
     int64_t    *n_out_p;
+    int64_t    *n_chain_filtered_p;  // drops by chain filter (windowed flush counts)
+    const char *q_name;              // source chrom name for the current BED record
     // --bin coarse-grained bedGraph mode.  When bin_size > 0 the visitor
     // does NOT touch pending[]/pending_push at all -- it consolidates
     // (target_seq, bin_idx) -> bp into a hash on insert.  Memory is
@@ -862,6 +866,19 @@ typedef struct {
     int64_t     chain_open;
     int64_t     chain_extend;
     int64_t     chain_max_gap;
+    // Sliding-window chain processing.  Without this, every BED record
+    // buffers ALL its visited runs and chains them in one shot -- which
+    // OOMs / takes hours for chromosome-scale BED records.  With it, we
+    // chain runs in windows of `chain_window` bp on the q-axis and emit
+    // survivors whose q_end <= (window_end - chain_window_overlap),
+    // carrying the tail forward as context for the next window's chain
+    // pass.  K must be >= chain_max_gap so cross-window chains have
+    // room to re-form in the next window.  Each q bp is decided in
+    // exactly one window.  Tracked: window_start = q-coord of current
+    // window's left edge for this BED record (reset per record).
+    int64_t     chain_window;          // W (bp), 0 = disabled
+    int64_t     chain_window_overlap;  // K (bp)
+    int64_t     window_start;          // current q-window left edge
     struct LiftRun {
         const char *seq;          // target seq (gl-owned, pointer stable)
         int64_t     c_start, c_end; // column range (chain q-axis)
@@ -881,6 +898,106 @@ typedef struct {
 //                                                t + len - (cs - gs))
 // Output strand bit = run.strand XOR input.strand sign (matches the
 // open/close path's per-column derivation exactly).
+/* Chain + filter + replay one window's worth of buffered runs.
+ *
+ * If force_all != 0, every buffered run is replayed and the buffer is
+ * cleared.  Otherwise, replays runs whose c_end <= boundary_c (i.e.
+ * fully past the window's safe zone) and compacts the buffer to keep
+ * only "live" runs (c_end > boundary_c) for the next window's pass.
+ *
+ * The chain pass operates on the WHOLE current buffer (live carryover
+ * + new) so cross-window chains have context to re-form -- the filter
+ * decision applied to "completed" runs is based on the chain layer
+ * having seen runs through the right edge of the current window. */
+static void chain_flush_window(ChunkLiftCtx *cx, const char *chrom,
+                               int64_t boundary_c, int force_all,
+                               int64_t *n_chain_filtered_p) {
+    int64_t n_buf = (int64_t) cx->n_run_buf;
+    if (n_buf == 0) return;
+    TaffyAln *alns = st_malloc((size_t) n_buf * sizeof(TaffyAln));
+    for (int64_t i = 0; i < n_buf; i++) {
+        struct LiftRun *L = &cx->run_buf[i];
+        alns[i].q_name  = chrom;
+        alns[i].q_start = L->c_start;
+        alns[i].q_end   = L->c_end;
+        alns[i].t_name  = L->seq;
+        alns[i].t_start = L->t_start;
+        alns[i].t_end   = L->t_end;
+        alns[i].strand  = L->strand;
+        alns[i].score   = L->c_end - L->c_start;
+        alns[i].user    = (void *) (intptr_t) i;
+    }
+    TaffyChainCostParams cost = { cx->chain_open, cx->chain_extend };
+    int64_t *chain_id = st_calloc((size_t) n_buf, sizeof(int64_t));
+    TaffyChainInfo *chains_out = NULL;
+    int64_t n_chains_out = 0;
+    taffy_chain(alns, n_buf,
+                taffy_chain_default_gap_cost, &cost,
+                cx->chain_max_gap,
+                chain_id, &chains_out, &n_chains_out);
+
+    int64_t max_id = 0;
+    for (int64_t k = 0; k < n_chains_out; k++)
+        if (chains_out[k].id > max_id) max_id = chains_out[k].id;
+    char *keep_chain = st_calloc((size_t)(max_id + 1), sizeof(char));
+    taffy_chain_overlap_frac_select(alns, n_buf, chain_id,
+                                    chains_out, n_chains_out, max_id,
+                                    cx->chain_overlap_frac,
+                                    cx->chain_filter,
+                                    keep_chain);
+
+    // Classify each run via marker arrays keyed on original buf index.
+    // A run is "decided" if c_end <= boundary_c (or force_all): replay
+    // if kept, count as filtered if dropped.  Otherwise the run is
+    // "live" -- carry forward to the next window's chain pass.  Even a
+    // currently-dropped live run gets carried (its chain assignment
+    // may change once more context arrives).
+    char *should_replay = st_calloc((size_t)n_buf, sizeof(char));
+    char *is_live       = st_calloc((size_t)n_buf, sizeof(char));
+    for (int64_t i = 0; i < n_buf; i++) {
+        int64_t bi = (int64_t)(intptr_t) alns[i].user;
+        struct LiftRun *L = &cx->run_buf[bi];
+        int decided = force_all || L->c_end <= boundary_c;
+        int kept    = keep_chain[chain_id[i]];
+        if (decided) {
+            if (kept) should_replay[bi] = 1;
+            else (*n_chain_filtered_p)++;
+        } else {
+            is_live[bi] = 1;
+        }
+    }
+    // Replay survivors in alns[] (post-chain-sort = q_name, strand,
+    // q_start) order, matching the pre-refactor inline path.  Walking
+    // run_buf in insertion order would interleave strands and break
+    // pending_push merges (40-row delta observed on apes 1Mb).
+    for (int64_t i = 0; i < n_buf; i++) {
+        int64_t bi = (int64_t)(intptr_t) alns[i].user;
+        if (!should_replay[bi]) continue;
+        struct LiftRun *L = &cx->run_buf[bi];
+        cx->pending = pending_push(cx->fh, cx->pending, &cx->pending_cap,
+                                   &cx->pending_touch,
+                                   L->seq, L->t_start, L->t_end,
+                                   L->out_strand, cx->emit_strand,
+                                   cx->max_gap, cx->min_size,
+                                   cx->name, cx->score, cx->n_out_p);
+    }
+    // Compact live runs to the head of run_buf for the next window.
+    int64_t live_w = 0;
+    for (int64_t bi = 0; bi < n_buf; bi++) {
+        if (!is_live[bi]) continue;
+        if (live_w != bi) cx->run_buf[live_w] = cx->run_buf[bi];
+        live_w++;
+    }
+    cx->n_run_buf = (size_t) live_w;
+    free(should_replay);
+    free(is_live);
+
+    free(keep_chain);
+    free(chain_id);
+    free(chains_out);
+    free(alns);
+}
+
 static void chunk_lift_visit_cb(const TuiRun *r, void *user) {
     ChunkLiftCtx *cx = (ChunkLiftCtx *)user;
     int64_t r_end = r->g_start + r->length;
@@ -945,6 +1062,24 @@ static void chunk_lift_visit_cb(const TuiRun *r, void *user) {
         L->t_end      = t_out_end;
         L->strand     = r->strand ? +1 : -1;
         L->out_strand = out_strand;
+        // Windowed flush: when q-span from window's left edge exceeds
+        // chain_window bp, chain + filter the current buffer, emit
+        // survivors past (window_end - chain_window_overlap), and
+        // carry the tail forward.  Without this the buffer grows to
+        // O(n_runs_in_BED_record) -- multi-GB for chr-scale records.
+        // chain_window == 0 disables (one-shot at end of record).
+        // First run of this BED record: anchor the window on its c-axis
+        // start (universal column, NOT source bp -- they're different
+        // coordinate systems; ce/cs are column indices, not genome bp).
+        if (cx->window_start == INT64_MIN) cx->window_start = cs;
+        if (cx->chain_window > 0 &&
+            ce - cx->window_start >= cx->chain_window) {
+            int64_t window_end = cx->window_start + cx->chain_window;
+            int64_t boundary_c = window_end - cx->chain_window_overlap;
+            chain_flush_window(cx, cx->q_name, boundary_c, 0,
+                               cx->n_chain_filtered_p);
+            cx->window_start = boundary_c;
+        }
         return;
     }
     cx->pending = pending_push(cx->fh, cx->pending, &cx->pending_cap,
@@ -978,7 +1113,9 @@ static int bed_lift_chunk_impl(Tui *tui, TuiGenomeLift *gl,
                                double  chain_overlap_frac,
                                int64_t chain_open,
                                int64_t chain_extend,
-                               int64_t chain_max_gap) {
+                               int64_t chain_max_gap,
+                               int64_t chain_window,
+                               int64_t chain_window_overlap) {
     FILE *bf = fopen(bed_file, "r");
     if (bf == NULL) {
         fprintf(stderr, "ERROR: failed to open bed %s: %s\n", bed_file, strerror(errno));
@@ -1017,7 +1154,10 @@ static int bed_lift_chunk_impl(Tui *tui, TuiGenomeLift *gl,
     cx.chain_open    = chain_open;
     cx.chain_extend  = chain_extend;
     cx.chain_max_gap = chain_max_gap;
-    cx.n_out_p = &n_out;
+    cx.chain_window         = chain_window;
+    cx.chain_window_overlap = chain_window_overlap;
+    cx.n_out_p             = &n_out;
+    cx.n_chain_filtered_p  = &n_chain_filtered;
 
     ssize_t got;
     while ((got = getline(&line, &cap, bf)) > 0) {
@@ -1047,6 +1187,7 @@ static int bed_lift_chunk_impl(Tui *tui, TuiGenomeLift *gl,
         cx.emit_strand = (strand != NULL && strand[0] != '.');
         cx.name = name;
         cx.score = score;
+        cx.q_name = chrom;
 
         n_in++;
         int64_t n_iv = 0;
@@ -1069,84 +1210,24 @@ static int bed_lift_chunk_impl(Tui *tui, TuiGenomeLift *gl,
         for (int64_t k = 0; k < n_iv; k++) {
             cx.c_lo = iv[k].start;
             cx.c_hi = iv[k].end;
+            // Each iv[k] is a disjoint c-axis (universal column) chunk;
+            // c-axis values are monotone within an iv but jump across
+            // iv boundaries.  Anchor the chain window on this iv's
+            // first run (visitor sets it from cs) and flush at end of
+            // iv -- chains never span iv boundaries anyway (they're
+            // c-axis-disjoint, far past chain_max_gap).
+            cx.window_start = INT64_MIN;
             tui_genome_lift_visit_runs(gl, cx.c_lo, cx.c_hi,
                                        chunk_lift_visit_cb, &cx);
+            if (cx.chain_overlap_frac >= 0 && cx.n_run_buf > 0) {
+                chain_flush_window(&cx, chrom, /*boundary_c=*/0,
+                                   /*force_all=*/1, &n_chain_filtered);
+            }
         }
         t_visit += NOW_S - t_phase;
 
-        // --chainFilter / --chainOverlapFrac post-visit pass: chain the
-        // buffered runs of THIS record, pick survivors (by top-N or by
-        // q-overlap fraction), and replay through pending_push so
-        // --maxGap / --minSize / strand merge still fire on the kept set.
-        if ((cx.chain_overlap_frac >= 0) && cx.n_run_buf > 0) {
-            int64_t n_buf = (int64_t) cx.n_run_buf;
-            TaffyAln *alns = st_malloc((size_t) n_buf * sizeof(TaffyAln));
-            for (int64_t i = 0; i < n_buf; i++) {
-                struct LiftRun *L = &cx.run_buf[i];
-                alns[i].q_name  = chrom;
-                alns[i].q_start = L->c_start;
-                alns[i].q_end   = L->c_end;
-                alns[i].t_name  = L->seq;
-                alns[i].t_start = L->t_start;
-                alns[i].t_end   = L->t_end;
-                alns[i].strand  = L->strand;
-                alns[i].score   = L->c_end - L->c_start;
-                alns[i].user    = (void *) (intptr_t) i;   // buf index
-            }
-            TaffyChainCostParams cost = { cx.chain_open, cx.chain_extend };
-            int64_t *chain_id = st_calloc((size_t) n_buf, sizeof(int64_t));
-            TaffyChainInfo *chains_out = NULL;
-            int64_t n_chains_out = 0;
-            taffy_chain(alns, n_buf,
-                        taffy_chain_default_gap_cost, &cost,
-                        cx.chain_max_gap,
-                        chain_id, &chains_out, &n_chains_out);
-
-            // Pick surviving chain ids via the shared overlap-frac filter
-            // (chain.h).  keep_chain is a flat bool[] keyed on (max id + 1)
-            // for O(1) membership in the replay.  cx.chain_filter > 0 caps
-            // survivor count as a belt-and-braces safety on top of the
-            // overlap test.
-            int64_t max_id = 0;
-            for (int64_t k = 0; k < n_chains_out; k++)
-                if (chains_out[k].id > max_id) max_id = chains_out[k].id;
-            char *keep_chain = st_calloc((size_t)(max_id + 1), sizeof(char));
-            taffy_chain_overlap_frac_select(alns, n_buf, chain_id,
-                                            chains_out, n_chains_out, max_id,
-                                            cx.chain_overlap_frac,
-                                            cx.chain_filter,
-                                            keep_chain);
-
-            // taffy_chain SORTS alns in place by (q_name, strand, q_start),
-            // destroying the input order.  Walk alns post-sort and use
-            // aln.user (the original buf index) to recover the LiftRun.
-            // Set up pending state if not already.
-            if (cx.pending_cap == 0) {
-                cx.pending_cap = BED_MAX_OPEN;
-                cx.pending = st_calloc((size_t)cx.pending_cap, sizeof(PendingBed));
-            }
-            for (int s = 0; s < cx.pending_cap; s++) cx.pending[s].active = 0;
-
-            for (int64_t i = 0; i < n_buf; i++) {
-                if (!keep_chain[chain_id[i]]) { n_chain_filtered++; continue; }
-                int64_t bi = (int64_t)(intptr_t) alns[i].user;
-                struct LiftRun *L = &cx.run_buf[bi];
-                cx.pending = pending_push(cx.fh, cx.pending, &cx.pending_cap,
-                                          &cx.pending_touch,
-                                          L->seq, L->t_start, L->t_end,
-                                          L->out_strand, cx.emit_strand,
-                                          cx.max_gap, cx.min_size,
-                                          cx.name, cx.score, cx.n_out_p);
-            }
-
-            free(keep_chain);
-            free(chain_id);
-            free(chains_out);
-            free(alns);
-
-            // Reset buffer for the next BED record (keep allocation).
-            cx.n_run_buf = 0;
-        }
+        // Chain buffer is fully drained per-iv inside the visit loop.
+        // No post-visit flush needed.
 
         if (cx.bin_size == 0) {
             // BED-row mode: flush this record's open intervals.  Bin mode
@@ -1496,6 +1577,11 @@ int taf_lift_main(int argc, char *argv[]) {
     int64_t chain_open    = TAFFY_CHAIN_DEFAULT_OPEN;
     int64_t chain_extend  = TAFFY_CHAIN_DEFAULT_EXTEND;
     int64_t chain_max_gap = TAFFY_CHAIN_DEFAULT_MAX_GAP;
+    // Sliding-window chain processing.  Defaults: W = 100 Mb window,
+    // K = 10 Mb overlap (= chainMaxGap default).  K must be >= chain
+    // max_gap so cross-window chains have room to re-form.
+    int64_t chain_window         = 100 * 1024 * 1024;
+    int64_t chain_window_overlap =  10 * 1024 * 1024;
 
     while (1) {
         static struct option long_options[] = {
@@ -1514,7 +1600,9 @@ int taf_lift_main(int argc, char *argv[]) {
             { "chainOverlapFrac", required_argument, 0, 1004 },
             { "chainOpen",        required_argument, 0, 1001 },
             { "chainExtend",      required_argument, 0, 1002 },
-            { "chainMaxGap",      required_argument, 0, 1003 },
+            { "chainMaxGap",         required_argument, 0, 1003 },
+            { "chainWindow",         required_argument, 0, 1005 },
+            { "chainWindowOverlap",  required_argument, 0, 1006 },
             { "help",       no_argument,       0, 'h' },
             { 0, 0, 0, 0 }
         };
@@ -1636,6 +1724,28 @@ int taf_lift_main(int argc, char *argv[]) {
                 chain_overlap_frac = v;
                 break;
             }
+            case 1005: {  // --chainWindow
+                errno = 0; char *ep = NULL;
+                long long v = strtoll(optarg, &ep, 10);
+                if (errno == ERANGE || ep == optarg || *ep != 0 ||
+                    v < 0 || v > ((long long)1 << 60)) {
+                    fprintf(stderr, "ERROR: --chainWindow must be in [0, 2^60] (got '%s')\n", optarg);
+                    return 1;
+                }
+                chain_window = (int64_t)v;
+                break;
+            }
+            case 1006: {  // --chainWindowOverlap
+                errno = 0; char *ep = NULL;
+                long long v = strtoll(optarg, &ep, 10);
+                if (errno == ERANGE || ep == optarg || *ep != 0 ||
+                    v < 0 || v > ((long long)1 << 60)) {
+                    fprintf(stderr, "ERROR: --chainWindowOverlap must be in [0, 2^60] (got '%s')\n", optarg);
+                    return 1;
+                }
+                chain_window_overlap = (int64_t)v;
+                break;
+            }
             case 'h': usage(); return 0;
             default:  usage(); return 1;
         }
@@ -1692,6 +1802,23 @@ int taf_lift_main(int argc, char *argv[]) {
         fprintf(stderr, "ERROR: --chainOverlapFrac is BED-mode only\n");
         return 1;
     }
+    // Window must comfortably exceed overlap so each cycle makes progress.
+    // Overlap must be >= max_gap so cross-window chains can re-form.
+    if (chain_active && chain_window > 0 &&
+        chain_window_overlap >= chain_window) {
+        fprintf(stderr, "ERROR: --chainWindowOverlap (%" PRIi64 ") must be < "
+                        "--chainWindow (%" PRIi64 ")\n",
+                        chain_window_overlap, chain_window);
+        return 1;
+    }
+    if (chain_active && chain_window > 0 &&
+        chain_window_overlap < chain_max_gap) {
+        fprintf(stderr, "WARNING: --chainWindowOverlap (%" PRIi64 ") < "
+                        "--chainMaxGap (%" PRIi64 "); cross-window chains may "
+                        "split at boundaries (boundary loss).  Recommend "
+                        "K >= max_gap.\n",
+                        chain_window_overlap, chain_max_gap);
+    }
 
     // The .tui lives at <maf>.tui (same convention as tai_path).
     char *tui_p = tui_path(maf_file);
@@ -1723,7 +1850,8 @@ int taf_lift_main(int argc, char *argv[]) {
         int rc = fast_mode
             ? bed_lift_chunk_impl(tui, gl, bed_file, output_file, max_gap, min_size, bin_size,
                                   chain_filter, chain_overlap_frac,
-                                  chain_open, chain_extend, chain_max_gap)
+                                  chain_open, chain_extend, chain_max_gap,
+                                  chain_window, chain_window_overlap)
             : bed_lift_main_impl (tui, gl, bed_file, output_file, max_gap, min_size);
         tui_genome_lift_destruct(gl);
         tui_destruct(tui);
