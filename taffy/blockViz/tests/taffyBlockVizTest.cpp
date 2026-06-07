@@ -41,6 +41,7 @@ struct Args {
     int64_t chainOpen     = -1;     // -1 = leave at handle default
     int64_t chainExtend   = -1;
     int64_t chainMaxGap   = -1;
+    double  chainOverlapFrac = -2.0;  // -2 = leave at handle default (0.0)
 };
 
 static void usage(const char *prog) {
@@ -56,6 +57,7 @@ static void usage(const char *prog) {
         "  --maxGap N             override per-handle chain max_gap_length\n"
         "  --chainOpen N          override per-handle chain_open\n"
         "  --chainExtend N        override per-handle chain_extend\n"
+        "  --chainOverlapFrac F   override per-handle chain_overlap_frac (-1 = filter off, [0,1] = active)\n"
         "  -h / --help            this help\n", prog);
 }
 
@@ -91,6 +93,10 @@ static int parse_args(int argc, char **argv, Args *a) {
         else if (opt == "--chainExtend") {
             if (i + 1 >= argc) { fprintf(stderr, "--chainExtend needs an integer\n"); return -1; }
             a->chainExtend = (int64_t) atoll(argv[i + 1]); i += 2;
+        }
+        else if (opt == "--chainOverlapFrac") {
+            if (i + 1 >= argc) { fprintf(stderr, "--chainOverlapFrac needs a float\n"); return -1; }
+            a->chainOverlapFrac = atof(argv[i + 1]); i += 2;
         }
         else if (opt == "-h" || opt == "--help") { usage(argv[0]); return 1; }
         else { fprintf(stderr, "unknown option: %s\n", opt.c_str()); return -1; }
@@ -131,6 +137,16 @@ int main(int argc, char **argv) {
             fprintf(stderr, ">> chain params: open=%ld extend=%ld max_gap=%ld\n",
                     (long) co, (long) ce, (long) mg);
         }
+    }
+    if (args.chainOverlapFrac > -1.5) {
+        if (taffySetChainOverlapFrac(h, args.chainOverlapFrac, &errStr) != 0) {
+            die("taffySetChainOverlapFrac", errStr);
+        }
+    }
+    if (args.verbose) {
+        double f = 0;
+        taffyGetChainOverlapFrac(h, &f, nullptr);
+        fprintf(stderr, ">> chain_overlap_frac = %.3f\n", f);
     }
 
     if (args.verbose) {

@@ -68,6 +68,15 @@ struct TaffyHandle {
     int64_t chain_open      = TAFFY_CHAIN_DEFAULT_OPEN;
     int64_t chain_extend    = TAFFY_CHAIN_DEFAULT_EXTEND;
     int64_t max_gap_length  = TAFFY_CHAIN_DEFAULT_MAX_GAP;
+    // Overlap-frac paralogy filter on the chain output (see chain.h):
+    // walk chains in score-desc order, accept iff their q-coverage
+    // overlaps the running union of kept chains by at most this
+    // fraction of the candidate's q-bp.  Default 0.0 (strict: drop on
+    // ANY q-overlap) -- paralogs of the primary chain at the same
+    // queried bp get filtered out cleanly, inversions / disjoint-q
+    // chains stay.  Set to -1.0 to disable (browser then sees all
+    // chains, modulo the max_output_blocks budget).
+    double  chain_overlap_frac = 0.0;
     // Hard cap on mappedBlocks length per query.  Default is the
     // browser-conservative TAFFY_DEFAULT_MAX_OUTPUT_BLOCKS (500);
     // tunable at runtime via taffySetMaxOutputBlocks.
@@ -217,6 +226,27 @@ extern "C" int taffyGetChainParams(int h,
     if (chain_open)     *chain_open     = H->chain_open;
     if (chain_extend)   *chain_extend   = H->chain_extend;
     if (max_gap_length) *max_gap_length = H->max_gap_length;
+    return 0;
+}
+
+extern "C" int taffySetChainOverlapFrac(int h, double frac, char **errStr) {
+    // -1.0 disables the filter; otherwise must be in [0.0, 1.0].
+    if (!(frac == -1.0 || (frac >= 0.0 && frac <= 1.0))) {
+        set_err(errStr, "taffyBlockViz: chain_overlap_frac must be -1 (off) or in [0.0, 1.0]");
+        return -1;
+    }
+    TaffyHandle *H = lookup_handle(h, errStr);
+    if (!H) return -1;
+    std::lock_guard<std::mutex> lock(H->mu);
+    H->chain_overlap_frac = frac;
+    return 0;
+}
+
+extern "C" int taffyGetChainOverlapFrac(int h, double *frac, char **errStr) {
+    TaffyHandle *H = lookup_handle(h, errStr);
+    if (!H) return -1;
+    std::lock_guard<std::mutex> lock(H->mu);
+    if (frac) *frac = H->chain_overlap_frac;
     return 0;
 }
 
@@ -932,16 +962,39 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
     taffy_chain_merge_collinear(cx.alns.data(), n, chain_id.data(),
                                 bv_on_merge, nullptr);
 
-    // Output budget: cap total emitted blocks at H->max_output_blocks so the
-    // browser snake-track renderer stays well under its NUM_LEVELS=1000
-    // cap.  Primary chain is always kept in full (the user queried it);
-    // dupe chains are added in score-desc order until the budget is
-    // exhausted.  Lower-score dupes are silently dropped.
-    //
-    // Counts are by SURVIVING blocks (post-merge), so chains that
-    // collapsed to one merged block count as one.
+    // Two-pass chain survivor selection:
+    //   1. Overlap-frac paralogy filter (chain.h's
+    //      taffy_chain_overlap_frac_select): drops chains whose q-bp
+    //      coverage is already covered by higher-scoring kept chains.
+    //      Default H->chain_overlap_frac = 0 (strict; drops any
+    //      q-overlap).  Inversions / disjoint-q chains stay (any strand).
+    //   2. Block budget: cap total emitted blocks at H->max_output_blocks
+    //      so the browser snake-track renderer stays well under its
+    //      NUM_LEVELS=1000 cap.  Walks survivors in score-desc order
+    //      adding their block counts until budget is exhausted.  Counts
+    //      use SURVIVING blocks (post-merge), so chains that collapsed
+    //      to one merged block count as one.
     std::set<int64_t> kept_chains;
     if (n_chains > 0) {
+        // Pass 1: overlap-frac filter (skipped if disabled = frac < 0).
+        std::vector<char> ovr_keep;
+        if (H->chain_overlap_frac >= 0) {
+            int64_t max_id = 0;
+            for (int64_t k = 0; k < n_chains; k++)
+                if (chains[k].id > max_id) max_id = chains[k].id;
+            ovr_keep.assign((size_t)(max_id + 1), 0);
+            taffy_chain_overlap_frac_select(cx.alns.data(), n,
+                                            chain_id.data(),
+                                            chains, n_chains, max_id,
+                                            H->chain_overlap_frac,
+                                            /*cap=*/0,
+                                            ovr_keep.data());
+        }
+
+        // Pass 2: block budget over the chains that survived pass 1
+        // (or all chains when overlap-frac is disabled).  Primary chain
+        // is always kept since overlap-frac always accepts the first
+        // (highest-score) chain.
         std::map<int64_t, int64_t> blocks_per_chain;
         for (int64_t i = 0; i < n; i++) {
             if (cx.alns[i].user != nullptr) blocks_per_chain[chain_id[i]]++;
@@ -949,10 +1002,10 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
         int64_t primary_blocks = blocks_per_chain[primary_id];
         kept_chains.insert(primary_id);
         int64_t budget = H->max_output_blocks - primary_blocks;
-        // chains[] is already score-desc sorted by taffy_chain.
         for (int64_t k = 0; k < n_chains; k++) {
             int64_t cid = chains[k].id;
             if (cid == primary_id) continue;
+            if (!ovr_keep.empty() && !ovr_keep[cid]) continue;  // pass-1 drop
             int64_t bc = blocks_per_chain[cid];
             if (bc <= budget) {
                 kept_chains.insert(cid);

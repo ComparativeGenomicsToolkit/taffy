@@ -249,6 +249,33 @@ int taffySetMaxOutputBlocks(int taffyHandle, int64_t n, char **errStr);
  * handle. */
 int taffyGetMaxOutputBlocks(int taffyHandle, int64_t *n, char **errStr);
 
+/** Per-handle overlap-fraction threshold for the chain paralogy filter
+ * applied after taffy_chain has assigned chain ids.  Chains are walked
+ * in score-desc order and accepted iff their union-of-aln q-coverage
+ * overlaps the already-kept chains' q-coverage by at most this
+ * fraction of the candidate chain's own q-bp.
+ *
+ * Semantics:
+ *   frac = 0.0   (DEFAULT)   strict: drop on ANY q-overlap with a kept
+ *                            chain.  Primary chain always survives;
+ *                            true paralogs of it at the same queried
+ *                            bp get filtered out; inversions and
+ *                            disjoint-q chains stay regardless of strand.
+ *   frac in (0,1]            relaxed: accept chains overlapping up to
+ *                            this fraction of their own q-bp.
+ *   frac = -1.0              disable the filter entirely (browser sees
+ *                            every chain, modulo the max_output_blocks
+ *                            budget).
+ *
+ * Returns 0 on success, -1 on invalid handle or out-of-range frac
+ * (set errStr).  Thread-safe. */
+int taffySetChainOverlapFrac(int taffyHandle, double frac, char **errStr);
+
+/** Read back the currently-configured overlap-frac threshold.  *frac
+ * receives the value; NULL is accepted as a no-op.  Returns 0 on
+ * success, -1 on invalid handle. */
+int taffyGetChainOverlapFrac(int taffyHandle, double *frac, char **errStr);
+
 /* ------------------------------------------------------------------ */
 /* Free functions for the returned linked lists.                       */
 /* ------------------------------------------------------------------ */

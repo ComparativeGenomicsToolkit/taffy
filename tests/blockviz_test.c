@@ -143,6 +143,55 @@ static void test_chain_params_invalid_handle(CuTest *tc) {
     CuAssertPtrNotNull(tc, err); free(err);
 }
 
+/* --- chain_overlap_frac setter/getter ----------------------------- */
+
+static void test_chain_overlap_frac_default_is_zero(CuTest *tc) {
+    char *err = NULL;
+    int h = taffyOpen(TEST_TUI, &err);
+    if (h < 0) { free(err); return; }
+    double f = -999.0;
+    CuAssertIntEquals(tc, 0, taffyGetChainOverlapFrac(h, &f, &err));
+    CuAssertTrue(tc, f == 0.0);   /* strict paralogy filter by default */
+    taffyClose(h, &err); free(err);
+}
+
+static void test_chain_overlap_frac_roundtrip(CuTest *tc) {
+    char *err = NULL;
+    int h = taffyOpen(TEST_TUI, &err);
+    if (h < 0) { free(err); return; }
+    CuAssertIntEquals(tc, 0, taffySetChainOverlapFrac(h, 0.25, &err));
+    double f = -999.0;
+    taffyGetChainOverlapFrac(h, &f, &err);
+    CuAssertTrue(tc, f == 0.25);
+    CuAssertIntEquals(tc, 0, taffySetChainOverlapFrac(h, -1.0, &err));
+    taffyGetChainOverlapFrac(h, &f, &err);
+    CuAssertTrue(tc, f == -1.0);
+    taffyClose(h, &err); free(err);
+}
+
+static void test_chain_overlap_frac_rejects_out_of_range(CuTest *tc) {
+    char *err = NULL;
+    int h = taffyOpen(TEST_TUI, &err);
+    if (h < 0) { free(err); return; }
+    char *err2 = NULL;
+    CuAssertIntEquals(tc, -1, taffySetChainOverlapFrac(h, 1.5, &err2));
+    CuAssertPtrNotNull(tc, err2); free(err2);
+    err2 = NULL;
+    CuAssertIntEquals(tc, -1, taffySetChainOverlapFrac(h, -0.5, &err2));
+    CuAssertPtrNotNull(tc, err2); free(err2);
+    taffyClose(h, &err); free(err);
+}
+
+static void test_chain_overlap_frac_invalid_handle(CuTest *tc) {
+    char *err = NULL;
+    CuAssertIntEquals(tc, -1, taffySetChainOverlapFrac(99999, 0.0, &err));
+    CuAssertPtrNotNull(tc, err); free(err);
+    err = NULL;
+    double f = 0;
+    CuAssertIntEquals(tc, -1, taffyGetChainOverlapFrac(99999, &f, &err));
+    CuAssertPtrNotNull(tc, err); free(err);
+}
+
 /* ------------------------------------------------------------------ */
 /* Output regimes (see taffyGetBlocksInTargetRange header doc).        */
 /* Per-run + chain-merge for spans < 10 Mb (the test fixture);         */
@@ -368,6 +417,10 @@ CuSuite* blockviz_test_suite(void) {
     SUITE_ADD_TEST(suite, test_chain_params_rejects_negative);
     SUITE_ADD_TEST(suite, test_chain_params_null_outputs_ok);
     SUITE_ADD_TEST(suite, test_chain_params_invalid_handle);
+    SUITE_ADD_TEST(suite, test_chain_overlap_frac_default_is_zero);
+    SUITE_ADD_TEST(suite, test_chain_overlap_frac_roundtrip);
+    SUITE_ADD_TEST(suite, test_chain_overlap_frac_rejects_out_of_range);
+    SUITE_ADD_TEST(suite, test_chain_overlap_frac_invalid_handle);
     SUITE_ADD_TEST(suite, test_get_blocks_narrow_per_run);
     SUITE_ADD_TEST(suite, test_get_blocks_full_chrom_merged);
     SUITE_ADD_TEST(suite, test_get_blocks_respects_output_cap);
