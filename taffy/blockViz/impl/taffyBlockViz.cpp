@@ -581,7 +581,21 @@ struct BlockCtx {
         char        strand;
         int64_t     bin_idx;
         bool operator<(const BinKey &o) const {
-            if (qChrom != o.qChrom) return qChrom < o.qChrom;
+            // qChrom by STRING content, not pointer.  Pointers from the
+            // qchrom_interns table are stable within one query but their
+            // relative order across qChroms is allocation-dependent --
+            // effectively random.  That randomness collides with the
+            // max_output_blocks cap in the bin-emit walk: whichever qChrom
+            // landed last in memory gets truncated past the cap, even if
+            // it's the dominant orthologous chain (e.g. chr1 disappearing
+            // from whole-chr1 queries while chr10/chr11/... survive).
+            // strcmp gives stable alphabetical order, putting the queried
+            // chrom alongside its lexicographic neighbors and making the
+            // emitted output reproducible across runs.
+            if (qChrom != o.qChrom) {
+                int c = strcmp(qChrom, o.qChrom);
+                if (c != 0) return c < 0;
+            }
             if (strand != o.strand) return strand < o.strand;
             return bin_idx < o.bin_idx;
         }
@@ -884,21 +898,46 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
     // we hit the cap, the dropped tail is high-bin-index (rightward in
     // the query).  Acceptable for a coverage viz; documented.
     if (cx.bin_mode) {
+        // Sort entries so the qChrom with the most TOTAL coverage emits
+        // first.  Walking cx.bins in std::map key order (alphabetical
+        // by qChrom name) drops the dominant orthologous chain past the
+        // max_output_blocks cap when its name sorts after other qChroms
+        // alphabetically -- e.g. a whole-hg38.chr2 query alphabetically
+        // queues chr1, chr10..chr19 before chr2, exhausts the 500-cap,
+        // and chr2 (the orthologous mapping) emits ZERO bins.  Sorting
+        // by per-qChrom total coverage descending puts the dominant
+        // chain first regardless of its name.
+        std::map<const char *, int64_t> qchrom_total;
+        for (auto &kv : cx.bins) qchrom_total[kv.first.qChrom] += kv.second;
+
+        std::vector<const BlockCtx::BinKey *> ordered;
+        ordered.reserve(cx.bins.size());
+        for (auto &kv : cx.bins) ordered.push_back(&kv.first);
+        std::sort(ordered.begin(), ordered.end(),
+                  [&](const BlockCtx::BinKey *a, const BlockCtx::BinKey *b) {
+                      int64_t ta = qchrom_total[a->qChrom];
+                      int64_t tb = qchrom_total[b->qChrom];
+                      if (ta != tb) return ta > tb;        // dominant qChrom first
+                      int c = strcmp(a->qChrom, b->qChrom);
+                      if (c != 0) return c < 0;            // stable tie-break
+                      if (a->strand != b->strand) return a->strand < b->strand;
+                      return a->bin_idx < b->bin_idx;
+                  });
+
         struct taffy_block_t *head = nullptr, *tail = nullptr;
         int64_t emitted = 0;
-        for (auto &kv : cx.bins) {
+        for (const BlockCtx::BinKey *kp : ordered) {
             if (emitted >= H->max_output_blocks) break;
-            const BlockCtx::BinKey &k = kv.first;
-            int64_t covered = kv.second;
+            int64_t covered = cx.bins[*kp];
             struct taffy_block_t *b = (struct taffy_block_t *) st_calloc(1, sizeof(*b));
-            b->qChrom = strdup(k.qChrom);
-            b->tStart = cx.tStart_user + k.bin_idx * cx.bin_size;
+            b->qChrom = strdup(kp->qChrom);
+            b->tStart = cx.tStart_user + kp->bin_idx * cx.bin_size;
             // qStart: synthetic monotone surrogate so adjacent bins keep
             // their relative order on the q-axis if the browser wants to
             // sort by qStart.  Not a real qSpecies coord.
-            b->qStart = k.bin_idx * cx.bin_size;
-            b->size   = covered;          // Option A: bin coverage in bp
-            b->strand = k.strand;
+            b->qStart = kp->bin_idx * cx.bin_size;
+            b->size   = covered;
+            b->strand = kp->strand;
             b->next   = nullptr;
             if (!head) head = b;
             if (tail) tail->next = b;
