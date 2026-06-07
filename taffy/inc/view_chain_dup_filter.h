@@ -29,15 +29,23 @@
 
 /* In-place chain dup filter.
  *
- *   blocks:        stList of Alignment* (caller owns).  Each Alignment's
- *                  row list may be mutated; the Alignment pointer itself
- *                  is unchanged.
+ *   blocks:        stList of Alignment* (caller owns).  ALL blocks are
+ *                  used as chain-pass context, but row mutation is only
+ *                  applied to blocks at indices in [apply_lo, apply_hi).
+ *                  This split lets a windowed caller defer mutation of
+ *                  the K-block carryover until later windows give it
+ *                  more forward context.  Pass apply_lo=0,
+ *                  apply_hi=stList_length(blocks) for the simple
+ *                  "filter the whole buffer" case.
  *   overlap_frac:  threshold in [0, 1].  0 = drop on ANY q-overlap with
  *                  higher-scoring kept chains (recommended for paralogy);
  *                  1 = essentially keep-all.
  *   cap:           optional hard cap on survivor count per target genome
  *                  (0 = no cap).
+ *   apply_lo,      half-open mutation range [apply_lo, apply_hi).  Pass
+ *   apply_hi       (0, stList_length(blocks)) to mutate all blocks.
  */
-void view_chain_dup_filter(stList *blocks, double overlap_frac, int64_t cap);
+void view_chain_dup_filter(stList *blocks, double overlap_frac, int64_t cap,
+                           int64_t apply_lo, int64_t apply_hi);
 
 #endif /* TAF_VIEW_CHAIN_DUP_FILTER_H_ */

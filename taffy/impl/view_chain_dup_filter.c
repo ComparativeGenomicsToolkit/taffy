@@ -23,11 +23,15 @@ typedef struct {
     Alignment_Row *row;
 } RowRef;
 
-void view_chain_dup_filter(stList *blocks, double overlap_frac, int64_t cap) {
+void view_chain_dup_filter(stList *blocks, double overlap_frac, int64_t cap,
+                           int64_t apply_lo, int64_t apply_hi) {
     if (overlap_frac < 0) return;            /* disabled */
     if (overlap_frac > 1) overlap_frac = 1;
     int64_t n_blocks = stList_length(blocks);
     if (n_blocks == 0) return;
+    if (apply_lo < 0) apply_lo = 0;
+    if (apply_hi > n_blocks) apply_hi = n_blocks;
+    if (apply_lo >= apply_hi) return;        /* nothing to mutate */
 
     /* 1. Group all non-row-0 rows by genome (first-dot partition).
      *    Separately track WHICH genomes have any block with 2+ rows of
@@ -188,7 +192,7 @@ void view_chain_dup_filter(stList *blocks, double overlap_frac, int64_t cap) {
      *    isn't a survivor.  Non-dup-candidate genomes are untouched.
      *    Mirrors the in-place unlink template in taf_view.c's
      *    filter_out_ancestor_rows. */
-    for (int64_t bi = 0; bi < n_blocks; bi++) {
+    for (int64_t bi = apply_lo; bi < apply_hi; bi++) {
         Alignment *aln = (Alignment*) stList_get(blocks, bi);
         if (aln == NULL || aln->row == NULL || aln->row->n_row == NULL) continue;
         Alignment_Row **link = &aln->row->n_row;

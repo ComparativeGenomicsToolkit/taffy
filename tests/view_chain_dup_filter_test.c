@@ -86,7 +86,7 @@ static void test_view_chain_dup_filter_per_block_paralog(CuTest *tc) {
     stList_append(blocks, blkA);
     stList_append(blocks, blkB);
 
-    view_chain_dup_filter(blocks, /*overlap_frac=*/0.0, /*cap=*/0);
+    view_chain_dup_filter(blocks, /*overlap_frac=*/0.0, /*cap=*/0, /*apply_lo=*/0, /*apply_hi=*/stList_length(blocks));
 
     /* Block A had a per-block dog dup (chr1 + chr2).  With strict overlap
      * filter (frac=0), each dog row in block A is its own chain on q-axis
@@ -132,7 +132,7 @@ static void test_view_chain_dup_filter_singletons_preserved(CuTest *tc) {
     stList_append(blocks, blkA);
     stList_append(blocks, blkB);
 
-    view_chain_dup_filter(blocks, 0.0, 0);
+    view_chain_dup_filter(blocks, 0.0, 0, 0, stList_length(blocks));
 
     /* Both blocks unchanged: cat appears once per block; not a per-block
      * dup; the filter must NOT touch it regardless of chain breakage. */
@@ -165,7 +165,7 @@ static void test_view_chain_dup_filter_row0_pinned(CuTest *tc) {
     stList_append(blocks, blkA);
     stList_append(blocks, blkB);
 
-    view_chain_dup_filter(blocks, 0.0, 0);
+    view_chain_dup_filter(blocks, 0.0, 0, 0, stList_length(blocks));
 
     /* Row-0 (hg.chrA in each block) must survive. */
     CuAssertStrEquals(tc, "hg.chrA", blkA->row->sequence_name);
@@ -196,7 +196,7 @@ static void test_view_chain_dup_filter_overlap_frac_one_keeps_all(CuTest *tc) {
     stList *blocks = stList_construct();
     stList_append(blocks, blkA);
 
-    view_chain_dup_filter(blocks, 1.0, 0);
+    view_chain_dup_filter(blocks, 1.0, 0, 0, stList_length(blocks));
 
     CuAssertIntEquals(tc, 3, (int) count_rows(blkA));
 
@@ -207,7 +207,7 @@ static void test_view_chain_dup_filter_overlap_frac_one_keeps_all(CuTest *tc) {
 /* Empty input: no crash, no work. */
 static void test_view_chain_dup_filter_empty(CuTest *tc) {
     stList *blocks = stList_construct();
-    view_chain_dup_filter(blocks, 0.0, 0);
+    view_chain_dup_filter(blocks, 0.0, 0, 0, stList_length(blocks));
     CuAssertIntEquals(tc, 0, (int) stList_length(blocks));
     stList_destruct(blocks);
 }
@@ -223,7 +223,7 @@ static void test_view_chain_dup_filter_negative_frac_is_off(CuTest *tc) {
     stList *blocks = stList_construct();
     stList_append(blocks, blkA);
 
-    view_chain_dup_filter(blocks, -1.0, 0);
+    view_chain_dup_filter(blocks, -1.0, 0, 0, stList_length(blocks));
 
     /* All 3 rows remain when the filter is off. */
     CuAssertIntEquals(tc, 3, (int) count_rows(blkA));

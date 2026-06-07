@@ -37,6 +37,8 @@ static void usage(void) {
     fprintf(stderr, "   --noAncestors : Drop rows whose genome label is an internal-node label in the input header's `# hal` tree.  Only valid with -U query (where row-0 is a leaf so dropping ancestors is safe); produces a leaf-only output comparable to cactus-hal2maf's default.  Requires a `# hal` tree in the input header.\n");
     fprintf(stderr, "   --chainOverlapFrac [FLOAT] : Per-target-genome paralogy filter via taffy_chain.  Buffers all emitted blocks for the queried region, partitions each non-row-0 target genome's rows into chains (q axis = block index, t axis = target row coords), and accepts chains in score order only if their q-coverage overlaps the already-kept chains' q-coverage by at most this fraction of the candidate's q-bp.  F=0 = strict (drop on any overlap, recommended); F=1 = essentially keep-all.  Requires -r (the buffer is O(n_blocks_in_region)).  Runs AFTER --noAncestors and AFTER -U query reorient; row-0 is always preserved.\n");
     fprintf(stderr, "   --chainOverlapCap [INT] : (with --chainOverlapFrac) Hard cap on survivor count per target genome.  0 = unbounded (recommended).\n");
+    fprintf(stderr, "   --chainWindow [INT] : (with --chainOverlapFrac) Sliding-window chain processing.  Buffer up to W emitted blocks, run the filter, emit survivors past (W - chainWindowOverlap), then slide.  Bounds memory at O(W blocks).  Default 10000 blocks.  0 = disable (buffer everything for the queried region -- OOM risk on whole-chromosome queries).\n");
+    fprintf(stderr, "   --chainWindowOverlap [INT] : (with --chainOverlapFrac) Carryover K (blocks) at each window boundary.  Tail K blocks stay un-mutated and get re-chained in the next window so cross-boundary chains form correctly.  Must be < --chainWindow.  Default 1000.\n");
     fprintf(stderr, "-s --repeatCoordinatesEveryNColumns : Repeat TAF coordinates of each sequence at least every n columns. By default: %" PRIi64 "\n", repeat_coordinates_every_n_columns);
     fprintf(stderr, "-u --runLengthEncodeBases : Run length encode output bases in TAF\n");
     fprintf(stderr, "-a --showOnlyReferenceDifferences : Replace matches with the reference (first row) with a * character\n");
@@ -149,6 +151,55 @@ static void filter_out_ancestor_rows(Alignment *aln, stSet *internal_labels) {
     }
 }
 
+/* Output state shared between the streaming-emit path and the
+ * windowed-chain-filter flush.  All output flags + the linked-block
+ * carry pointer p_alignment live here so a single helper can emit a
+ * range of buffered blocks consistently. */
+typedef struct {
+    LW *output;
+    bool taf_output, maf_output, paf_output;
+    bool run_length_encode_output_bases;
+    int64_t repeat_coordinates_every_n_columns;
+    bool color_bases;
+    bool omit_coordinates;
+    bool all_to_all_paf;
+    bool paf_cs;
+    Alignment *p_alignment;   // last emitted block; needed for TAF link_adjacent
+} ViewEmitState;
+
+/* Emit buf[0..n_emit) using the streaming format-specific writers,
+ * then remove those entries from buf.  p_alignment carry survives
+ * across calls so cross-window TAF link_adjacent stays correct.  The
+ * blocks themselves are freed after their downstream successor has
+ * been written (rolling p_alignment hold). */
+static void view_emit_chain_buf_prefix(stList *buf, int64_t n_emit,
+                                       ViewEmitState *st) {
+    for (int64_t i = 0; i < n_emit; i++) {
+        Alignment *aln = (Alignment*) stList_get(buf, i);
+        modify_alignment(aln);
+        if (st->taf_output) {
+            if (st->p_alignment != NULL)
+                alignment_link_adjacent(st->p_alignment, aln, 1);
+            taf_write_block2(st->p_alignment, aln,
+                             st->run_length_encode_output_bases,
+                             st->repeat_coordinates_every_n_columns,
+                             st->output, st->color_bases, st->omit_coordinates);
+        } else if (st->maf_output) {
+            maf_write_block2(aln, st->output, st->color_bases);
+        } else {
+            assert(st->paf_output);
+            paf_write_block(aln, st->output, st->all_to_all_paf, st->paf_cs);
+        }
+        if (st->p_alignment != NULL) alignment_destruct(st->p_alignment, 1);
+        st->p_alignment = aln;
+    }
+    /* Shift the buffer: drop the first n_emit entries in one O(m+n)
+     * memmove.  stList stores pointers; the Alignment* themselves are
+     * either already freed by the rolling p_alignment hold above or
+     * are still alive as the new p_alignment. */
+    if (n_emit > 0) stList_removeInterval(buf, 0, n_emit);
+}
+
 int taf_view_main(int argc, char *argv[]) {
     time_t startTime = time(NULL);
 
@@ -182,12 +233,26 @@ int taf_view_main(int argc, char *argv[]) {
     // Optional cap caps survivor count per target genome (0 = unbounded).
     double  chain_overlap_frac = -1.0;
     int64_t chain_overlap_cap  = 0;
+    // Sliding-window chain processing.  Windowing is on block count
+    // (view's chain q-axis = block_idx).  W blocks held in buffer at
+    // a time, K-block tail carried forward as cross-window context.
+    // Defaults: W = 10000 blocks (~bp-scale depends on alignment
+    // density), K = 1000 blocks.  0 = disable windowing (legacy
+    // "buffer everything" -- OOM risk on genome-wide queries).
+    int64_t chain_window         = 10000;
+    int64_t chain_window_overlap =  1000;
 
     ///////////////////////////////////////////////////////////////////////////
     // Parse the inputs
     ///////////////////////////////////////////////////////////////////////////
 
-    enum { OPT_NO_ANCESTORS = 256, OPT_CHAIN_OVERLAP_FRAC = 257, OPT_CHAIN_OVERLAP_CAP = 258 };
+    enum {
+        OPT_NO_ANCESTORS = 256,
+        OPT_CHAIN_OVERLAP_FRAC = 257,
+        OPT_CHAIN_OVERLAP_CAP  = 258,
+        OPT_CHAIN_WINDOW       = 259,
+        OPT_CHAIN_WINDOW_OVERLAP = 260,
+    };
     while (1) {
         static struct option long_options[] = { { "logLevel", required_argument, 0, 'l' },
                                                 { "inputFile", required_argument, 0, 'i' },
@@ -208,8 +273,10 @@ int taf_view_main(int argc, char *argv[]) {
                                                 { "useCompression", no_argument, 0, 'c' },
                                                 { "nameMapFile", required_argument, 0, 'n' },
                                                 { "noAncestors", no_argument, 0, OPT_NO_ANCESTORS },
-                                                { "chainOverlapFrac", required_argument, 0, OPT_CHAIN_OVERLAP_FRAC },
-                                                { "chainOverlapCap",  required_argument, 0, OPT_CHAIN_OVERLAP_CAP },
+                                                { "chainOverlapFrac",    required_argument, 0, OPT_CHAIN_OVERLAP_FRAC },
+                                                { "chainOverlapCap",     required_argument, 0, OPT_CHAIN_OVERLAP_CAP },
+                                                { "chainWindow",         required_argument, 0, OPT_CHAIN_WINDOW },
+                                                { "chainWindowOverlap",  required_argument, 0, OPT_CHAIN_WINDOW_OVERLAP },
                                                 { "threads", required_argument, 0, 'T' },
                                                 { "help", no_argument, 0, 'h' },
                                                 { 0, 0, 0, 0 } };
@@ -309,6 +376,26 @@ int taf_view_main(int argc, char *argv[]) {
                 chain_overlap_cap = (int64_t)v;
                 break;
             }
+            case OPT_CHAIN_WINDOW: {
+                errno = 0; char *ep = NULL;
+                long long v = strtoll(optarg, &ep, 10);
+                if (errno == ERANGE || ep == optarg || *ep != 0 || v < 0) {
+                    fprintf(stderr, "ERROR: --chainWindow must be >= 0 (got '%s')\n", optarg);
+                    return 1;
+                }
+                chain_window = (int64_t)v;
+                break;
+            }
+            case OPT_CHAIN_WINDOW_OVERLAP: {
+                errno = 0; char *ep = NULL;
+                long long v = strtoll(optarg, &ep, 10);
+                if (errno == ERANGE || ep == optarg || *ep != 0 || v < 0) {
+                    fprintf(stderr, "ERROR: --chainWindowOverlap must be >= 0 (got '%s')\n", optarg);
+                    return 1;
+                }
+                chain_window_overlap = (int64_t)v;
+                break;
+            }
             case 'T':
                 bgzf_threads = atoi(optarg);
                 break;
@@ -356,6 +443,13 @@ int taf_view_main(int argc, char *argv[]) {
     }
     if (chain_overlap_cap > 0 && chain_overlap_frac < 0) {
         fprintf(stderr, "ERROR: --chainOverlapCap requires --chainOverlapFrac\n");
+        return 1;
+    }
+    if (chain_overlap_frac >= 0 && chain_window > 0 &&
+        chain_window_overlap >= chain_window) {
+        fprintf(stderr, "ERROR: --chainWindowOverlap (%" PRIi64 ") must be < "
+                        "--chainWindow (%" PRIi64 ")\n",
+                        chain_window_overlap, chain_window);
         return 1;
     }
 
@@ -495,6 +589,22 @@ int taf_view_main(int argc, char *argv[]) {
     // them via alignment_destruct.  Filter is rejected pre-loop when
     // -r isn't set (the buffer is bounded by the region's block count).
     stList *chain_dup_buf = (chain_overlap_frac >= 0) ? stList_construct() : NULL;
+    // Single emit state used by both the in-loop windowed flush and the
+    // post-loop drain.  p_alignment carries across calls so cross-window
+    // TAF link_adjacent stays correct.
+    ViewEmitState emit_st = {
+        .output = output,
+        .taf_output = taf_output,
+        .maf_output = maf_output,
+        .paf_output = paf_output,
+        .run_length_encode_output_bases = run_length_encode_output_bases,
+        .repeat_coordinates_every_n_columns = repeat_coordinates_every_n_columns,
+        .color_bases = color_bases,
+        .omit_coordinates = omit_coordinates,
+        .all_to_all_paf = all_to_all_paf,
+        .paf_cs = paf_cs,
+        .p_alignment = NULL,
+    };
 
     // three cases below:
     // 1) generic maf/taf index lookup if (region)
@@ -623,6 +733,19 @@ int taf_view_main(int argc, char *argv[]) {
             // after the loop exits, then a second walk emits survivors.
             if (chain_dup_buf != NULL) {
                 stList_append(chain_dup_buf, alignment);
+                // Windowed flush: once buf grows to W blocks, run the
+                // filter over all W (full context) but mutate + emit
+                // only the first (W - K) blocks.  The trailing K blocks
+                // stay in the buf un-mutated and become the carryover
+                // context for the next window.
+                if (chain_window > 0 &&
+                    stList_length(chain_dup_buf) >= chain_window) {
+                    int64_t n_emit = chain_window - chain_window_overlap;
+                    view_chain_dup_filter(chain_dup_buf, chain_overlap_frac,
+                                          chain_overlap_cap,
+                                          /*apply_lo=*/0, /*apply_hi=*/n_emit);
+                    view_emit_chain_buf_prefix(chain_dup_buf, n_emit, &emit_st);
+                }
                 continue;
             }
             modify_alignment(alignment);
@@ -693,6 +816,14 @@ int taf_view_main(int argc, char *argv[]) {
                     apply_genome_name_mapping_to_alignment(genome_name_map, alignment);
                 }
                 stList_append(chain_dup_buf, alignment);
+                if (chain_window > 0 &&
+                    stList_length(chain_dup_buf) >= chain_window) {
+                    int64_t n_emit = chain_window - chain_window_overlap;
+                    view_chain_dup_filter(chain_dup_buf, chain_overlap_frac,
+                                          chain_overlap_cap,
+                                          /*apply_lo=*/0, /*apply_hi=*/n_emit);
+                    view_emit_chain_buf_prefix(chain_dup_buf, n_emit, &emit_st);
+                }
                 continue;
             }
             modify_alignment(alignment); // Make any changes to the alignment for output
@@ -784,35 +915,19 @@ int taf_view_main(int argc, char *argv[]) {
         }
     }
 
-    // --chainOverlapFrac: chain pass over the buffered region, then a
-    // second walk to apply modify_alignment + write + destruct in scan
-    // order.  prev_alignment carry is required for TAF link_adjacent.
+    // --chainOverlapFrac: chain pass over the (remaining) buffered region.
+    // With windowing on, earlier windows have already filter-and-emitted
+    // up to (W - K) blocks at a time; here we drain whatever's left.
     if (chain_dup_buf != NULL) {
         int64_t n_buf = stList_length(chain_dup_buf);
         if (n_buf > 0) {
-            view_chain_dup_filter(chain_dup_buf, chain_overlap_frac, chain_overlap_cap);
-            Alignment *p_alignment = NULL;
-            for (int64_t i = 0; i < n_buf; i++) {
-                Alignment *aln = (Alignment*) stList_get(chain_dup_buf, i);
-                modify_alignment(aln);
-                if (taf_output) {
-                    if (p_alignment != NULL) {
-                        alignment_link_adjacent(p_alignment, aln, 1);
-                    }
-                    taf_write_block2(p_alignment, aln, run_length_encode_output_bases,
-                                     repeat_coordinates_every_n_columns, output,
-                                     color_bases, omit_coordinates);
-                } else if (maf_output) {
-                    maf_write_block2(aln, output, color_bases);
-                } else {
-                    assert(paf_output == true);
-                    paf_write_block(aln, output, all_to_all_paf, paf_cs);
-                }
-                if (p_alignment != NULL) alignment_destruct(p_alignment, 1);
-                p_alignment = aln;
-            }
-            if (p_alignment != NULL) alignment_destruct(p_alignment, 1);
+            view_chain_dup_filter(chain_dup_buf, chain_overlap_frac,
+                                  chain_overlap_cap,
+                                  /*apply_lo=*/0, /*apply_hi=*/n_buf);
+            view_emit_chain_buf_prefix(chain_dup_buf, n_buf, &emit_st);
         }
+        if (emit_st.p_alignment != NULL)
+            alignment_destruct(emit_st.p_alignment, 1);
         stList_destruct(chain_dup_buf);
     }
 
