@@ -619,12 +619,33 @@ struct BlockCtx {
     // and the block draws at the right q-axis position even when
     // multiple runs contribute (the orthologous chain dominates, and
     // its q range is contiguous so its qmin is a good anchor).
+    // Per-bin, per-strand: track the LARGEST single run's contribution
+    // as the bin's anchor.  Total coverage drives strand dominance and
+    // emit order; anchor (qStart + size) drives the emitted block's
+    // geometry.
+    //
+    // Why "largest single run", not "qmin + total":
+    // chained_g1000 sidecars produce many tiny chained runs in
+    // SD-rich / pericentromeric regions, each at scattered qSpecies
+    // positions.  The pre-fix per-bin "qmin of all runs + total
+    // coverage clamped to bin_size" recipe synthesized blocks at a
+    // qSpecies coordinate (the lowest-q paralog) with a size summed
+    // from runs scattered all across qChrom -- a phantom alignment
+    // (e.g. hg38 chr9:62.3 Mb -> hs1 chr9:101 kb, 277 kb '-' that has
+    // no chain-layer support at fine zoom).
+    //
+    // Picking the largest-single-run anchor emits an honest
+    // representation of the dominant single alignment in the bin: a
+    // real (qChrom, qStart, size, strand) tuple that came from one
+    // tui run, not a synthetic union.  Smaller paralogs land in the
+    // total coverage (so strand dominance / qChrom sort still see
+    // them) but don't distort the emitted block's geometry.
     struct BinCov {
-        int64_t plus  = 0, minus  = 0;       // covered bp per strand
-        int64_t plus_qmin  = 0, minus_qmin  = 0;  // forward qSpecies coord
-        // Whether the *_qmin fields are initialized -- value-init from
-        // std::map operator[] zeros them but qSpecies coord 0 is valid,
-        // so we can't use "0" as a not-set sentinel.
+        int64_t plus = 0,  minus = 0;          // total covered bp per strand
+        int64_t plus_anchor_qStart  = 0;       // largest single + run's q anchor
+        int64_t plus_anchor_size    = 0;       // its bp covered in this bin
+        int64_t minus_anchor_qStart = 0;
+        int64_t minus_anchor_size   = 0;
         bool    plus_set  = false, minus_set  = false;
     };
     std::map<BinKey, BinCov> bins;
@@ -704,13 +725,19 @@ static void migrate_alns_to_bins(BlockCtx *cx) {
             BlockCtx::BinKey k{ a.t_name, bi };
             BlockCtx::BinCov &c = cx->bins[k];
             if (fwd) {
-                if (!c.plus_set || q_low < c.plus_qmin) c.plus_qmin = q_low;
-                c.plus_set = true;
-                c.plus    += covered;
+                c.plus += covered;
+                if (!c.plus_set || covered > c.plus_anchor_size) {
+                    c.plus_anchor_qStart = q_low;
+                    c.plus_anchor_size   = covered;
+                    c.plus_set           = true;
+                }
             } else {
-                if (!c.minus_set || q_low < c.minus_qmin) c.minus_qmin = q_low;
-                c.minus_set = true;
-                c.minus   += covered;
+                c.minus += covered;
+                if (!c.minus_set || covered > c.minus_anchor_size) {
+                    c.minus_anchor_qStart = q_low;
+                    c.minus_anchor_size   = covered;
+                    c.minus_set           = true;
+                }
             }
         }
     }
@@ -784,23 +811,25 @@ static void block_visit_cb(const TuiRun *r, void *user) {
             int64_t hi = tEnd_run  < bin_hi ? tEnd_run  : bin_hi;
             int64_t covered = hi - lo;
             if (covered <= 0) continue;
-            // Forward-strand qSpecies coord at the LOWEST tSpecies pos
-            // (lo) of the bin's clip of this run:
-            //   actual_fwd: q ascends with t -> q_low = qStart + (lo - tStart)
-            //   else      : q descends with t -> q_low = qStart + (size - (hi - tStart))
             int64_t q_low = actual_fwd
                 ? qStart + (lo - tStart)
                 : qStart + (tStart + size - hi);
             BlockCtx::BinKey k{ qc_interned, bi };
             BlockCtx::BinCov &c = cx->bins[k];
             if (actual_fwd) {
-                if (!c.plus_set || q_low < c.plus_qmin) c.plus_qmin = q_low;
-                c.plus_set = true;
-                c.plus    += covered;
+                c.plus += covered;
+                if (!c.plus_set || covered > c.plus_anchor_size) {
+                    c.plus_anchor_qStart = q_low;
+                    c.plus_anchor_size   = covered;
+                    c.plus_set           = true;
+                }
             } else {
-                if (!c.minus_set || q_low < c.minus_qmin) c.minus_qmin = q_low;
-                c.minus_set = true;
-                c.minus   += covered;
+                c.minus += covered;
+                if (!c.minus_set || covered > c.minus_anchor_size) {
+                    c.minus_anchor_qStart = q_low;
+                    c.minus_anchor_size   = covered;
+                    c.minus_set           = true;
+                }
             }
         }
         return;
@@ -829,13 +858,19 @@ static void block_visit_cb(const TuiRun *r, void *user) {
             BlockCtx::BinKey k{ qc_interned, bi };
             BlockCtx::BinCov &c = cx->bins[k];
             if (actual_fwd) {
-                if (!c.plus_set || q_low < c.plus_qmin) c.plus_qmin = q_low;
-                c.plus_set = true;
-                c.plus    += covered;
+                c.plus += covered;
+                if (!c.plus_set || covered > c.plus_anchor_size) {
+                    c.plus_anchor_qStart = q_low;
+                    c.plus_anchor_size   = covered;
+                    c.plus_set           = true;
+                }
             } else {
-                if (!c.minus_set || q_low < c.minus_qmin) c.minus_qmin = q_low;
-                c.minus_set = true;
-                c.minus   += covered;
+                c.minus += covered;
+                if (!c.minus_set || covered > c.minus_anchor_size) {
+                    c.minus_anchor_qStart = q_low;
+                    c.minus_anchor_size   = covered;
+                    c.minus_set           = true;
+                }
             }
         }
         return;
@@ -1032,20 +1067,21 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
             // honest answer at chromosome zoom -- the bin slot is
             // bin_size wide; nothing larger can fit.  Strand still
             // surfaces local inversions (where '-' dominates).
-            int  dom_plus     = (c.plus >= c.minus);
-            int64_t cov_strand = dom_plus ? c.plus : c.minus;
-            int64_t covered    = (cov_strand > cx.bin_size) ? cx.bin_size : cov_strand;
+            int  dom_plus      = (c.plus >= c.minus);
+            int64_t anchor_q   = dom_plus ? c.plus_anchor_qStart : c.minus_anchor_qStart;
+            int64_t anchor_sz  = dom_plus ? c.plus_anchor_size   : c.minus_anchor_size;
+            // Block geometry = the dominant strand's LARGEST single run's
+            // contribution to this bin.  Honest about (qStart, size)
+            // because both come from one real tui run -- not a phantom
+            // synthesized from many disjoint paralog contributions.
+            // Smaller paralog runs in the same bin still count toward
+            // the strand-dominance and per-qChrom-total sort but don't
+            // distort the emitted parallelogram.
             struct taffy_block_t *b = (struct taffy_block_t *) st_calloc(1, sizeof(*b));
             b->qChrom = strdup(kp->qChrom);
             b->tStart = cx.tStart_user + kp->bin_idx * cx.bin_size;
-            // qStart: REAL forward-strand qSpecies coord of the dominant
-            // strand's lowest-q contribution to this bin.  Was a synthetic
-            // bin_idx * bin_size pre-fix, which coincidentally matched
-            // when qSpecies ≈ tSpecies (hs1 vs hg38) but drew every block
-            // at the wrong y for diverged species (orang at ~30 Mb offset
-            // -> zig-zag in the snake track).
-            b->qStart = dom_plus ? c.plus_qmin : c.minus_qmin;
-            b->size   = covered;
+            b->qStart = anchor_q;
+            b->size   = anchor_sz;
             b->strand = dom_plus ? '+' : '-';
             b->next   = nullptr;
             if (!head) head = b;
