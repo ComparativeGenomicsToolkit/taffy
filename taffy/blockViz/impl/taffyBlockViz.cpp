@@ -605,10 +605,28 @@ struct BlockCtx {
             return bin_idx < o.bin_idx;
         }
     };
-    // Per-bin coverage split by strand so the emit step can pick the
-    // dominant one.  Caller-side it's just "+= covered" into the
-    // appropriate field.
-    struct BinCov { int64_t plus; int64_t minus; };
+    // Per-bin coverage + qSpecies anchor (block.qStart) split by strand
+    // so the emit step picks the dominant one.  The pre-fix bin emit
+    // synthesized qStart = bin_idx * bin_size, which only matched the
+    // real qSpecies coord when qSpecies ≈ tSpecies (e.g. hs1 vs hg38).
+    // For diverged qSpecies the synthetic qStart was off by tens of
+    // millions of bp, drawing every block at the wrong y-position and
+    // turning a clean diagonal into a zig-zag in the snake track.
+    //
+    // We track plus_qmin / minus_qmin = the LOWEST forward-strand
+    // qSpecies coord of any run contributing to that strand's bin
+    // bucket.  At emit, the dominant strand's qmin becomes block.qStart,
+    // and the block draws at the right q-axis position even when
+    // multiple runs contribute (the orthologous chain dominates, and
+    // its q range is contiguous so its qmin is a good anchor).
+    struct BinCov {
+        int64_t plus  = 0, minus  = 0;       // covered bp per strand
+        int64_t plus_qmin  = 0, minus_qmin  = 0;  // forward qSpecies coord
+        // Whether the *_qmin fields are initialized -- value-init from
+        // std::map operator[] zeros them but qSpecies coord 0 is valid,
+        // so we can't use "0" as a not-set sentinel.
+        bool    plus_set  = false, minus_set  = false;
+    };
     std::map<BinKey, BinCov> bins;
 };
 
@@ -661,8 +679,16 @@ static void migrate_alns_to_bins(BlockCtx *cx) {
     for (size_t i = 0; i < cx->alns.size(); i++) {
         const TaffyAln &a = cx->alns[i];
         int fwd = (a.strand > 0);
+        // TaffyAln carries (q_start = tSpecies, t_start = qSpecies fwd
+        // coord, strand = relative-fwd as +1/-1).  These were filled by
+        // the per-run path with the iv_rev XOR already applied.  For
+        // the bin q_low computation:
+        //   '+': q ascends with t -> q_low = a.t_start + (lo - a.q_start)
+        //   '-': q descends with t -> q_low = a.t_start + (a.q_end - hi)
         int64_t tStart_a = a.q_start;
         int64_t tEnd_a   = a.q_end;
+        int64_t qStart_a = a.t_start;
+        int64_t qEnd_a   = a.t_end;
         int64_t bin_first = (tStart_a    - cx->tStart_user) / cx->bin_size;
         int64_t bin_last  = (tEnd_a - 1 - cx->tStart_user) / cx->bin_size;
         for (int64_t bi = bin_first; bi <= bin_last; bi++) {
@@ -672,10 +698,20 @@ static void migrate_alns_to_bins(BlockCtx *cx) {
             int64_t hi = tEnd_a   < bin_hi ? tEnd_a   : bin_hi;
             int64_t covered = hi - lo;
             if (covered <= 0) continue;
+            int64_t q_low = fwd
+                ? qStart_a + (lo - tStart_a)
+                : qStart_a + (qEnd_a - qStart_a - (hi - tStart_a));
             BlockCtx::BinKey k{ a.t_name, bi };
             BlockCtx::BinCov &c = cx->bins[k];
-            if (fwd) c.plus  += covered;
-            else     c.minus += covered;
+            if (fwd) {
+                if (!c.plus_set || q_low < c.plus_qmin) c.plus_qmin = q_low;
+                c.plus_set = true;
+                c.plus    += covered;
+            } else {
+                if (!c.minus_set || q_low < c.minus_qmin) c.minus_qmin = q_low;
+                c.minus_set = true;
+                c.minus   += covered;
+            }
         }
     }
     // Free the per-run taffy_block_t's; we're emitting from cx->bins now.
@@ -726,6 +762,15 @@ static void block_visit_cb(const TuiRun *r, void *user) {
     int actual_fwd = cx->iv_rev ? !r->strand : r->strand;
     char strand_char = actual_fwd ? '+' : '-';
 
+    // qStart for the run as a whole = forward-strand qSpecies coord
+    // at the run's LOW tSpecies position (= visitor's `tStart`).  Used
+    // by both the bin-emit qmin tracking and the per-run aln record.
+    // The formula uses r->strand (column-to-q direction), not actual_fwd
+    // (which already factored iv_rev for the BLOCK strand label).
+    int64_t qStart = r->strand
+        ? r->t_start + (cs - r->g_start)
+        : r->t_start + r->length - (ce - r->g_start);
+
     if (cx->bin_mode) {
         auto ins = cx->qchrom_interns.emplace(r->seq);
         const char *qc_interned = ins.first->c_str();
@@ -739,10 +784,24 @@ static void block_visit_cb(const TuiRun *r, void *user) {
             int64_t hi = tEnd_run  < bin_hi ? tEnd_run  : bin_hi;
             int64_t covered = hi - lo;
             if (covered <= 0) continue;
+            // Forward-strand qSpecies coord at the LOWEST tSpecies pos
+            // (lo) of the bin's clip of this run:
+            //   actual_fwd: q ascends with t -> q_low = qStart + (lo - tStart)
+            //   else      : q descends with t -> q_low = qStart + (size - (hi - tStart))
+            int64_t q_low = actual_fwd
+                ? qStart + (lo - tStart)
+                : qStart + (tStart + size - hi);
             BlockCtx::BinKey k{ qc_interned, bi };
             BlockCtx::BinCov &c = cx->bins[k];
-            if (actual_fwd) c.plus  += covered;
-            else            c.minus += covered;
+            if (actual_fwd) {
+                if (!c.plus_set || q_low < c.plus_qmin) c.plus_qmin = q_low;
+                c.plus_set = true;
+                c.plus    += covered;
+            } else {
+                if (!c.minus_set || q_low < c.minus_qmin) c.minus_qmin = q_low;
+                c.minus_set = true;
+                c.minus   += covered;
+            }
         }
         return;
     }
@@ -764,23 +823,23 @@ static void block_visit_cb(const TuiRun *r, void *user) {
             int64_t hi = tEnd_run  < bin_hi ? tEnd_run  : bin_hi;
             int64_t covered = hi - lo;
             if (covered <= 0) continue;
+            int64_t q_low = actual_fwd
+                ? qStart + (lo - tStart)
+                : qStart + (tStart + size - hi);
             BlockCtx::BinKey k{ qc_interned, bi };
             BlockCtx::BinCov &c = cx->bins[k];
-            if (actual_fwd) c.plus  += covered;
-            else            c.minus += covered;
+            if (actual_fwd) {
+                if (!c.plus_set || q_low < c.plus_qmin) c.plus_qmin = q_low;
+                c.plus_set = true;
+                c.plus    += covered;
+            } else {
+                if (!c.minus_set || q_low < c.minus_qmin) c.minus_qmin = q_low;
+                c.minus_set = true;
+                c.minus   += covered;
+            }
         }
         return;
     }
-
-    // qStart is qSpecies's forward-strand position at the LOW column
-    // (cs) of the run.  The run's own strand bit determines this
-    // mapping; iv_rev does NOT enter here (it only affects how cs maps
-    // to tSpecies coords).  This matches the HAL/snake-track convention
-    // where qStart is always the forward-strand qSpecies coord and the
-    // strand char carries the orientation.
-    int64_t qStart = r->strand
-        ? r->t_start + (cs - r->g_start)
-        : r->t_start + r->length - (ce - r->g_start);
 
     struct taffy_block_t *b = (struct taffy_block_t *) st_calloc(1, sizeof(*b));
     b->qChrom = strdup(r->seq);
@@ -933,7 +992,13 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
         // alphabetical name (the chr2/chr10..chr19 fix from e4c3cf0).
         std::map<const char *, int64_t> qchrom_total;
         for (auto &kv : cx.bins) {
-            qchrom_total[kv.first.qChrom] += kv.second.plus + kv.second.minus;
+            // Per-qChrom total for the emit-order sort.  Use the dominant
+            // strand's bp (max, not sum) since the same bp can land on
+            // both strands via Cactus ancestor-flip noise and double-
+            // counting inflates 1.5-2x for SD-heavy qChroms.
+            int64_t dom = (kv.second.plus >= kv.second.minus)
+                            ? kv.second.plus : kv.second.minus;
+            qchrom_total[kv.first.qChrom] += dom;
         }
 
         std::vector<const BlockCtx::BinKey *> ordered;
@@ -967,18 +1032,21 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
             // honest answer at chromosome zoom -- the bin slot is
             // bin_size wide; nothing larger can fit.  Strand still
             // surfaces local inversions (where '-' dominates).
-            int64_t cov_strand = (c.plus >= c.minus) ? c.plus : c.minus;
+            int  dom_plus     = (c.plus >= c.minus);
+            int64_t cov_strand = dom_plus ? c.plus : c.minus;
             int64_t covered    = (cov_strand > cx.bin_size) ? cx.bin_size : cov_strand;
             struct taffy_block_t *b = (struct taffy_block_t *) st_calloc(1, sizeof(*b));
             b->qChrom = strdup(kp->qChrom);
             b->tStart = cx.tStart_user + kp->bin_idx * cx.bin_size;
-            // qStart: synthetic monotone surrogate; not a real qSpecies coord.
-            b->qStart = kp->bin_idx * cx.bin_size;
+            // qStart: REAL forward-strand qSpecies coord of the dominant
+            // strand's lowest-q contribution to this bin.  Was a synthetic
+            // bin_idx * bin_size pre-fix, which coincidentally matched
+            // when qSpecies ≈ tSpecies (hs1 vs hg38) but drew every block
+            // at the wrong y for diverged species (orang at ~30 Mb offset
+            // -> zig-zag in the snake track).
+            b->qStart = dom_plus ? c.plus_qmin : c.minus_qmin;
             b->size   = covered;
-            // Dominant strand wins; pure-'+'/'-' bins emit unambiguously,
-            // and mixed bins where '+' >= '-' show '+' (the common case
-            // for orthologous mapping with Cactus ancestor-flip noise).
-            b->strand = (c.plus >= c.minus) ? '+' : '-';
+            b->strand = dom_plus ? '+' : '-';
             b->next   = nullptr;
             if (!head) head = b;
             if (tail) tail->next = b;
