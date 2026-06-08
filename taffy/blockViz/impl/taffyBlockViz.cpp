@@ -954,7 +954,21 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
         for (const BlockCtx::BinKey *kp : ordered) {
             if (emitted >= H->max_output_blocks) break;
             const BlockCtx::BinCov &c = cx.bins[*kp];
-            int64_t covered = c.plus + c.minus;
+            // Coverage MUST be clamped to bin_size: paralog runs on the
+            // same strand accumulate into the same per-bin counter, so
+            // an SD-rich bin can sum to many * bin_size on '+' alone
+            // (orthologous chain ~bin_size + each forward paralog).
+            // Without the clamp, b->size = those raw sums and adjacent
+            // bin's blocks overlap each other (whole-chr1 went from
+            // 110/500 to 466/500 overlapping post-strand-fix because
+            // the previously-mislabeled-as-'-' paralogs now correctly
+            // pile onto '+' and inflate the per-strand sum).  Clamping
+            // sacrifices the "how heavily covered" detail but is the
+            // honest answer at chromosome zoom -- the bin slot is
+            // bin_size wide; nothing larger can fit.  Strand still
+            // surfaces local inversions (where '-' dominates).
+            int64_t cov_strand = (c.plus >= c.minus) ? c.plus : c.minus;
+            int64_t covered    = (cov_strand > cx.bin_size) ? cx.bin_size : cov_strand;
             struct taffy_block_t *b = (struct taffy_block_t *) st_calloc(1, sizeof(*b));
             b->qChrom = strdup(kp->qChrom);
             b->tStart = cx.tStart_user + kp->bin_idx * cx.bin_size;
