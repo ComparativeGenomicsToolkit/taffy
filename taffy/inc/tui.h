@@ -85,8 +85,33 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
 // Reader / query side (genome.seq:pos -> universal columns).
 /////////////////////////////////////////////////////////////////////////////
 
-/* A half-open universal-column interval [start, end). */
-typedef struct { int64_t start; int64_t end; } TuiInterval;
+/* A half-open universal-column interval [start, end), carrying enough
+ * info for callers to recover the source genome's position and strand
+ * orientation at any column inside it without a separate lookup.
+ *
+ *   start, end  half-open universal column range
+ *   t_start     source genome position at column == start.  For rev=0
+ *               this is the LOW source coord (start of the queried sub-
+ *               range that this iv covers).  For rev=1 it is the
+ *               highest source coord, because column-ascending traverses
+ *               source-descending under reverse mapping.
+ *   rev         0 = source-to-column mapping is forward (column c maps
+ *               to source pos t_start + (c - start)).
+ *               1 = reverse (column c maps to source pos
+ *               t_start - (c - start)).
+ *
+ * The rev bit is the source genome's strand at this universal column
+ * range.  Combining it with the strand of a run from another genome's
+ * lift (via XOR) yields the actual relative strand between source and
+ * target -- the only correct way to label strand for paralog / SD
+ * mappings where ancestor blocks are inverted relative to both genomes.
+ */
+typedef struct {
+    int64_t start;
+    int64_t end;
+    int64_t t_start;
+    int     rev;
+} TuiInterval;
 
 typedef struct _Tui Tui;
 

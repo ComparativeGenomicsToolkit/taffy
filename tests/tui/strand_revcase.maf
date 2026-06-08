@@ -1,0 +1,21 @@
+##maf version=1
+# hal ((g1:0.1,g2:0.1)anc1:0.0);
+a
+s	anc1.chr	0	10	+	100	ACGTACGTAC
+s	g1.chr	0	10	+	100	ACGTACGTAC
+s	g2.chr	0	10	+	100	ACGTACGTAC
+
+a
+s	anc1.chr	10	10	+	100	ACGTACGTAC
+s	g1.chr	10	10	+	100	ACGTACGTAC
+s	g2.chr	90	10	-	100	GTACGTACGT
+
+a
+s	anc1.chr	20	10	+	100	ACGTACGTAC
+s	g1.chr	80	10	-	100	GTACGTACGT
+s	g2.chr	70	10	-	100	GTACGTACGT
+
+a
+s	anc1.chr	30	10	+	100	ACGTACGTAC
+s	g1.chr	30	10	+	100	ACGTACGTAC
+s	g2.chr	30	10	+	100	ACGTACGTAC

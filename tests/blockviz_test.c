@@ -16,6 +16,13 @@
 #include <string.h>
 
 #define TEST_TUI "tests/tui/evolverMammals.uni.maf.gz.tui"
+/* A tiny purpose-built .tui with one ancestor-reversed MAF block (g1 and
+ * g2 both on `-` strand against anc1), used to regression-test the
+ * iv_rev XOR run.strand strand-fix landed for the user-reported "bogus
+ * reverse copies on the diagonal" bug.  See tests/tui/strand_revcase.maf
+ * for the source MAF; the .tui is built once with `taffy index -u`. */
+/* Pass the MAF path -- taffyOpen's tui_path() appends ".tui" itself. */
+#define TEST_TUI_REVCASE "tests/tui/strand_revcase.maf"
 
 /* ------------------------------------------------------------------ */
 /* Lifecycle                                                           */
@@ -403,6 +410,119 @@ static void test_get_blocks_respects_output_cap(CuTest *tc) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Strand fix: iv_rev XOR run.strand for ancestor-reversed paralogs    */
+/* ------------------------------------------------------------------ */
+
+/* Walk a result list, find the first block matching (tStart, qStart, size).
+ * Returns NULL if not found. */
+static struct taffy_block_t *find_block(struct taffy_block_t *head,
+                                        int64_t tStart, int64_t qStart,
+                                        int64_t size) {
+    for (struct taffy_block_t *b = head; b; b = b->next) {
+        if (b->tStart == tStart && b->qStart == qStart && b->size == size)
+            return b;
+    }
+    return NULL;
+}
+
+/* The user-reported "bogus reverse-strand copies on the diagonal" bug:
+ * when both source and target genome rows are reverse-mapped to the
+ * SAME ancestor (a common cactus pattern -- the ancestor segment ended
+ * up oriented opposite both descendants), the relative source<->target
+ * strand is FORWARD, but the old code reported it as REVERSE because it
+ * used only the run's column-to-target strand bit and ignored the
+ * source-to-column strand carried by the iv.
+ *
+ * tests/tui/strand_revcase.maf has four blocks at anc1.chr [0..40):
+ *   [0..10):   g1 +,  g2 +   -> relative '+'  (forward + forward)
+ *   [10..20):  g1 +,  g2 -   -> relative '-'  (true forward<->reverse)
+ *   [20..30):  g1 -,  g2 -   -> relative '+'  (both reversed = forward!)
+ *   [30..40):  g1 +,  g2 +   -> relative '+'
+ *
+ * Pre-fix, block [20..30) would show '-' (the run's strand alone).
+ * Post-fix, it correctly shows '+'. */
+static void test_strand_iv_rev_xor_run_strand(CuTest *tc) {
+    char *err = NULL;
+    int h = taffyOpen(TEST_TUI_REVCASE, &err);
+    /* If the fixture .tui is missing or the open fails, fail loudly --
+     * the strand-fix is too important to let this regression test skip
+     * silently.  Build with `taffy index -u tests/tui/strand_revcase.maf`. */
+    CuAssert(tc, "open strand_revcase .tui failed -- build with `taffy index -u tests/tui/strand_revcase.maf`",
+             h >= 0);
+    /* Disable the overlap-frac filter and raise the cap so every chain
+     * survives -- we want to inspect the strand of each MAF block's
+     * mapping individually. */
+    CuAssertIntEquals(tc, 0, taffySetChainOverlapFrac(h, -1.0, &err));
+    CuAssertIntEquals(tc, 0, taffySetMaxOutputBlocks(h, 1000, &err));
+
+    struct taffy_block_results_t *res = taffyGetBlocksInTargetRange(
+        h, /*qSpecies=*/"g2", /*tSpecies=*/"g1", /*tChrom=*/"chr",
+        /*tStart=*/0, /*tEnd=*/40, /*tReversed=*/0,
+        TAFFY_NO_SEQUENCES, TAFFY_QUERY_DUPS,
+        /*mapBackAdjacencies=*/0, /*coalescenceLimitName=*/NULL, &err);
+    CuAssertPtrNotNull(tc, res);
+
+    /* Block 1: anc1[0..10) -- both forward. */
+    struct taffy_block_t *b1 = find_block(res->mappedBlocks, 0, 0, 10);
+    CuAssertPtrNotNull(tc, b1);
+    CuAssertIntEquals(tc, '+', b1->strand);
+
+    /* Block 2: anc1[10..20) -- g1 forward, g2 reverse.  Genuinely
+     * antiparallel -> '-' relative.  qStart should be the forward-strand
+     * g2 coord (= 0, since g2 row's start=90 len=10 on '-' translates
+     * to forward range [0..10)). */
+    struct taffy_block_t *b2 = find_block(res->mappedBlocks, 10, 0, 10);
+    CuAssertPtrNotNull(tc, b2);
+    CuAssertIntEquals(tc, '-', b2->strand);
+
+    /* Block 3: anc1[20..30) -- THE REGRESSION CASE.  Both g1 and g2
+     * reverse-mapped to anc1 -> relative forward -> '+'.  Forward
+     * coords: g1 [10..20), g2 [20..30).  Pre-fix this returned '-'. */
+    struct taffy_block_t *b3 = find_block(res->mappedBlocks, 10, 20, 10);
+    CuAssertPtrNotNull(tc, b3);
+    CuAssertIntEquals(tc, '+', b3->strand);
+
+    /* Block 4: anc1[30..40) -- both forward. */
+    struct taffy_block_t *b4 = find_block(res->mappedBlocks, 30, 30, 10);
+    CuAssertPtrNotNull(tc, b4);
+    CuAssertIntEquals(tc, '+', b4->strand);
+
+    taffyFreeBlockResults(res);
+    taffyClose(h, &err);
+    free(err);
+}
+
+/* Sanity that the strand-fix's chained sidecar / bin path produces the
+ * same per-block correctness.  Even at chromosome-scale a query whose
+ * dominant alignment is forward should not show majority '-' coverage. */
+static void test_strand_revcase_all_chains_correct(CuTest *tc) {
+    char *err = NULL;
+    int h = taffyOpen(TEST_TUI_REVCASE, &err);
+    CuAssert(tc, "open strand_revcase .tui failed", h >= 0);
+    CuAssertIntEquals(tc, 0, taffySetChainOverlapFrac(h, -1.0, &err));
+    CuAssertIntEquals(tc, 0, taffySetMaxOutputBlocks(h, 1000, &err));
+    /* Query the whole queried-chrom range; with QUERY_DUPS every chain
+     * is emitted so we get all 4 fixture blocks back.  The aggregate
+     * '+' vs '-' bp count nails the strand fix: pre-fix this was 20/20
+     * (block 3 misreported as '-' tipped the balance); post-fix 30/10. */
+    struct taffy_block_results_t *res = taffyGetBlocksInTargetRange(
+        h, "g2", "g1", "chr", 0, 100, 0,
+        TAFFY_NO_SEQUENCES, TAFFY_QUERY_DUPS, 0, NULL, &err);
+    CuAssertPtrNotNull(tc, res);
+    int64_t plus_bp = 0, minus_bp = 0;
+    for (struct taffy_block_t *b = res->mappedBlocks; b; b = b->next) {
+        if (b->strand == '+') plus_bp += b->size;
+        else if (b->strand == '-') minus_bp += b->size;
+    }
+    /* 3 forward blocks + 1 reverse block (anc1[10..20)): 30 bp + vs 10 bp -. */
+    CuAssertIntEquals(tc, 30, (int) plus_bp);
+    CuAssertIntEquals(tc, 10, (int) minus_bp);
+    taffyFreeBlockResults(res);
+    taffyClose(h, &err);
+    free(err);
+}
+
+/* ------------------------------------------------------------------ */
 /* Suite                                                               */
 /* ------------------------------------------------------------------ */
 
@@ -426,5 +546,7 @@ CuSuite* blockviz_test_suite(void) {
     SUITE_ADD_TEST(suite, test_get_blocks_respects_output_cap);
     SUITE_ADD_TEST(suite, test_max_output_blocks_setter);
     SUITE_ADD_TEST(suite, test_chain_id_and_summaries);
+    SUITE_ADD_TEST(suite, test_strand_iv_rev_xor_run_strand);
+    SUITE_ADD_TEST(suite, test_strand_revcase_all_chains_correct);
     return suite;
 }

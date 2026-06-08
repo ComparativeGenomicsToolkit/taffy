@@ -1743,7 +1743,13 @@ TuiInterval *tui_query(Tui *tui, const char *seq_name,
     int64_t m = total / 3;
     if (m == 0) { free(runs); return NULL; }
 
-    // Clip each overlapping run to [start,end), map to a column interval.
+    // Clip each overlapping run to [start,end), map to a column interval,
+    // and remember the source-genome position at iv.start + the rev bit.
+    // For rev=0 the column-ascending direction matches source-ascending,
+    // so iv.start corresponds to the LOW source coord `a`.  For rev=1
+    // the directions are opposite, so iv.start corresponds to the HIGH
+    // source coord (b - 1; we store b - 1 explicitly so the visitor can
+    // recover source_pos = iv.t_start - (c - iv.start)).
     TuiInterval *iv = st_malloc((size_t)m * sizeof(TuiInterval));
     int64_t k = 0;
     for (int64_t r = 0; r < m; r++) {
@@ -1752,22 +1758,44 @@ TuiInterval *tui_query(Tui *tui, const char *seq_name,
         int64_t a = start > t ? start : t;
         int64_t b = end < te ? end : te;
         if (a >= b) continue;
-        if (!rev) {                             // col = g + (p - t), increasing
-            iv[k].start = g + (a - t);
-            iv[k].end   = g + (b - t);
-        } else {                                // col = g + (t+len-1 - p), decreasing
-            iv[k].start = g + (t + len - b);
-            iv[k].end   = g + (t + len - a);
+        if (!rev) {
+            iv[k].start   = g + (a - t);
+            iv[k].end     = g + (b - t);
+            iv[k].t_start = a;
+            iv[k].rev     = 0;
+        } else {
+            iv[k].start   = g + (t + len - b);
+            iv[k].end     = g + (t + len - a);
+            iv[k].t_start = b - 1;
+            iv[k].rev     = 1;
         }
         k++;
     }
     free(runs);
     if (k == 0) { free(iv); return NULL; }
 
+    // Sort by (start, rev) so same-rev adjacent intervals end up next to
+    // each other; the existing tui_iv_cmp orders by start which is fine
+    // -- we add the rev / t_start safety check in the merge step.
     qsort(iv, k, sizeof(TuiInterval), tui_iv_cmp);
-    int64_t w = 0;                              // merge adjacent / overlapping
+
+    // Merge only if (a) the two intervals overlap or abut on the column
+    // axis AND (b) they share the same rev AND (c) the joined t_start
+    // mapping is linearly consistent.  Without (b)+(c), merging would
+    // erase rev / t_start information the visitor needs to compute the
+    // correct source pos + relative strand.
+    int64_t w = 0;
     for (int64_t i = 1; i < k; i++) {
-        if (iv[i].start <= iv[w].end) {
+        int merge_ok = (iv[i].start <= iv[w].end) && (iv[i].rev == iv[w].rev);
+        if (merge_ok) {
+            // Check the t_start mapping is contiguous through the abut.
+            int64_t cw_extent = iv[w].end - iv[w].start;
+            int64_t expected_t_at_i_start = (iv[w].rev == 0)
+                ? iv[w].t_start + cw_extent
+                : iv[w].t_start - cw_extent;
+            if (iv[i].t_start != expected_t_at_i_start) merge_ok = 0;
+        }
+        if (merge_ok) {
             if (iv[i].end > iv[w].end) iv[w].end = iv[i].end;
         } else {
             iv[++w] = iv[i];

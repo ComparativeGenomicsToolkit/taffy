@@ -493,7 +493,11 @@ typedef struct {
     const char *seq;      // borrowed from gl->seq_names; pointer-stable per gl
     int64_t     start;    // 0-based inclusive
     int64_t     end;      // 0-based exclusive
-    int         strand;   // 1 = '+', 0 = '-'
+    int         strand;   // RUN strand (column-to-target axis): 1 = '+', 0 = '-'.
+                          // Used for target-axis extension; do NOT use for output.
+    int         rel_fwd;  // RELATIVE strand source↔target (iv_rev XOR run.strand):
+                          // 1 = forward, 0 = reverse.  Use this for output_strand,
+                          // XOR'd with input_strand_sign (see close_opens).
     int         active;
 } OpenBedInterval;
 
@@ -737,7 +741,11 @@ static void close_opens(FILE *fh, OpenBedInterval *open, int n_open,
         if (used_this_col && used_this_col[s]) continue;
         char out_strand = 0;
         if (emit_strand) {
-            int sign = (open[s].strand ? +1 : -1) * input_strand_sign;
+            // Use rel_fwd (source↔target relative strand), NOT run.strand,
+            // so ancestor-reversed paralogs report '+' when both source
+            // and target are reverse-mapped to the same ancestor (which
+            // is biologically a forward alignment).
+            int sign = (open[s].rel_fwd ? +1 : -1) * input_strand_sign;
             out_strand = (sign >= 0) ? '+' : '-';
         }
         *p_pending = pending_push(fh, *p_pending, p_cap, p_touch,
@@ -824,6 +832,14 @@ typedef struct {
     int         pending_cap;
     int64_t     pending_touch;
     int64_t     c_lo, c_hi;
+    // Per-iv source-axis state (set by the caller before each
+    // tui_genome_lift_visit_runs call, from TuiInterval.t_start / .rev).
+    // The visitor uses these to map a run's clipped column range
+    // back to source-genome positions correctly under both forward
+    // (iv_rev=0) and reverse (iv_rev=1) source-to-column mappings,
+    // and to XOR with the run's strand for the true relative strand.
+    int64_t     iv_t_start;
+    int         iv_rev;
     int         input_strand_sign;
     int         emit_strand;
     int64_t     max_gap, min_size;
@@ -1041,9 +1057,18 @@ static void chunk_lift_visit_cb(const TuiRun *r, void *user) {
         }
         return;
     }
+    // Relative strand between source genome and target genome at this
+    // run.  iv_rev tracks source-to-column orientation; r->strand
+    // tracks column-to-target orientation; their XOR is the true
+    // source-to-target direction.  Without the iv_rev XOR, ancestor
+    // blocks that are reverse-complemented (both source AND target
+    // rev-mapped) report '-' even though the actual relative strand
+    // is '+' -- producing spurious reverse-strand output for what is
+    // biologically a forward paralog / orthologous mapping.
+    int rel_fwd = cx->iv_rev ? !r->strand : r->strand;
     char out_strand = 0;
     if (cx->emit_strand) {
-        int sign = (r->strand ? +1 : -1) * cx->input_strand_sign;
+        int sign = (rel_fwd ? +1 : -1) * cx->input_strand_sign;
         out_strand = (sign >= 0) ? '+' : '-';
     }
     // --chainFilter / --chainOverlapFrac path: buffer for the post-record
@@ -1060,7 +1085,7 @@ static void chunk_lift_visit_cb(const TuiRun *r, void *user) {
         L->c_end      = ce;
         L->t_start    = t_out_start;
         L->t_end      = t_out_end;
-        L->strand     = r->strand ? +1 : -1;
+        L->strand     = rel_fwd ? +1 : -1;
         L->out_strand = out_strand;
         // Windowed flush: when q-span from window's left edge exceeds
         // chain_window bp, chain + filter the current buffer, emit
@@ -1208,8 +1233,10 @@ static int bed_lift_chunk_impl(Tui *tui, TuiGenomeLift *gl,
 
         t_phase = NOW_S;
         for (int64_t k = 0; k < n_iv; k++) {
-            cx.c_lo = iv[k].start;
-            cx.c_hi = iv[k].end;
+            cx.c_lo       = iv[k].start;
+            cx.c_hi       = iv[k].end;
+            cx.iv_t_start = iv[k].t_start;
+            cx.iv_rev     = iv[k].rev;
             // Each iv[k] is a disjoint c-axis (universal column) chunk;
             // c-axis values are monotone within an iv but jump across
             // iv boundaries.  Anchor the chain window on this iv's
@@ -1411,6 +1438,11 @@ static int bed_lift_main_impl(Tui *tui, TuiGenomeLift *gl,
         for (int64_t k = 0; k < n_iv; k++) {
             int64_t c_lo = iv[k].start;
             int64_t c_hi = iv[k].end;
+            // Source genome's strand at this iv's universal columns;
+            // XOR with each match's strand bit to recover the true
+            // source-to-target relative strand (see chunk_lift_visit_cb
+            // header for the same fix on the --fast path).
+            int     iv_rev = iv[k].rev;
             // Per-column lift; group consecutive same-(seq,strand) hits.
             // After each column we close opens that weren't extended.
             for (int64_t c = c_lo; c < c_hi; c++) {
@@ -1459,7 +1491,8 @@ static int bed_lift_main_impl(Tui *tui, TuiGenomeLift *gl,
                 // paralog's whole run.
                 memset(used_this_col, 0, (size_t)open_cap * sizeof(int));
                 for (int i = 0; i < nm; i++) {
-                    int m_strand = (m[i].strand ? 1 : 0);
+                    int m_strand = m[i].strand ? 1 : 0;   // run strand (target axis)
+                    int rel_fwd  = iv_rev ? !m_strand : m_strand;
                     int slot = -1;
                     for (int s = 0; s < open_cap; s++) {
                         if (!open[s].active || used_this_col[s]) continue;
@@ -1494,11 +1527,12 @@ static int bed_lift_main_impl(Tui *tui, TuiGenomeLift *gl,
                             open_cap = new_cap;
                         }
                         open[slot] = (OpenBedInterval){
-                            .seq = m[i].seq,
-                            .start = m[i].pos,
-                            .end = m[i].pos + 1,
-                            .strand = (m[i].strand ? 1 : 0),
-                            .active = 1,
+                            .seq     = m[i].seq,
+                            .start   = m[i].pos,
+                            .end     = m[i].pos + 1,
+                            .strand  = m_strand,    // run strand (target axis)
+                            .rel_fwd = rel_fwd,     // source↔target relative
+                            .active  = 1,
                         };
                         used_this_col[slot] = 1;
                     }

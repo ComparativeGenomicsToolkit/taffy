@@ -561,7 +561,14 @@ struct BlockCtx {
     std::set<std::string>                qchrom_interns;
     std::string                          tFullName;
     int64_t c_lo = 0;             // column-start of current interval
-    int64_t tpos_at_c_lo = 0;     // tSpecies position at c_lo
+    int64_t c_hi = 0;             // column-end of current interval (clip ce)
+    int64_t tpos_at_c_lo = 0;     // tSpecies position at c_lo (= iv.t_start)
+    int     iv_rev = 0;           // 0 = column-asc maps to tSpecies-asc,
+                                  // 1 = reverse (column-asc maps to t-desc).
+                                  // Comes from TuiInterval.rev set by tui_query.
+                                  // XOR with each visited run's strand to get
+                                  // the true relative strand between tSpecies
+                                  // (the queried genome) and the qSpecies.
     const char *qChromFilter = nullptr;  // optional filter
 
     // ---- bin mode (auto-engaged for wide queries; see get_blocks_impl) ----
@@ -697,27 +704,30 @@ static void migrate_alns_to_bins(BlockCtx *cx) {
 static void block_visit_cb(const TuiRun *r, void *user) {
     BlockCtx *cx = (BlockCtx *) user;
     if (cx->qChromFilter && strcmp(r->seq, cx->qChromFilter) != 0) return;
-
     int64_t r_end = r->g_start + r->length;
     int64_t cs = r->g_start > cx->c_lo ? r->g_start : cx->c_lo;
-    int64_t ce = r_end;
-
-    // tSpecies position at column `cs`: linear within an interval, since
-    // an interval is a contiguous run of tSpecies bases.
-    int64_t tStart = cx->tpos_at_c_lo + (cs - cx->c_lo);
+    int64_t ce = r_end < cx->c_hi    ? r_end    : cx->c_hi;
+    if (cs >= ce) return;
     int64_t size = ce - cs;
 
+    // tSpecies position at the clipped run [cs, ce).  For iv_rev=0 the
+    // column-ascending direction matches tSpecies-ascending so tStart
+    // is at column cs.  For iv_rev=1 column-ascending goes tSpecies-
+    // descending, so the tSpecies *low* end of the run is at column
+    // ce-1; we expose tStart as that low end.
+    int64_t tStart = cx->iv_rev
+        ? cx->tpos_at_c_lo - (ce - 1 - cx->c_lo)
+        : cx->tpos_at_c_lo + (cs - cx->c_lo);
+
+    // True relative strand between tSpecies (queried) and qSpecies
+    // (in the run): forward iff iv_rev and the run's strand agree.
+    // r->strand is 1 for forward, 0 for reverse.
+    int actual_fwd = cx->iv_rev ? !r->strand : r->strand;
+    char strand_char = actual_fwd ? '+' : '-';
+
     if (cx->bin_mode) {
-        // Intern qChrom (same pointer-stable set as the non-bin path) so
-        // the BinKey can hold a stable const char *.
         auto ins = cx->qchrom_interns.emplace(r->seq);
         const char *qc_interned = ins.first->c_str();
-        char strand = r->strand ? '+' : '-';
-
-        // Partition the run [tStart, tStart+size) across bins.  Almost
-        // all runs land in one bin (typical run ~76-300 bp, bin >= 100bp
-        // and usually much larger), but a run that straddles a bin
-        // boundary must contribute to BOTH bins.
         int64_t tEnd_run = tStart + size;
         int64_t bin_first = (tStart    - cx->tStart_user) / cx->bin_size;
         int64_t bin_last  = (tEnd_run - 1 - cx->tStart_user) / cx->bin_size;
@@ -728,7 +738,7 @@ static void block_visit_cb(const TuiRun *r, void *user) {
             int64_t hi = tEnd_run  < bin_hi ? tEnd_run  : bin_hi;
             int64_t covered = hi - lo;
             if (covered <= 0) continue;
-            BlockCtx::BinKey k{ qc_interned, strand, bi };
+            BlockCtx::BinKey k{ qc_interned, strand_char, bi };
             cx->bins[k] += covered;
         }
         return;
@@ -739,11 +749,8 @@ static void block_visit_cb(const TuiRun *r, void *user) {
     // mode in place and emit this run as a bin update.
     if ((int64_t) cx->alns.size() >= MAX_ALNS_FOR_CHAIN) {
         migrate_alns_to_bins(cx);
-        // Fall through to the bin path below (this run still needs to
-        // be counted into the bins we just built).
         auto ins = cx->qchrom_interns.emplace(r->seq);
         const char *qc_interned = ins.first->c_str();
-        char strand = r->strand ? '+' : '-';
         int64_t tEnd_run = tStart + size;
         int64_t bin_first = (tStart    - cx->tStart_user) / cx->bin_size;
         int64_t bin_last  = (tEnd_run - 1 - cx->tStart_user) / cx->bin_size;
@@ -754,30 +761,30 @@ static void block_visit_cb(const TuiRun *r, void *user) {
             int64_t hi = tEnd_run  < bin_hi ? tEnd_run  : bin_hi;
             int64_t covered = hi - lo;
             if (covered <= 0) continue;
-            BlockCtx::BinKey k{ qc_interned, strand, bi };
+            BlockCtx::BinKey k{ qc_interned, strand_char, bi };
             cx->bins[k] += covered;
         }
         return;
     }
 
-    // Compute qStart honouring strand (mirrors taf_lift.c chunk_lift_visit_cb).
-    int64_t qStart;
-    if (r->strand) {
-        qStart = r->t_start + (cs - r->g_start);
-    } else {
-        qStart = r->t_start + r->length - (ce - r->g_start);
-    }
+    // qStart is qSpecies's forward-strand position at the LOW column
+    // (cs) of the run.  The run's own strand bit determines this
+    // mapping; iv_rev does NOT enter here (it only affects how cs maps
+    // to tSpecies coords).  This matches the HAL/snake-track convention
+    // where qStart is always the forward-strand qSpecies coord and the
+    // strand char carries the orientation.
+    int64_t qStart = r->strand
+        ? r->t_start + (cs - r->g_start)
+        : r->t_start + r->length - (ce - r->g_start);
 
     struct taffy_block_t *b = (struct taffy_block_t *) st_calloc(1, sizeof(*b));
     b->qChrom = strdup(r->seq);
     b->tStart = tStart;
     b->qStart = qStart;
     b->size   = size;
-    b->strand = r->strand ? '+' : '-';
+    b->strand = strand_char;
     cx->blocks.push_back(b);
 
-    // Intern qChrom; set::insert returns iterator stable across future
-    // inserts so .c_str() remains valid for the rest of the visit.
     auto ins = cx->qchrom_interns.emplace(r->seq);
     const char *qc_interned = ins.first->c_str();
 
@@ -788,7 +795,7 @@ static void block_visit_cb(const TuiRun *r, void *user) {
     a.t_name  = qc_interned;
     a.t_start = qStart;
     a.t_end   = qStart + size;
-    a.strand  = r->strand ? +1 : -1;
+    a.strand  = actual_fwd ? +1 : -1;
     a.score   = size;
     a.user    = (void *) b;
     cx->alns.push_back(a);
@@ -872,13 +879,20 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
         }
     }
 
-    int64_t cum_tpos = tStart;
+    // Per-iv loop: tui_query already gives us iv.t_start (tSpecies pos
+    // at iv.start) and iv.rev (orientation of the source-to-column
+    // mapping for this iv), so we push them straight to the visitor.
+    // No cum_tpos accumulator -- the old "advance tStart linearly by
+    // iv length" was wrong for paralog / SD queries where multiple iv's
+    // cover overlapping tSpecies ranges via distinct universal-column
+    // regions; each iv now stands on its own t_start.
     for (int64_t k = 0; k < n_iv; k++) {
-        cx.c_lo = iv[k].start;
-        cx.tpos_at_c_lo = cum_tpos;
+        cx.c_lo         = iv[k].start;
+        cx.c_hi         = iv[k].end;
+        cx.tpos_at_c_lo = iv[k].t_start;
+        cx.iv_rev       = iv[k].rev;
         tui_genome_lift_visit_runs(gl_q, iv[k].start, iv[k].end,
                                    block_visit_cb, &cx);
-        cum_tpos += (iv[k].end - iv[k].start);
     }
     free(iv);
 

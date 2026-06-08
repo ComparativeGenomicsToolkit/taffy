@@ -528,7 +528,9 @@ int taf_gerp_main(int argc, char *argv[]) {
     // Parse --columnRange LO-HI directly into a TuiInterval (the iterator
     // takes column intervals natively, no tui_query needed).  Half-open
     // [LO, HI), validated against T below once the .tui is loaded.
-    TuiInterval col_range_iv = { 0, 0 };
+    // Direct column range (--columnRange): no source genome involved, so
+    // t_start=0, rev=0.  The extract iterator uses only (start, end).
+    TuiInterval col_range_iv = { 0, 0, 0, 0 };
     bool have_col_range = false;
     bool empty_col_range = false;
     if (columnRangeArg != NULL) {
