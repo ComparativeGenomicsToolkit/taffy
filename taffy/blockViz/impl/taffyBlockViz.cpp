@@ -581,33 +581,35 @@ struct BlockCtx {
     bool    bin_mode    = false;
     int64_t bin_size    = 0;
     int64_t tStart_user = 0;       // origin so bin_idx = (tpos - tStart_user) / bin_size
-    // Key: (qChrom interned ptr, strand ('+' or '-'), bin_idx).
-    // Value: total covered bp in this bin from runs of this qChrom/strand.
+    // Key: (qChrom interned ptr, bin_idx).  Strand is intentionally NOT
+    // part of the key -- a single bin gets ONE emitted block, with the
+    // dominant-strand coverage labeling it.  The earlier per-(qChrom,
+    // strand, bin_idx) layout produced a +/- pair at every bin where
+    // any antiparallel mapping landed (and apes universal MAFs have
+    // ~8% of blocks placed antiparallel as a Cactus ancestor-assembly
+    // quirk, not as real biological inversions), stacking the snake-
+    // track view with overlapping ghost bins.  Collapsing here gives
+    // one block per bin at chromosome-zoom; real inversions still
+    // stand out as '-' when they actually dominate a bin.
     struct BinKey {
         const char *qChrom;        // points into qchrom_interns
-        char        strand;
         int64_t     bin_idx;
         bool operator<(const BinKey &o) const {
-            // qChrom by STRING content, not pointer.  Pointers from the
-            // qchrom_interns table are stable within one query but their
-            // relative order across qChroms is allocation-dependent --
-            // effectively random.  That randomness collides with the
-            // max_output_blocks cap in the bin-emit walk: whichever qChrom
-            // landed last in memory gets truncated past the cap, even if
-            // it's the dominant orthologous chain (e.g. chr1 disappearing
-            // from whole-chr1 queries while chr10/chr11/... survive).
-            // strcmp gives stable alphabetical order, putting the queried
-            // chrom alongside its lexicographic neighbors and making the
-            // emitted output reproducible across runs.
+            // String-content qChrom compare (not pointer) so order is
+            // reproducible across runs (interned-string addresses are
+            // allocation-dependent).  See pre-fix bug history.
             if (qChrom != o.qChrom) {
                 int c = strcmp(qChrom, o.qChrom);
                 if (c != 0) return c < 0;
             }
-            if (strand != o.strand) return strand < o.strand;
             return bin_idx < o.bin_idx;
         }
     };
-    std::map<BinKey, int64_t> bins;
+    // Per-bin coverage split by strand so the emit step can pick the
+    // dominant one.  Caller-side it's just "+= covered" into the
+    // appropriate field.
+    struct BinCov { int64_t plus; int64_t minus; };
+    std::map<BinKey, BinCov> bins;
 };
 
 // Aln-count threshold for runtime bin-engage.  When the per-run
@@ -658,10 +660,7 @@ static const int64_t MIN_BIN_BP       = 10000;
 static void migrate_alns_to_bins(BlockCtx *cx) {
     for (size_t i = 0; i < cx->alns.size(); i++) {
         const TaffyAln &a = cx->alns[i];
-        char strand = (a.strand > 0) ? '+' : '-';
-        // a.t_name is already interned in qchrom_interns (set in the
-        // per-run path); reuse.  a.q_start/q_end are the tStart/tEnd
-        // on tChrom (the bin's t-axis).
+        int fwd = (a.strand > 0);
         int64_t tStart_a = a.q_start;
         int64_t tEnd_a   = a.q_end;
         int64_t bin_first = (tStart_a    - cx->tStart_user) / cx->bin_size;
@@ -673,8 +672,10 @@ static void migrate_alns_to_bins(BlockCtx *cx) {
             int64_t hi = tEnd_a   < bin_hi ? tEnd_a   : bin_hi;
             int64_t covered = hi - lo;
             if (covered <= 0) continue;
-            BlockCtx::BinKey k{ a.t_name, strand, bi };
-            cx->bins[k] += covered;
+            BlockCtx::BinKey k{ a.t_name, bi };
+            BlockCtx::BinCov &c = cx->bins[k];
+            if (fwd) c.plus  += covered;
+            else     c.minus += covered;
         }
     }
     // Free the per-run taffy_block_t's; we're emitting from cx->bins now.
@@ -738,8 +739,10 @@ static void block_visit_cb(const TuiRun *r, void *user) {
             int64_t hi = tEnd_run  < bin_hi ? tEnd_run  : bin_hi;
             int64_t covered = hi - lo;
             if (covered <= 0) continue;
-            BlockCtx::BinKey k{ qc_interned, strand_char, bi };
-            cx->bins[k] += covered;
+            BlockCtx::BinKey k{ qc_interned, bi };
+            BlockCtx::BinCov &c = cx->bins[k];
+            if (actual_fwd) c.plus  += covered;
+            else            c.minus += covered;
         }
         return;
     }
@@ -761,8 +764,10 @@ static void block_visit_cb(const TuiRun *r, void *user) {
             int64_t hi = tEnd_run  < bin_hi ? tEnd_run  : bin_hi;
             int64_t covered = hi - lo;
             if (covered <= 0) continue;
-            BlockCtx::BinKey k{ qc_interned, strand_char, bi };
-            cx->bins[k] += covered;
+            BlockCtx::BinKey k{ qc_interned, bi };
+            BlockCtx::BinCov &c = cx->bins[k];
+            if (actual_fwd) c.plus  += covered;
+            else            c.minus += covered;
         }
         return;
     }
@@ -912,17 +917,24 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
     // we hit the cap, the dropped tail is high-bin-index (rightward in
     // the query).  Acceptable for a coverage viz; documented.
     if (cx.bin_mode) {
-        // Sort entries so the qChrom with the most TOTAL coverage emits
-        // first.  Walking cx.bins in std::map key order (alphabetical
-        // by qChrom name) drops the dominant orthologous chain past the
-        // max_output_blocks cap when its name sorts after other qChroms
-        // alphabetically -- e.g. a whole-hg38.chr2 query alphabetically
-        // queues chr1, chr10..chr19 before chr2, exhausts the 500-cap,
-        // and chr2 (the orthologous mapping) emits ZERO bins.  Sorting
-        // by per-qChrom total coverage descending puts the dominant
-        // chain first regardless of its name.
+        // One block per (qChrom, bin_idx).  Strand = dominant of (+, -)
+        // for that bin, with size = sum of both directions of coverage.
+        // Pre-collapse the +/- pair into a single emitted block; the
+        // bin-mode viz at chromosome zoom doesn't render the strand
+        // mismatch usefully, and the apes universal MAF places ~8 % of
+        // ortholog blocks antiparallel-in-ancestor as a Cactus quirk
+        // -- emitting both produced an overlapping +/− zipper in the
+        // snake track.  Real local inversions still surface as '-'
+        // when they dominate a bin's coverage.
+        //
+        // Per-qChrom TOTAL coverage (sum of +/-/all bins) drives the
+        // qChrom emit order so the dominant orthologous mapping is
+        // never truncated by the max_output_blocks cap regardless of
+        // alphabetical name (the chr2/chr10..chr19 fix from e4c3cf0).
         std::map<const char *, int64_t> qchrom_total;
-        for (auto &kv : cx.bins) qchrom_total[kv.first.qChrom] += kv.second;
+        for (auto &kv : cx.bins) {
+            qchrom_total[kv.first.qChrom] += kv.second.plus + kv.second.minus;
+        }
 
         std::vector<const BlockCtx::BinKey *> ordered;
         ordered.reserve(cx.bins.size());
@@ -931,10 +943,9 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
                   [&](const BlockCtx::BinKey *a, const BlockCtx::BinKey *b) {
                       int64_t ta = qchrom_total[a->qChrom];
                       int64_t tb = qchrom_total[b->qChrom];
-                      if (ta != tb) return ta > tb;        // dominant qChrom first
+                      if (ta != tb) return ta > tb;
                       int c = strcmp(a->qChrom, b->qChrom);
-                      if (c != 0) return c < 0;            // stable tie-break
-                      if (a->strand != b->strand) return a->strand < b->strand;
+                      if (c != 0) return c < 0;
                       return a->bin_idx < b->bin_idx;
                   });
 
@@ -942,16 +953,18 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
         int64_t emitted = 0;
         for (const BlockCtx::BinKey *kp : ordered) {
             if (emitted >= H->max_output_blocks) break;
-            int64_t covered = cx.bins[*kp];
+            const BlockCtx::BinCov &c = cx.bins[*kp];
+            int64_t covered = c.plus + c.minus;
             struct taffy_block_t *b = (struct taffy_block_t *) st_calloc(1, sizeof(*b));
             b->qChrom = strdup(kp->qChrom);
             b->tStart = cx.tStart_user + kp->bin_idx * cx.bin_size;
-            // qStart: synthetic monotone surrogate so adjacent bins keep
-            // their relative order on the q-axis if the browser wants to
-            // sort by qStart.  Not a real qSpecies coord.
+            // qStart: synthetic monotone surrogate; not a real qSpecies coord.
             b->qStart = kp->bin_idx * cx.bin_size;
             b->size   = covered;
-            b->strand = kp->strand;
+            // Dominant strand wins; pure-'+'/'-' bins emit unambiguously,
+            // and mixed bins where '+' >= '-' show '+' (the common case
+            // for orthologous mapping with Cactus ancestor-flip noise).
+            b->strand = (c.plus >= c.minus) ? '+' : '-';
             b->next   = nullptr;
             if (!head) head = b;
             if (tail) tail->next = b;
