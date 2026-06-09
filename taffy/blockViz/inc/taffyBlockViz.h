@@ -256,9 +256,11 @@ int taffySetMaxOutputBlocks(int taffyHandle, int64_t n, char **errStr);
 int taffyGetMaxOutputBlocks(int taffyHandle, int64_t *n, char **errStr);
 
 /** Noise filter: drop output blocks too small to render meaningfully.
- * OFF by default (both fractions 0).  A block is dropped iff its size is
- * BOTH < spanFrac of the query window AND < relFrac of the largest output
- * block -- equivalently, < min(window*spanFrac, maxBlock*relFrac).
+ * ON by default with conservative fractions (spanFrac=0.001 ~ 1/1000 px,
+ * relFrac=0.1), so it declutters out of the box; pass BOTH 0 to disable.  A
+ * block is dropped iff its size is BOTH < spanFrac of the query window AND <
+ * relFrac of the largest output block -- equivalently, < min(window*spanFrac,
+ * maxBlock*relFrac).
  *
  * Rationale: the query window span stands in for the track's pixel width,
  * so passing spanFrac ~ 1/pixels makes this a sub-pixel test with no pixel

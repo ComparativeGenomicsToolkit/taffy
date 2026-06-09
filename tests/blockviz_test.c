@@ -577,16 +577,25 @@ static void test_window_stability_coarse(CuTest *tc) {
     free(err);
 }
 
-/* The min-block noise filter (taffySetMinBlockFilter): with it engaged, blocks
- * below BOTH a fraction of the window AND a fraction of the largest block are
- * dropped; the largest block always survives; off (the default) is a no-op. */
+/* The min-block noise filter (taffySetMinBlockFilter): ON by default with
+ * conservative fractions; when engaged harder, blocks below BOTH a fraction of
+ * the window AND a fraction of the largest block are dropped; the largest
+ * block always survives; both fractions 0 disables it. */
 static void test_min_block_filter(CuTest *tc) {
     char *err = NULL;
     int h = taffyOpen(TEST_TUI, &err);
     if (h < 0) { free(err); return; }
+
+    /* default is ON with the shipped conservative fractions */
+    double sf = -1, rf = -1;
+    CuAssertIntEquals(tc, 0, taffyGetMinBlockFilter(h, &sf, &rf, &err));
+    CuAssertDblEquals(tc, 0.001, sf, 1e-9);
+    CuAssertDblEquals(tc, 0.1,   rf, 1e-9);
+
     CuAssertIntEquals(tc, 0, taffySetMaxOutputBlocks(h, 30, &err));   /* force coverage */
 
-    /* baseline: filter off (default) */
+    /* unfiltered baseline: explicitly disable the filter (both 0) */
+    CuAssertIntEquals(tc, 0, taffySetMinBlockFilter(h, 0.0, 0.0, &err));
     struct taffy_block_results_t *r0 = taffyGetBlocksInTargetRange(
         h, "simMouse_chr6", "simHuman_chr6", "simHuman.chr6", 0, 600000, 0,
         TAFFY_NO_SEQUENCES, TAFFY_QUERY_AND_TARGET_DUPS, 0, NULL, &err);
@@ -599,17 +608,6 @@ static void test_min_block_filter(CuTest *tc) {
     }
     taffyFreeBlockResults(r0);
     CuAssertTrue(tc, n0 >= 1);
-
-    /* off (0,0) must be a no-op */
-    CuAssertIntEquals(tc, 0, taffySetMinBlockFilter(h, 0.0, 0.0, &err));
-    struct taffy_block_results_t *roff = taffyGetBlocksInTargetRange(
-        h, "simMouse_chr6", "simHuman_chr6", "simHuman.chr6", 0, 600000, 0,
-        TAFFY_NO_SEQUENCES, TAFFY_QUERY_AND_TARGET_DUPS, 0, NULL, &err);
-    CuAssertPtrNotNull(tc, roff);
-    int noff = 0;
-    for (struct taffy_block_t *b = roff->mappedBlocks; b; b = b->next) noff++;
-    taffyFreeBlockResults(roff);
-    CuAssertIntEquals(tc, n0, noff);
 
     /* engage: window-off (1.0) so the threshold is 0.5 * the largest block */
     CuAssertIntEquals(tc, 0, taffySetMinBlockFilter(h, 1.0, 0.5, &err));

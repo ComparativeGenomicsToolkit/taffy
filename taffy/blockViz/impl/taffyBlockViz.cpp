@@ -85,18 +85,20 @@ struct TaffyHandle {
     // TAFFY_DEFAULT_MAX_OUTPUT_BLOCKS (1000); tunable at runtime via
     // taffySetMaxOutputBlocks.
     int64_t max_output_blocks = TAFFY_DEFAULT_MAX_OUTPUT_BLOCKS;
-    // Noise filter (OFF by default).  Drop an output block iff its size is
-    // BOTH < min_block_span_frac of the query window AND < min_block_rel_frac
-    // of the largest output block -- i.e. < min(window*span_frac, max*rel_frac)
+    // Noise filter.  Drop an output block iff its size is BOTH <
+    // min_block_span_frac of the query window AND < min_block_rel_frac of the
+    // largest output block -- i.e. < min(window*span_frac, max*rel_frac)
     // ("below A and below B" == "below min(A,B)").  The window span stands in
-    // for screen width (browser passes span_frac ~ 1/track-pixels), so this is
-    // a sub-pixel test without a pixel count; the relative term is self-
-    // protecting (a uniformly-small region keeps -- nothing is small relative
-    // to its own max -- while slivers beside a real feature drop).  Both must
-    // be > 0 to engage; span_frac=1 makes it relative-only, rel_frac=1 makes
-    // it window-only.  Set via taffySetMinBlockFilter.
-    double  min_block_span_frac = 0.0;
-    double  min_block_rel_frac  = 0.0;
+    // for screen width (span_frac ~ 1/track-pixels), so this is a sub-pixel
+    // test without a pixel count; the relative term is self-protecting (a
+    // uniformly-small region keeps -- nothing is small relative to its own max
+    // -- while slivers beside a real feature drop).  ON by default with
+    // conservative fractions (~1/1000 px AND < 10% of the largest), so it
+    // declutters out of the box; the browser can override per-track via
+    // taffySetMinBlockFilter (e.g. exact 1/pixel-width).  Set BOTH to 0 to
+    // disable; span_frac=1 makes it relative-only, rel_frac=1 window-only.
+    double  min_block_span_frac = 0.001;
+    double  min_block_rel_frac  = 0.1;
     // mapBackAdjacencies: per-(qSpecies, qChrom) sorted run table.
     // Key is the fully-qualified "<genome>.<chrom>" string the .tui
     // uses for d-line lookups.  Lazily populated on first flank scan
