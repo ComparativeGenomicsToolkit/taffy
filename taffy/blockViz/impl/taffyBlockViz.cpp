@@ -42,12 +42,13 @@ struct SeqRun {
     int     strand;    // +1 / -1
 };
 
-// Browser-conservative default cap on per-query mappedBlocks count.
-// Per-handle, tunable at runtime via taffySetMaxOutputBlocks.  Sized
-// well under HAL's halSnakeTrack.c NUM_LEVELS=1000 so the snake
-// renderer is never close to its cap.  See taffyGetBlocksInTargetRange
-// for how the cap is enforced across the per-run+merge and bin paths.
-#define TAFFY_DEFAULT_MAX_OUTPUT_BLOCKS ((int64_t) 500)
+// Default cap on per-query mappedBlocks count.  Per-handle, tunable at
+// runtime via taffySetMaxOutputBlocks.  Set to HAL's halSnakeTrack.c
+// NUM_LEVELS=1000 -- the conservative 500 left dense viewports a few %
+// short of full coverage (the chained .tui fragments even a near-
+// identical genome into ~900 blocks per Mb), and snake levels track
+// distinct chains, not raw block count, so 1000 blocks stays safe.
+#define TAFFY_DEFAULT_MAX_OUTPUT_BLOCKS ((int64_t) 1000)
 
 struct TaffyHandle {
     // Per-handle mutex.  All non-trivial public entries lock this for
@@ -70,16 +71,19 @@ struct TaffyHandle {
     int64_t max_gap_length  = TAFFY_CHAIN_DEFAULT_MAX_GAP;
     // Overlap-frac paralogy filter on the chain output (see chain.h):
     // walk chains in score-desc order, accept iff their q-coverage
-    // overlaps the running union of kept chains by at most this
-    // fraction of the candidate's q-bp.  Default 0.0 (strict: drop on
-    // ANY q-overlap) -- paralogs of the primary chain at the same
-    // queried bp get filtered out cleanly, inversions / disjoint-q
-    // chains stay.  Set to -1.0 to disable (browser then sees all
-    // chains, modulo the max_output_blocks budget).
-    double  chain_overlap_frac = 0.0;
-    // Hard cap on mappedBlocks length per query.  Default is the
-    // browser-conservative TAFFY_DEFAULT_MAX_OUTPUT_BLOCKS (500);
-    // tunable at runtime via taffySetMaxOutputBlocks.
+    // overlaps the running union of kept chains by at most this fraction
+    // of the candidate's q-bp.  Default 0.5: a paralog whose q-coverage
+    // is >50% redundant with a kept chain is dropped, while real
+    // ortholog coverage survives.  Strict 0.0 is WRONG for the universal
+    // .tui: it drops a whole chain for ANY (even 1-bp) overlap, and the
+    // alignment is fragmented into many chains with tiny boundary
+    // overlaps, so 0.0 culls ~17% of real hs1->hg38 coverage (measured).
+    // 0.5 keeps that coverage AND still cuts SD-region paralog redundancy
+    // ~8x.  Set to -1.0 to disable the filter entirely.
+    double  chain_overlap_frac = 0.5;
+    // Hard cap on mappedBlocks length per query.  Default is
+    // TAFFY_DEFAULT_MAX_OUTPUT_BLOCKS (1000); tunable at runtime via
+    // taffySetMaxOutputBlocks.
     int64_t max_output_blocks = TAFFY_DEFAULT_MAX_OUTPUT_BLOCKS;
     // mapBackAdjacencies: per-(qSpecies, qChrom) sorted run table.
     // Key is the fully-qualified "<genome>.<chrom>" string the .tui
@@ -135,9 +139,14 @@ static TuiGenomeLift *get_or_load_gl(TaffyHandle *H, const std::string &genome,
 
 extern "C" int taffyOpen(const char *path, char **errStr) {
     if (!path) { set_err(errStr, "taffyBlockViz: NULL path"); return -1; }
-    // tui_path() resolves either <foo>.maf.gz -> <foo>.maf.gz.tui or
-    // accepts an already-fully-qualified .tui path.
-    char *p = tui_path(path);
+    // Resolve <foo>.maf.gz -> <foo>.maf.gz.tui, OR accept an already-
+    // fully-qualified .tui path as-is.  tui_path() unconditionally appends
+    // ".tui", so guard against a path that already ends in it (otherwise
+    // an explicit ".tui" arg loads ".tui.tui" and fails).
+    size_t plen = strlen(path);
+    char *p = (plen >= 4 && strcmp(path + plen - 4, ".tui") == 0)
+                  ? strdup(path)
+                  : tui_path(path);
     Tui *tui = tui_load(p);
     if (!tui) {
         std::string msg = std::string("taffyBlockViz: tui_load failed for ") + (p ? p : path);
@@ -548,283 +557,292 @@ static struct taffy_block_t *find_off_screen_flank(
 /* Block query (the hot path)                                          */
 /* ------------------------------------------------------------------ */
 
-struct BlockCtx {
-    // Buffer one taffy_block_t plus a parallel TaffyAln per visited run.
-    // Linking into the output list happens after taffy_chain has assigned
-    // chain IDs and we know how to route each block per the dupMode.
-    std::vector<struct taffy_block_t *> blocks;
-    std::vector<TaffyAln>                alns;
-    // Intern owned strings (qChroms) so TaffyAln const char * stays
-    // valid through the chain call.  std::set guarantees that
-    // references to elements aren't invalidated by future insertions,
-    // so the c_str() pointer we stash in TaffyAln.t_name is stable.
-    std::set<std::string>                qchrom_interns;
-    std::string                          tFullName;
-    int64_t c_lo = 0;             // column-start of current interval
-    int64_t c_hi = 0;             // column-end of current interval (clip ce)
-    int64_t tpos_at_c_lo = 0;     // tSpecies position at c_lo (= iv.t_start)
-    int     iv_rev = 0;           // 0 = column-asc maps to tSpecies-asc,
-                                  // 1 = reverse (column-asc maps to t-desc).
-                                  // Comes from TuiInterval.rev set by tui_query.
-                                  // XOR with each visited run's strand to get
-                                  // the true relative strand between tSpecies
-                                  // (the queried genome) and the qSpecies.
-    const char *qChromFilter = nullptr;  // optional filter
-
-    // ---- bin mode (auto-engaged for wide queries; see get_blocks_impl) ----
-    // When bin_mode == true, the visitor accumulates covered_bp into a
-    // map keyed by (qChrom, strand, bin_idx) instead of allocating a
-    // taffy_block_t + TaffyAln per run.  The emit phase walks the map
-    // and produces one block per (qChrom, strand, bin_idx) entry.
-    // Skips the chain pass + mapBackAdjacencies entirely (they don't
-    // apply to bin aggregates).
-    bool    bin_mode    = false;
-    int64_t bin_size    = 0;
-    int64_t tStart_user = 0;       // origin so bin_idx = (tpos - tStart_user) / bin_size
-    // Key: (qChrom interned ptr, bin_idx).  Strand is intentionally NOT
-    // part of the key -- a single bin gets ONE emitted block, with the
-    // dominant-strand coverage labeling it.  The earlier per-(qChrom,
-    // strand, bin_idx) layout produced a +/- pair at every bin where
-    // any antiparallel mapping landed (and apes universal MAFs have
-    // ~8% of blocks placed antiparallel as a Cactus ancestor-assembly
-    // quirk, not as real biological inversions), stacking the snake-
-    // track view with overlapping ghost bins.  Collapsing here gives
-    // one block per bin at chromosome-zoom; real inversions still
-    // stand out as '-' when they actually dominate a bin.
-    struct BinKey {
-        const char *qChrom;        // points into qchrom_interns
-        int64_t     bin_idx;
-        bool operator<(const BinKey &o) const {
-            // String-content qChrom compare (not pointer) so order is
-            // reproducible across runs (interned-string addresses are
-            // allocation-dependent).  See pre-fix bug history.
-            if (qChrom != o.qChrom) {
-                int c = strcmp(qChrom, o.qChrom);
-                if (c != 0) return c < 0;
-            }
-            return bin_idx < o.bin_idx;
-        }
-    };
-    // Per-bin coverage + qSpecies anchor (block.qStart) split by strand
-    // so the emit step picks the dominant one.  The pre-fix bin emit
-    // synthesized qStart = bin_idx * bin_size, which only matched the
-    // real qSpecies coord when qSpecies ≈ tSpecies (e.g. hs1 vs hg38).
-    // For diverged qSpecies the synthetic qStart was off by tens of
-    // millions of bp, drawing every block at the wrong y-position and
-    // turning a clean diagonal into a zig-zag in the snake track.
-    //
-    // We track plus_qmin / minus_qmin = the LOWEST forward-strand
-    // qSpecies coord of any run contributing to that strand's bin
-    // bucket.  At emit, the dominant strand's qmin becomes block.qStart,
-    // and the block draws at the right q-axis position even when
-    // multiple runs contribute (the orthologous chain dominates, and
-    // its q range is contiguous so its qmin is a good anchor).
-    // Per-bin, per-strand: track the LARGEST single run's contribution
-    // as the bin's anchor.  Total coverage drives strand dominance and
-    // emit order; anchor (qStart + size) drives the emitted block's
-    // geometry.
-    //
-    // Why "largest single run", not "qmin + total":
-    // chained_g1000 sidecars produce many tiny chained runs in
-    // SD-rich / pericentromeric regions, each at scattered qSpecies
-    // positions.  The pre-fix per-bin "qmin of all runs + total
-    // coverage clamped to bin_size" recipe synthesized blocks at a
-    // qSpecies coordinate (the lowest-q paralog) with a size summed
-    // from runs scattered all across qChrom -- a phantom alignment
-    // (e.g. hg38 chr9:62.3 Mb -> hs1 chr9:101 kb, 277 kb '-' that has
-    // no chain-layer support at fine zoom).
-    //
-    // Picking the largest-single-run anchor emits an honest
-    // representation of the dominant single alignment in the bin: a
-    // real (qChrom, qStart, size, strand) tuple that came from one
-    // tui run, not a synthetic union.  Smaller paralogs land in the
-    // total coverage (so strand dominance / qChrom sort still see
-    // them) but don't distort the emitted block's geometry.
-    struct BinCov {
-        int64_t plus = 0,  minus = 0;          // total covered bp per strand
-        int64_t plus_anchor_qStart  = 0;       // largest single + run's q anchor
-        int64_t plus_anchor_size    = 0;       // its bp covered in this bin
-        int64_t minus_anchor_qStart = 0;
-        int64_t minus_anchor_size   = 0;
-        bool    plus_set  = false, minus_set  = false;
-    };
-    std::map<BinKey, BinCov> bins;
+// One buffered, clipped qSpecies run awaiting the windowed chain pass.
+// POD, appended by the visitor with NO per-run heap traffic -- the old
+// per-run st_calloc + strdup + std::vector<ptr> + std::set::emplace was
+// the chromosome-scale bottleneck (100x slower than `taffy lift`, whose
+// architecture this mirrors).  Same shape as taf_lift.c's LiftRun, plus
+// the (t_ref, q_qsp) block geometry blockViz emits.  `seq` is borrowed
+// from the qSpecies TuiGenomeLift -- pointer stable until that gl is
+// destructed (tui.h TuiRun) -- so no interning is needed: taffy_chain
+// compares t_name by strcmp and the gl hands out one stable pointer per
+// chrom.
+struct BlockRun {
+    const char *seq;            // qChrom (gl-borrowed, stable)
+    int64_t     c_start, c_end; // universal-column range (window decision)
+    int64_t     t_ref;          // tSpecies block coord (block.tStart)
+    int64_t     q_qsp;          // qSpecies forward coord (block.qStart)
+    int64_t     size;           // bp
+    int         strand_sign;    // +1 / -1 relative strand (-> TaffyAln.strand)
 };
 
-// Aln-count threshold for runtime bin-engage.  When the per-run
-// visitor crosses this aln count without bin mode already being on
-// (i.e. span was below the 5 Mb static threshold), the visitor bails
-// to bin mode: existing alns are migrated into bins, per-run
-// taffy_block_t's are freed, and subsequent visits accumulate into
-// the bin map.  This bounds chain-pass + merge cost, which scales
-// O(N log N) with a heavy constant and becomes the dominant wall at
-// dense-species + moderate-zoom (e.g. 1 Mb chicken->quail on the
-// 577-way takes ~13 s in pure per-run+chain+merge; runtime bin-
-// engage brings it under 1 s).
-//
-// 20000 is the empirical safe ceiling: below this on apes-scale
-// (~8 species) we never engage and snake-track renders correctly;
-// above this on 577-way bird->bird, the chain pass starts to
-// dominate and we want to coarsen anyway.
-static const int64_t MAX_ALNS_FOR_CHAIN = 20000;
+// One survivor of the windowed chain+merge pass: a collapsed, gap-free
+// 2-D block.  Accumulated flat across all windows/ivs; a single GLOBAL
+// chain pass over these (cheap -- they're already merged, so there are
+// few) does the paralogy filter, chain-id assignment, primary pick,
+// dupMode routing, and budget.  Filtering CANNOT be done per window: a
+// browser query's paralogy lives on the tSpecies axis, which spans ivs
+// (the same tSpecies bp reached via two universal-column regions is a
+// dupe), so the overlap-frac select must see every iv at once -- unlike
+// `taffy lift`, whose chain q-axis is the column and is disjoint across
+// ivs by construction.  qChrom is the gl-borrowed pointer (strdup'd
+// only when the final taffy_block_t is built).
+struct SurvBlock {
+    const char *qChrom;
+    int64_t     tStart, qStart, size;
+    char        strand;
+};
 
-// Output policy.  All output paths are capped so the browser snake-
-// track renderer (HAL's halSnakeTrack.c caps at NUM_LEVELS=1000) is
-// never close to its limit.  The cap is per-handle (H->max_output_blocks,
-// default TAFFY_DEFAULT_MAX_OUTPUT_BLOCKS=500, tunable via
-// taffySetMaxOutputBlocks).  Primary chain is always kept in full;
-// dupe chains are added in score-desc order until the remaining budget
-// is exhausted (lower-score dupes are silently dropped).
-//
-// Bin policy.  Bin mode is for spans wide enough that the per-run +
-// chain + merge path would push primary block count toward the cap;
-// at vertebrate scale that's spans >= 5 Mb.  Bin mode emits at most
-// TARGET_BIN_COUNT coverage cells (one per qChrom+strand+bin entry),
-// so its output is always under H->max_output_blocks as well.
-//
-//   bin_size = span / TARGET_BIN_COUNT
-//   bin_mode = bin_size >= MIN_BIN_BP
-//
-// With TARGET_BIN_COUNT=500 and MIN_BIN_BP=10000, bin mode engages at
-// spans >= 5 Mb and produces at most 500 output blocks.
-static const int64_t TARGET_BIN_COUNT = 500;
-static const int64_t MIN_BIN_BP       = 10000;
+struct BlockCtx {
+    // ---- per-iv source-axis state (set before each visit) -------------
+    int64_t     c_lo = 0, c_hi = 0;     // current iv's column clip range
+    int64_t     tpos_at_c_lo = 0;       // tSpecies pos at column c_lo (iv.t_start)
+    int         iv_rev = 0;             // iv.rev: 0 col-asc->t-asc, 1 col-asc->t-desc.
+                                        // XOR'd with each run's strand for the true
+                                        // tSpecies<->qSpecies relative strand.
+    const char *qChromFilter = nullptr; // optional qChrom restriction
+    std::string tFullName;              // "<tSpecies>.<tChrom>" -- the chain q_name
 
-// Migrate already-accumulated per-run blocks/alns into the bin
-// accumulator and free the per-run state.  Called when N_alns crosses
-// MAX_ALNS_FOR_CHAIN at moderate-zoom on dense-species TUIs (the cliff
-// case: 1 Mb chicken->quail on 577-way produces ~5M alns; chain pass
-// + merge would dominate).  After this returns, cx->bin_mode is true
-// and subsequent visitor calls go straight into the bin path.
-static void migrate_alns_to_bins(BlockCtx *cx) {
-    for (size_t i = 0; i < cx->alns.size(); i++) {
-        const TaffyAln &a = cx->alns[i];
-        int fwd = (a.strand > 0);
-        // TaffyAln carries (q_start = tSpecies, t_start = qSpecies fwd
-        // coord, strand = relative-fwd as +1/-1).  These were filled by
-        // the per-run path with the iv_rev XOR already applied.  For
-        // the bin q_low computation:
-        //   '+': q ascends with t -> q_low = a.t_start + (lo - a.q_start)
-        //   '-': q descends with t -> q_low = a.t_start + (a.q_end - hi)
-        int64_t tStart_a = a.q_start;
-        int64_t tEnd_a   = a.q_end;
-        int64_t qStart_a = a.t_start;
-        int64_t qEnd_a   = a.t_end;
-        int64_t bin_first = (tStart_a    - cx->tStart_user) / cx->bin_size;
-        int64_t bin_last  = (tEnd_a - 1 - cx->tStart_user) / cx->bin_size;
-        for (int64_t bi = bin_first; bi <= bin_last; bi++) {
-            int64_t bin_lo = cx->tStart_user + bi * cx->bin_size;
-            int64_t bin_hi = bin_lo + cx->bin_size;
-            int64_t lo = tStart_a > bin_lo ? tStart_a : bin_lo;
-            int64_t hi = tEnd_a   < bin_hi ? tEnd_a   : bin_hi;
-            int64_t covered = hi - lo;
-            if (covered <= 0) continue;
-            int64_t q_low = fwd
-                ? qStart_a + (lo - tStart_a)
-                : qStart_a + (qEnd_a - qStart_a - (hi - tStart_a));
-            BlockCtx::BinKey k{ a.t_name, bi };
-            BlockCtx::BinCov &c = cx->bins[k];
-            if (fwd) {
-                c.plus += covered;
-                if (!c.plus_set || covered > c.plus_anchor_size) {
-                    c.plus_anchor_qStart = q_low;
-                    c.plus_anchor_size   = covered;
-                    c.plus_set           = true;
-                }
-            } else {
-                c.minus += covered;
-                if (!c.minus_set || covered > c.minus_anchor_size) {
-                    c.minus_anchor_qStart = q_low;
-                    c.minus_anchor_size   = covered;
-                    c.minus_set           = true;
-                }
-            }
-        }
+    // ---- chain tuning (copied from the handle) ------------------------
+    int64_t     chain_open = TAFFY_CHAIN_DEFAULT_OPEN;
+    int64_t     chain_extend = TAFFY_CHAIN_DEFAULT_EXTEND;
+    int64_t     chain_max_gap = TAFFY_CHAIN_DEFAULT_MAX_GAP;
+    double      chain_overlap_frac = 0.0;   // <0 disables the per-window filter
+
+    // ---- windowed chain processing (mirrors taf_lift.c) ---------------
+    int64_t     chain_window = 0;        // W (column bp); 0 = no within-iv windowing
+    int64_t     chain_window_overlap = 0;// K (column bp) carried across boundaries
+    int64_t     window_start = 0;        // current window left column edge (INT64_MIN=unset)
+
+    // ---- flat run buffer (lift-style; no per-run heap) ----------------
+    BlockRun   *run_buf = nullptr;
+    size_t      n_run_buf = 0, cap_run_buf = 0;
+
+    // ---- survivor accumulator -----------------------------------------
+    std::vector<SurvBlock> survivors;
+};
+
+// blockViz windowing constants, mirroring taf_lift.c's W/K defaults.  A
+// browser query is one viewport (<= a chromosome), so within-iv
+// windowing only engages on multi-hundred-Mb ranges; there it bounds
+// the chain pass + buffer memory.  K >= chain_max_gap so a chain
+// crossing a boundary re-forms in the carried tail.
+static const int64_t BLOCK_CHAIN_WINDOW         = 100LL * 1000 * 1000; // W
+static const int64_t BLOCK_CHAIN_WINDOW_OVERLAP =  10LL * 1000 * 1000; // K
+
+// Max-gap bound for the GLOBAL (level-2) greedy regroup of survivors.
+// Level 1 already chained each window's runs; the global greedy pass
+// only needs to BRIDGE the reference-indel gaps that tui_query split a
+// diagonal across.  Two consecutive survivors join one chain only if
+// their gap on each axis is within this bound -- generous enough to span
+// real indels, tight enough that an off-diagonal paralog (whose qSpecies
+// coord jumps far) starts a fresh chain.  BLOCK_L2_GROUP_SLACK is the
+// small reverse tolerance allowed for boundary round-off / tiny overlaps.
+static const int64_t BLOCK_L2_MAX_GAP      = 1000 * 1000;   // 1 Mb
+// Max disagreement between the reference- and qSpecies-axis gaps for two
+// consecutive blocks to count as collinear (same diagonal) and join one
+// chain.  The g1000 index emits redundant nested/overlapping fragments
+// on the SAME diagonal (a small block inside a big one -> NEGATIVE gaps
+// that nonetheless agree, t_gap == q_gap); grouping on proximity alone
+// breaks the chain at each, shattering one orthologous arm into dozens.
+// Collinearity joins them while a true off-diagonal paralog (gaps
+// disagree) or the centromere step (huge one-axis jump) still splits.
+// 50 kb (not 10 kb): a real inverted/orthologous arm carries internal
+// indels up to tens of kb -- e.g. the 8p23.1 inversion shatters into 5
+// reverse chains at 10 kb but reunites into ONE at >= 25 kb.  Validated
+// not to over-merge paralogs (they sit Mb+ off-diagonal): chr9:62-63M SD
+// chain count is unchanged 10kb->100kb and chr9:72-73M is identical.
+static const int64_t BLOCK_L2_COLLINEAR_TOL = 50000;        // bp
+
+// Coarsen (bin) when the per-block budget would make each output block
+// span at least this many reference bp -- i.e. when (queried span /
+// max_output_blocks) >= this.  This makes the detail<->coverage switch a
+// pure function of the ZOOM (query span), NOT of how many blocks happen
+// to fall in the window.  A count-based switch flips as you pan a fixed
+// zoom across a dense SD locus -- the window total crosses the cap, the
+// whole result re-renders coverage-vs-detail, and dupe bars blink.  A
+// span-based switch is panning-stable: the same locus renders the same
+// way at the same zoom regardless of the window's edges.
+static const int64_t BLOCK_MIN_COARSE_BIN = 10000;         // bp
+
+// taffy_chain_merge_collinear callback.  chain.c has already grown the
+// KEPT aln's q/t extents to the union; here we additionally (1) grow the
+// kept run's COLUMN extent so the window "decided vs live" test sees the
+// merged span, and (2) mark the absorbed run dead (user=NULL) so the
+// flush's decide loop skips it (and it isn't carried forward).
+static void bv_on_merge(TaffyAln *kept, TaffyAln *absorbed, void *user) {
+    (void) user;
+    BlockRun *K = (BlockRun *) kept->user;
+    BlockRun *A = (BlockRun *) absorbed->user;
+    if (K && A) {
+        if (A->c_start < K->c_start) K->c_start = A->c_start;
+        if (A->c_end   > K->c_end)   K->c_end   = A->c_end;
     }
-    // Free the per-run taffy_block_t's; we're emitting from cx->bins now.
-    for (struct taffy_block_t *b : cx->blocks) {
-        free(b->qChrom);
-        free(b);
-    }
-    cx->blocks.clear();
-    cx->alns.clear();
-    cx->bin_mode = true;
+    absorbed->user = nullptr;
 }
 
-// Visitor: clip the q run, compute (tStart, qStart, size, strand),
-// and buffer both a taffy_block_t (for the eventual output linked list)
-// and a TaffyAln (for the chain call after the visit loop).
-//
-// In bin_mode the visitor instead accumulates covered_bp into
-// cx->bins keyed by (qChrom, strand, bin_idx).  No per-run allocation,
-// no chain call after the loop -- the bin entries are themselves the
-// output.
-//
-// Runtime bin-engage: if the per-run path's aln count crosses
-// MAX_ALNS_FOR_CHAIN, we migrate the existing alns into bins and
-// continue in bin mode for the rest of the visit.  This bails out of
-// the chain pass + merge work that would otherwise dominate wall on
-// dense-species + moderate-zoom queries (the 1 Mb bird->bird cliff).
+/* Chain + paralogy-filter + collinear-merge one window's worth of
+ * buffered runs, emit the decided (kept, merged) survivors, and carry
+ * live runs forward.  This is the SPEED tier and is structurally
+ * taf_lift.c::chain_flush_window: the per-window overlap-frac filter is
+ * what keeps the chain pass small in paralog-dense (SD / pericentromeric)
+ * regions -- without it the survivor set explodes and the global pass in
+ * get_blocks_impl blows up (125x slower, measured).  A residual GLOBAL
+ * filter still runs there to catch CROSS-iv dupes the per-window pass
+ * can't see (same tSpecies bp via two column regions); see SurvBlock.
+ *
+ * force_all != 0 (end of iv): every buffered run is decided and the
+ * buffer cleared.  Otherwise runs whose (possibly merged) column extent
+ * ends at/below boundary_c are decided; the rest stay live for the next
+ * window's pass so cross-boundary chains re-form.  Live runs always
+ * carry (even if currently filtered out) -- their chain may re-form with
+ * more context; only DECIDED runs consult the keep set.  Survivors
+ * become 2-D SurvBlock records (via taffy_chain_merge_collinear) rather
+ * than being replayed through lift's 1-D pending_push BED merge. */
+static void block_flush_window(BlockCtx *cx, int64_t boundary_c, int force_all) {
+    int64_t n = (int64_t) cx->n_run_buf;
+    if (n == 0) return;
+
+    TaffyAln *alns = (TaffyAln *) st_malloc((size_t) n * sizeof(TaffyAln));
+    for (int64_t i = 0; i < n; i++) {
+        BlockRun *L = &cx->run_buf[i];
+        alns[i].q_name  = cx->tFullName.c_str();   // single tSpecies.tChrom partition
+        alns[i].q_start = L->t_ref;
+        alns[i].q_end   = L->t_ref + L->size;
+        alns[i].t_name  = L->seq;
+        alns[i].t_start = L->q_qsp;
+        alns[i].t_end   = L->q_qsp + L->size;
+        alns[i].strand  = L->strand_sign;
+        alns[i].score   = L->size;
+        alns[i].user    = (void *) L;              // run_buf is stable during a flush
+    }
+
+    TaffyChainCostParams cost = { cx->chain_open, cx->chain_extend };
+    int64_t *chain_id = (int64_t *) st_calloc((size_t) n, sizeof(int64_t));
+    TaffyChainInfo *chains_out = nullptr;
+    int64_t n_chains_out = 0;
+    taffy_chain(alns, n, taffy_chain_default_gap_cost, &cost,
+                cx->chain_max_gap, chain_id, &chains_out, &n_chains_out);
+
+    int64_t max_id = 0;
+    for (int64_t k = 0; k < n_chains_out; k++)
+        if (chains_out[k].id > max_id) max_id = chains_out[k].id;
+
+    // Per-window overlap-frac paralogy filter (disabled => keep all).
+    char *keep_chain = (char *) st_calloc((size_t)(max_id + 1), sizeof(char));
+    if (cx->chain_overlap_frac >= 0) {
+        taffy_chain_overlap_frac_select(alns, n, chain_id, chains_out,
+                                        n_chains_out, max_id,
+                                        cx->chain_overlap_frac, /*cap=*/0,
+                                        keep_chain);
+    } else {
+        for (int64_t k = 0; k <= max_id; k++) keep_chain[k] = 1;
+    }
+
+    // Collapse adjacent collinear alns within a chain into one block.
+    // bv_on_merge grows the kept run's column extent + kills absorbed.
+    taffy_chain_merge_collinear(alns, n, chain_id, bv_on_merge, cx);
+
+    // Decide each surviving (non-absorbed) run: emit it if past the
+    // window boundary AND its chain is kept, else carry it live.
+    // Geometry is read from the merged alns[i]; live runs sync it back
+    // into their BlockRun so the next window re-chains the merged extent.
+    char *is_live = (char *) st_calloc((size_t) n, sizeof(char));
+    for (int64_t i = 0; i < n; i++) {
+        BlockRun *L = (BlockRun *) alns[i].user;
+        if (L == nullptr) continue;                 // absorbed by merge
+        int decided = force_all || L->c_end <= boundary_c;
+        if (decided) {
+            if (keep_chain[chain_id[i]]) {
+                SurvBlock s;
+                s.qChrom = alns[i].t_name;
+                s.tStart = alns[i].q_start;
+                s.size   = alns[i].q_end - alns[i].q_start;
+                s.qStart = alns[i].t_start;         // min qSpecies (both strands post-merge)
+                s.strand = (alns[i].strand > 0) ? '+' : '-';
+                cx->survivors.push_back(s);
+            }
+            // filtered-out decided runs simply vanish
+        } else {
+            L->t_ref = alns[i].q_start;
+            L->size  = alns[i].q_end - alns[i].q_start;
+            L->q_qsp = alns[i].t_start;
+            is_live[L - cx->run_buf] = 1;
+        }
+    }
+
+    // Compact live runs to the head of run_buf for the next window.
+    int64_t w = 0;
+    for (int64_t bi = 0; bi < n; bi++) {
+        if (!is_live[bi]) continue;
+        if (w != bi) cx->run_buf[w] = cx->run_buf[bi];
+        w++;
+    }
+    cx->n_run_buf = (size_t) w;
+
+    free(is_live);
+    free(keep_chain);
+    free(chain_id);
+    free(chains_out);
+    free(alns);
+}
+
+// Visitor: clip one qSpecies run to the current iv's column window,
+// compute its block geometry + relative strand (the iv_rev XOR run
+// strand fix), and append a flat BlockRun -- NO heap traffic.  When the
+// buffered column span crosses the chain window, flush + slide.
 static void block_visit_cb(const TuiRun *r, void *user) {
     BlockCtx *cx = (BlockCtx *) user;
     if (cx->qChromFilter && strcmp(r->seq, cx->qChromFilter) != 0) return;
     int64_t r_end = r->g_start + r->length;
     int64_t cs = r->g_start > cx->c_lo ? r->g_start : cx->c_lo;
-    int64_t ce = r_end < cx->c_hi    ? r_end    : cx->c_hi;
+    int64_t ce = r_end < cx->c_hi      ? r_end      : cx->c_hi;
     if (cs >= ce) return;
     int64_t size = ce - cs;
 
-    // tSpecies position at the clipped run [cs, ce).  For iv_rev=0 the
-    // column-ascending direction matches tSpecies-ascending so tStart
-    // is at column cs.  For iv_rev=1 column-ascending goes tSpecies-
-    // descending, so the tSpecies *low* end of the run is at column
-    // ce-1; we expose tStart as that low end.
+    // tSpecies position at the clipped run [cs, ce).  iv_rev=0: column-asc
+    // matches tSpecies-asc so the low end is at column cs.  iv_rev=1:
+    // column-asc is tSpecies-desc so the low end is at column ce-1.
     int64_t tStart = cx->iv_rev
         ? cx->tpos_at_c_lo - (ce - 1 - cx->c_lo)
         : cx->tpos_at_c_lo + (cs - cx->c_lo);
 
-    // True relative strand between tSpecies (queried) and qSpecies
-    // (in the run): forward iff iv_rev and the run's strand agree.
+    // Relative strand tSpecies<->qSpecies = iv_rev XOR run strand.  The
+    // XOR is essential: an ancestor block reverse-mapped to BOTH genomes
+    // is biologically forward, and without it shows a spurious '-'.
     // r->strand is 1 for forward, 0 for reverse.
     int actual_fwd = cx->iv_rev ? !r->strand : r->strand;
-    char strand_char = actual_fwd ? '+' : '-';
 
-    // qStart for the run as a whole = forward-strand qSpecies coord
-    // at the run's LOW tSpecies position (= visitor's `tStart`).  Used
-    // by both the bin-emit qmin tracking and the per-run aln record.
-    // The formula uses r->strand (column-to-q direction), not actual_fwd
-    // (which already factored iv_rev for the BLOCK strand label).
+    // qSpecies forward coord at the run's low tSpecies end.  Uses
+    // r->strand (column->q direction), independent of the iv_rev factor
+    // that flips the block's strand label.
     int64_t qStart = r->strand
         ? r->t_start + (cs - r->g_start)
         : r->t_start + r->length - (ce - r->g_start);
 
-    // Per-run path: always populate cx->alns + cx->blocks.  No early
-    // bin-mode short-circuit, no runtime escape to migrate_alns_to_bins.
-    // The bin coarsening (when needed for wide queries) runs AFTER the
-    // chain + overlap-frac filter on the survivors, not on raw runs --
-    // see get_blocks_impl for the chain-then-bin policy decision.
-    struct taffy_block_t *b = (struct taffy_block_t *) st_calloc(1, sizeof(*b));
-    b->qChrom = strdup(r->seq);
-    b->tStart = tStart;
-    b->qStart = qStart;
-    b->size   = size;
-    b->strand = strand_char;
-    cx->blocks.push_back(b);
+    if (cx->n_run_buf == cx->cap_run_buf) {
+        cx->cap_run_buf = cx->cap_run_buf ? cx->cap_run_buf * 2 : 4096;
+        cx->run_buf = (BlockRun *) st_realloc(cx->run_buf,
+                                              cx->cap_run_buf * sizeof(*cx->run_buf));
+    }
+    BlockRun *L    = &cx->run_buf[cx->n_run_buf++];
+    L->seq         = r->seq;
+    L->c_start     = cs;
+    L->c_end       = ce;
+    L->t_ref       = tStart;
+    L->q_qsp       = qStart;
+    L->size        = size;
+    L->strand_sign = actual_fwd ? +1 : -1;
 
-    auto ins = cx->qchrom_interns.emplace(r->seq);
-    const char *qc_interned = ins.first->c_str();
-
-    TaffyAln a = {0};
-    a.q_name  = cx->tFullName.c_str();        // single tSpecies.tChrom for whole query
-    a.q_start = tStart;
-    a.q_end   = tStart + size;
-    a.t_name  = qc_interned;
-    a.t_start = qStart;
-    a.t_end   = qStart + size;
-    a.strand  = actual_fwd ? +1 : -1;
-    a.score   = size;
-    a.user    = (void *) b;
-    cx->alns.push_back(a);
+    // Windowed flush: anchor the window on this iv's first run, then
+    // flush + slide whenever the buffered column span reaches W.
+    if (cx->window_start == INT64_MIN) cx->window_start = cs;
+    if (cx->chain_window > 0 && ce - cx->window_start >= cx->chain_window) {
+        int64_t window_end = cx->window_start + cx->chain_window;
+        int64_t boundary_c = window_end - cx->chain_window_overlap;
+        block_flush_window(cx, boundary_c, /*force_all=*/0);
+        cx->window_start = boundary_c;
+    }
 }
 
 static struct taffy_block_results_t *
@@ -878,315 +896,211 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
         return res;   // empty result, not an error
     }
 
-    // Walk each interval; buffer one taffy_block_t + TaffyAln per visited
-    // qSpecies run.  Output linking happens AFTER chaining.
+    // Visit each iv, buffering clipped runs into a flat POD array and
+    // chaining + merging them in column windows (block_flush_window).
+    // This is `taffy lift`'s architecture -- the source of its
+    // chromosome-scale speed -- and replaces the old per-run
+    // taffy_block_t + std::vector<ptr> + std::set bottleneck.
     BlockCtx cx;
-    cx.qChromFilter = qChrom;
-    cx.tFullName    = tFullName;  // stable interned string for chain partition
+    cx.qChromFilter         = qChrom;
+    cx.tFullName            = tFullName;          // single chain q_name partition
+    cx.chain_open           = H->chain_open;
+    cx.chain_extend         = H->chain_extend;
+    cx.chain_max_gap        = H->max_gap_length;
+    cx.chain_overlap_frac   = H->chain_overlap_frac;
+    cx.chain_window         = BLOCK_CHAIN_WINDOW;
+    cx.chain_window_overlap = BLOCK_CHAIN_WINDOW_OVERLAP;
 
-    // Auto-bin policy: for wide queries (chromosome-scale browser zoom-
-    // out), switch the visitor into bin-accumulator mode so we emit ~2000
-    // coverage bins instead of millions of per-run blocks.  The per-run
-    // path is O(n_runs * pending-bookkeeping); the bin path is O(1) per
-    // run.  On bird-to-chicken whole-chrom lifts that's ~4M runs becoming
-    // ~10k bin entries -- the dominant savings is killing the per-run
-    // taffy_block_t alloc + the chain pass + the mapBackAdjacencies
-    // edge-search, all of which scale with n_runs.
-    {
-        // bin_size is needed for the chain-then-bin coarsening that
-        // engages at the END of the chain pass if surviving block
-        // count exceeds max_output_blocks.  We always pre-compute it;
-        // whether bin coarsening actually runs is decided below
-        // based on the survivor count, not on query span up-front.
-        int64_t span = (int64_t) tEnd - (int64_t) tStart;
-        int64_t bs = (span > 0) ? (span / TARGET_BIN_COUNT) : 0;
-        cx.tStart_user = (int64_t) tStart;
-        cx.bin_size    = bs > 0 ? bs : 1;
-    }
-
-    // Per-iv loop: tui_query already gives us iv.t_start (tSpecies pos
-    // at iv.start) and iv.rev (orientation of the source-to-column
-    // mapping for this iv), so we push them straight to the visitor.
-    // No cum_tpos accumulator -- the old "advance tStart linearly by
-    // iv length" was wrong for paralog / SD queries where multiple iv's
-    // cover overlapping tSpecies ranges via distinct universal-column
-    // regions; each iv now stands on its own t_start.
+    // Per-iv loop: tui_query hands us iv.t_start (tSpecies pos at
+    // iv.start) and iv.rev (source-to-column orientation) per chunk.
+    // Each iv is a disjoint, internally-monotone universal-column range,
+    // so the chain window anchors on the iv's first run and the buffer
+    // is force-drained at the iv boundary (chains never span ivs --
+    // they're column-disjoint, far past chain_max_gap).
     for (int64_t k = 0; k < n_iv; k++) {
         cx.c_lo         = iv[k].start;
         cx.c_hi         = iv[k].end;
         cx.tpos_at_c_lo = iv[k].t_start;
         cx.iv_rev       = iv[k].rev;
+        cx.window_start = INT64_MIN;
         tui_genome_lift_visit_runs(gl_q, iv[k].start, iv[k].end,
                                    block_visit_cb, &cx);
+        if (cx.n_run_buf > 0)
+            block_flush_window(&cx, /*boundary_c=*/0, /*force_all=*/1);
     }
     free(iv);
+    free(cx.run_buf);
 
     struct taffy_block_results_t *res = (struct taffy_block_results_t *) st_calloc(1, sizeof(*res));
+    if (cx.survivors.empty()) return res;  // nothing aligned in range
 
-    int64_t n = (int64_t) cx.alns.size();
-    if (n == 0) return res;  // empty query, nothing to chain
+    // Materialize one taffy_block_t per survivor, each carried as the
+    // TaffyAln.user back-pointer for the global grouping pass below.  The
+    // routing loop later frees each block or hands it to the output list.
+    // The old code's mistake was this per-block alloc per RAW RUN; here
+    // it's once per merged survivor.  t_name is the gl-borrowed qChrom
+    // (stable through the grouping + overlap-frac calls).
+    std::vector<TaffyAln> alns;
+    alns.reserve(cx.survivors.size());
+    for (const SurvBlock &s : cx.survivors) {
+        struct taffy_block_t *b = (struct taffy_block_t *) st_calloc(1, sizeof(*b));
+        b->qChrom = strdup(s.qChrom);
+        b->tStart = s.tStart;
+        b->qStart = s.qStart;
+        b->size   = s.size;
+        b->strand = s.strand;
 
-    // Two paths -- choose based on aln count:
+        TaffyAln a = {0};
+        a.q_name  = cx.tFullName.c_str();    // single tSpecies.tChrom partition
+        a.q_start = s.tStart;
+        a.q_end   = s.tStart + s.size;
+        a.t_name  = s.qChrom;                // gl-borrowed, stable through the chain call
+        a.t_start = s.qStart;
+        a.t_end   = s.qStart + s.size;
+        a.strand  = (s.strand == '+') ? +1 : -1;
+        a.score   = s.size;
+        a.user    = (void *) b;
+        alns.push_back(a);
+    }
+    int64_t n = (int64_t) alns.size();
+
+    // Group survivors into chains, then paralogy-filter + budget them.
     //
-    //  A) n <= MAX_ALNS_FOR_CHAIN: full chain pass.  Runs taffy_chain
-    //     to join collinear runs + taffy_chain_merge_collinear to collapse
-    //     them into one block each.  Output is per-merged-chain blocks
-    //     with real qStart / size.  Used for fine-zoom queries where the
-    //     run count is small.
-    //
-    //  B) n >  MAX_ALNS_FOR_CHAIN: skip taffy_chain (its predecessor walk
-    //     is O(n*active_set) and the active set can blow up at chrom
-    //     scale -- whole-chr1 queries on a chained_g1000 sidecar took
-    //     2+ minutes per chr).  Synthesize one-chain-per-aln so we can
-    //     still apply taffy_chain_overlap_frac_select: each aln becomes
-    //     its own chain (chain_id[i] = i, score = aln.score), chains
-    //     are score-sorted desc, and the filter drops alns that q-overlap
-    //     a higher-scoring kept aln.  This catches the same paralog
-    //     case the chain pass would catch (since chained_g1000 already
-    //     pre-joined adjacent collinear runs), at O(n log n) cost.
-    //     The bin pass below then coarsens the survivors for output.
-    int64_t primary_id;
-    TaffyChainInfo *chains = nullptr;
+    // A genome-browser reference is usually a LEAF (e.g. hg38), whose
+    // alignment to the universal columns is broken by every indel into
+    // tens of thousands of tiny ivs -- so tui_query hands back a heavily
+    // fragmented, paralog-laden survivor set that the per-window filter
+    // (it sees one iv at a time) cannot dedup.  The full taffy_chain DP
+    // would reunite the orthologous diagonal correctly, but its
+    // O(n*active) sweep -- and the O(kept^2) of an overlap-frac pass run
+    // over an ungrouped survivor set -- both go quadratic at chromosome
+    // scale (measured ~20 s on 138-248 Mb chromosomes).  Instead a single
+    // GREEDY collinear sweep (O(n log n)) collapses the diagonal into one
+    // chain and peels off-diagonal paralogs into their own; overlap-frac
+    // then runs over that SMALL chain set (cheap), and the budget caps
+    // the output.  (lift stays fast on the same data only because it is
+    // queried on the ANCESTOR, which maps contiguously -> few big ivs.)
+    int64_t primary_id = 0;
+    std::vector<TaffyChainInfo> chains;
     int64_t n_chains = 0;
     std::vector<int64_t> chain_id((size_t) n, 0);
 
-    bool use_full_chain = (n <= MAX_ALNS_FOR_CHAIN);
-    if (use_full_chain) {
-        TaffyChainCostParams cost = { H->chain_open, H->chain_extend };
-        taffy_chain(cx.alns.data(), n,
-                    taffy_chain_default_gap_cost, &cost,
-                    H->max_gap_length,
-                    chain_id.data(), &chains, &n_chains);
-        primary_id = (n_chains > 0) ? chains[0].id : 0;
+    // Sort by (qChrom, strand, tStart): contiguous, tStart-ascending
+    // partitions -- the order overlap-frac expects and the greedy needs.
+    std::sort(alns.begin(), alns.end(),
+              [](const TaffyAln &a, const TaffyAln &b) {
+                  int c = strcmp(a.t_name ? a.t_name : "", b.t_name ? b.t_name : "");
+                  if (c != 0) return c < 0;
+                  if (a.strand != b.strand) return a.strand < b.strand;
+                  return a.q_start < b.q_start;
+              });
 
-        // Post-chain merge: collapse adjacent collinear alns within a
-        // chain into one taffy_block_t each.  See chain.c comment for
-        // why this matters at fine zoom.  Merged-away alns get user=
-        // nullptr so the routing loop further down skips them.
-        auto bv_on_merge = [](TaffyAln *kept, TaffyAln *absorbed, void *) {
-            struct taffy_block_t *kb = (struct taffy_block_t *) kept->user;
-            struct taffy_block_t *ab = (struct taffy_block_t *) absorbed->user;
-            kb->size += ab->size;
-            if (kept->strand < 0) kb->qStart = ab->qStart;
-            free(ab->qChrom);
-            free(ab);
-            absorbed->user = nullptr;
-        };
-        taffy_chain_merge_collinear(cx.alns.data(), n, chain_id.data(),
-                                    bv_on_merge, nullptr);
-    } else {
-        // Fast path: synthesize chains[] without the full chain pass.
-        // chain_id[i] = i (each aln is its own chain).  Per-aln score
-        // = its qChrom's TOTAL bp across the whole query, not the aln's
-        // own size -- so the orthologous qChrom dominates the filter
-        // walk regardless of how degenerate it is in any individual
-        // bin.  In centromeric regions the orthologous tui-runs are
-        // short (chained_g1000's gap=1000 breaks the chain in
-        // alpha-satellite arrays) and would otherwise lose to longer
-        // paralog runs on other qChroms; the per-qChrom-total score
-        // restores the right priority.
-        //
-        // Sub-sort by aln.score within each qChrom so within-qChrom
-        // tie-break picks the longest aln first.  The overlap-frac
-        // filter then walks dominant qChrom first; within it, longest
-        // alns get the first crack at q-coverage, smaller / non-
-        // contiguous fragments fall in line behind.
-        std::map<const char *, int64_t> qchrom_total;
-        for (int64_t i = 0; i < n; i++) {
-            qchrom_total[cx.alns[i].t_name] += cx.alns[i].score;
+    // Greedy collinear grouping within a (qChrom, strand) partition.
+    // Extend the current chain with the next aln iff it's the same qChrom
+    // + strand and lies on the SAME diagonal: the reference-axis and
+    // qSpecies-axis gaps between the two blocks agree within
+    // BLOCK_L2_COLLINEAR_TOL, and neither axis jumps more than
+    // BLOCK_L2_MAX_GAP.  Both gaps are SIGNED -- the g1000 index's nested
+    // fragments give negative (overlapping) gaps that still agree, so
+    // collinearity (not mere proximity) is what keeps one orthologous arm
+    // a single chain instead of shattering it at every nested fragment.
+    // An off-diagonal paralog (gaps disagree) or the centromere step (a
+    // huge q-jump) opens a new chain.
+    for (int64_t i = 0; i < n; i++) {
+        bool extend = false;
+        if (i > 0) {
+            const TaffyAln &A = alns[i - 1];
+            const TaffyAln &B = alns[i];
+            if (A.strand == B.strand &&
+                strcmp(A.t_name ? A.t_name : "", B.t_name ? B.t_name : "") == 0) {
+                int64_t t_gap = B.q_start - A.q_end;          // reference axis
+                int64_t q_gap = (A.strand > 0) ? (B.t_start - A.t_end)
+                                               : (A.t_start - B.t_end);
+                int64_t at = t_gap < 0 ? -t_gap : t_gap;
+                int64_t aq = q_gap < 0 ? -q_gap : q_gap;
+                int64_t dd = (t_gap - q_gap) < 0 ? (q_gap - t_gap) : (t_gap - q_gap);
+                if (at <= BLOCK_L2_MAX_GAP && aq <= BLOCK_L2_MAX_GAP &&
+                    dd <= BLOCK_L2_COLLINEAR_TOL)
+                    extend = true;
+            }
         }
-        chains = (TaffyChainInfo *) st_malloc((size_t) n * sizeof(*chains));
-        for (int64_t i = 0; i < n; i++) {
-            chain_id[i]           = i;
-            chains[i].id          = i;
-            chains[i].total_score = qchrom_total[cx.alns[i].t_name];
-            chains[i].total_bp    = cx.alns[i].score;
-            chains[i].n_alns      = 1;
+        if (!extend) {
+            TaffyChainInfo ci;
+            ci.id          = ++n_chains;    // 1-based, monotonic
+            ci.total_score = 0;
+            ci.total_bp    = 0;
+            ci.n_alns      = 0;
+            chains.push_back(ci);
         }
-        std::sort(chains, chains + n,
-                  [](const TaffyChainInfo &a, const TaffyChainInfo &b) {
-                      if (a.total_score != b.total_score)
-                          return a.total_score > b.total_score;
-                      return a.total_bp > b.total_bp;
-                  });
-        n_chains    = n;
-        primary_id  = chains[0].id;
-        // No merge_collinear -- the bin step below coarsens for us.
+        TaffyChainInfo &cur = chains.back();
+        chain_id[i]      = cur.id;
+        cur.total_score += alns[i].score;
+        cur.total_bp    += (alns[i].q_end - alns[i].q_start);
+        cur.n_alns      += 1;
     }
 
-    // Two-pass chain survivor selection:
-    //   1. Overlap-frac paralogy filter (chain.h's
-    //      taffy_chain_overlap_frac_select): drops chains whose q-bp
-    //      coverage is already covered by higher-scoring kept chains.
-    //      Default H->chain_overlap_frac = 0 (strict; drops any
-    //      q-overlap).  Inversions / disjoint-q chains stay (any strand).
-    //   2. Block budget: cap total emitted blocks at H->max_output_blocks
-    //      so the browser snake-track renderer stays well under its
-    //      NUM_LEVELS=1000 cap.  Walks survivors in score-desc order
-    //      adding their block counts until budget is exhausted.  Counts
-    //      use SURVIVING blocks (post-merge), so chains that collapsed
-    //      to one merged block count as one.
+    // Rank chains by score desc (primary first), matching taffy_chain's
+    // output contract so the budget + summaries logic stays unchanged.
+    std::sort(chains.begin(), chains.end(),
+              [](const TaffyChainInfo &a, const TaffyChainInfo &b) {
+                  if (a.total_score != b.total_score) return a.total_score > b.total_score;
+                  return a.id < b.id;
+              });
+    primary_id = (n_chains > 0) ? chains[0].id : 0;
+
+    // Overlap-frac paralogy filter on the tSpecies (q) axis over the
+    // SMALL greedy chain set: drops chains whose q-coverage is already
+    // held by a higher-scoring kept chain (default frac 0.5).  Cheap now
+    // that the diagonal is grouped, not 10^5 disjoint pieces.  The output
+    // cap is then applied POSITIONALLY in the emit step (below), not as a
+    // by-score chain budget here.
     std::set<int64_t> kept_chains;
     std::vector<char> ovr_keep;
     if (n_chains > 0) {
-        // Pass 1: overlap-frac filter (skipped if disabled = frac < 0).
         if (H->chain_overlap_frac >= 0) {
             int64_t max_id = 0;
             for (int64_t k = 0; k < n_chains; k++)
                 if (chains[k].id > max_id) max_id = chains[k].id;
             ovr_keep.assign((size_t)(max_id + 1), 0);
-            taffy_chain_overlap_frac_select(cx.alns.data(), n,
+            taffy_chain_overlap_frac_select(alns.data(), n,
                                             chain_id.data(),
-                                            chains, n_chains, max_id,
+                                            chains.data(), n_chains, max_id,
                                             H->chain_overlap_frac,
                                             /*cap=*/0,
                                             ovr_keep.data());
         }
 
-        // Count surviving (chain-merged, overlap-frac-kept) blocks.
-        // If > cap, we coarsen via bin mode below (chain-then-bin).
-        int64_t n_survivors = 0;
-        for (int64_t i = 0; i < n; i++) {
-            if (cx.alns[i].user == nullptr) continue;        // merged away
-            int64_t cid = chain_id[i];
-            if (!ovr_keep.empty() && !ovr_keep[cid]) continue; // overlap-frac drop
-            n_survivors++;
-        }
-
-        if (n_survivors > H->max_output_blocks) {
-            // Chain-then-bin: rebuild cx.bins from the chain-filter
-            // survivors so the bin emit inherits the same paralog culling
-            // as fine-zoom chain mode (no phantom paralog blocks at bins
-            // the chain layer already dropped via overlap-frac).
-            //
-            // Each surviving aln is partitioned across the bins it
-            // crosses on the tSpecies axis; per (qChrom, bin_idx,
-            // strand) we keep the LARGEST single contribution as the
-            // bin's anchor (block geometry) and sum all contributions
-            // for strand-dominance + per-qChrom emit-order sort.
-            for (int64_t i = 0; i < n; i++) {
-                if (cx.alns[i].user == nullptr) continue;
-                int64_t cid = chain_id[i];
-                if (!ovr_keep.empty() && !ovr_keep[cid]) continue;
-                const TaffyAln &a = cx.alns[i];
-                int      fwd      = (a.strand > 0);
-                int64_t  tStart_a = a.q_start;            // tSpecies coords
-                int64_t  tEnd_a   = a.q_end;
-                int64_t  qStart_a = a.t_start;            // qSpecies forward
-                int64_t  qEnd_a   = a.t_end;
-                int64_t bin_first = (tStart_a - cx.tStart_user) / cx.bin_size;
-                int64_t bin_last  = (tEnd_a - 1 - cx.tStart_user) / cx.bin_size;
-                for (int64_t bi = bin_first; bi <= bin_last; bi++) {
-                    int64_t bin_lo = cx.tStart_user + bi * cx.bin_size;
-                    int64_t bin_hi = bin_lo + cx.bin_size;
-                    int64_t lo = tStart_a > bin_lo ? tStart_a : bin_lo;
-                    int64_t hi = tEnd_a   < bin_hi ? tEnd_a   : bin_hi;
-                    int64_t covered = hi - lo;
-                    if (covered <= 0) continue;
-                    int64_t q_low = fwd
-                        ? qStart_a + (lo - tStart_a)
-                        : qStart_a + (qEnd_a - qStart_a - (hi - tStart_a));
-                    BlockCtx::BinKey k{ a.t_name, bi };
-                    BlockCtx::BinCov &c = cx.bins[k];
-                    if (fwd) {
-                        c.plus += covered;
-                        if (!c.plus_set || covered > c.plus_anchor_size) {
-                            c.plus_anchor_qStart = q_low;
-                            c.plus_anchor_size   = covered;
-                            c.plus_set           = true;
-                        }
-                    } else {
-                        c.minus += covered;
-                        if (!c.minus_set || covered > c.minus_anchor_size) {
-                            c.minus_anchor_qStart = q_low;
-                            c.minus_anchor_size   = covered;
-                            c.minus_set           = true;
-                        }
-                    }
-                }
-            }
-
-            // Emit per-bin.  Same logic as the deleted early bin path:
-            // sort qChroms by dominant-strand total bp desc, then emit
-            // until max_output_blocks; per bin take the dominant strand's
-            // largest-single-run anchor as the block geometry.
-            std::map<const char *, int64_t> qchrom_total;
-            for (auto &kv : cx.bins) {
-                int64_t dom = (kv.second.plus >= kv.second.minus)
-                                ? kv.second.plus : kv.second.minus;
-                qchrom_total[kv.first.qChrom] += dom;
-            }
-            std::vector<const BlockCtx::BinKey *> ordered;
-            ordered.reserve(cx.bins.size());
-            for (auto &kv : cx.bins) ordered.push_back(&kv.first);
-            std::sort(ordered.begin(), ordered.end(),
-                      [&](const BlockCtx::BinKey *a, const BlockCtx::BinKey *b) {
-                          int64_t ta = qchrom_total[a->qChrom];
-                          int64_t tb = qchrom_total[b->qChrom];
-                          if (ta != tb) return ta > tb;
-                          int cc = strcmp(a->qChrom, b->qChrom);
-                          if (cc != 0) return cc < 0;
-                          return a->bin_idx < b->bin_idx;
-                      });
-            struct taffy_block_t *head = nullptr, *tail = nullptr;
-            int64_t emitted = 0;
-            for (const BlockCtx::BinKey *kp : ordered) {
-                if (emitted >= H->max_output_blocks) break;
-                const BlockCtx::BinCov &c = cx.bins[*kp];
-                int dom_plus      = (c.plus >= c.minus);
-                int64_t anchor_q  = dom_plus ? c.plus_anchor_qStart : c.minus_anchor_qStart;
-                int64_t anchor_sz = dom_plus ? c.plus_anchor_size   : c.minus_anchor_size;
-                struct taffy_block_t *b = (struct taffy_block_t *) st_calloc(1, sizeof(*b));
-                b->qChrom = strdup(kp->qChrom);
-                b->tStart = cx.tStart_user + kp->bin_idx * cx.bin_size;
-                b->qStart = anchor_q;
-                b->size   = anchor_sz;
-                b->strand = dom_plus ? '+' : '-';
-                b->next   = nullptr;
-                if (!head) head = b;
-                if (tail) tail->next = b;
-                tail = b;
-                emitted++;
-            }
-            res->mappedBlocks = head;
-            free(chains);
-            return res;
-        }
-
-        // Few enough survivors to emit each as its own chain block --
-        // run the existing budget + routing path so per-aln blocks
-        // survive in their original geometry (no bin coarsening).
-        std::map<int64_t, int64_t> blocks_per_chain;
-        for (int64_t i = 0; i < n; i++) {
-            if (cx.alns[i].user != nullptr) blocks_per_chain[chain_id[i]]++;
-        }
-        int64_t primary_blocks = blocks_per_chain[primary_id];
+        // Keep EVERY overlap-frac survivor chain -- NO chain-count
+        // budget.  A by-score block budget collapses the output onto
+        // whichever chain has the most bp, which on a chromosome with a
+        // dense pericentromeric satellite (chr9 9q12, the acrocentrics,
+        // chr16) is that satellite -- it swallows the whole cap and the
+        // arms vanish.  Instead the cap is enforced POSITIONALLY in the
+        // emit step, so the budget spreads across [tStart, tEnd).
         kept_chains.insert(primary_id);
-        int64_t budget = H->max_output_blocks - primary_blocks;
         for (int64_t k = 0; k < n_chains; k++) {
             int64_t cid = chains[k].id;
-            if (cid == primary_id) continue;
-            if (!ovr_keep.empty() && !ovr_keep[cid]) continue;  // pass-1 drop
-            int64_t bc = blocks_per_chain[cid];
-            if (bc <= budget) {
-                kept_chains.insert(cid);
-                budget -= bc;
-            }
+            if (ovr_keep.empty() || ovr_keep[cid]) kept_chains.insert(cid);
         }
     }
 
-    // Walk alns (post-chain order) and route blocks per dupMode.  Each
-    // aln's `user` field is the taffy_block_t* we created in the
-    // visitor (or NULL if it was merged away by the pass above);
-    // chain_id[i] is its chain.  Alns whose chain isn't in kept_chains
-    // get their block freed and skipped (budget cap).
+    // Collect the kept candidate blocks (overlap-frac survivors, dupMode-
+    // filtered) into a flat vector; free the rest.  Then either emit them
+    // all at full detail (narrow query, count <= cap) or POSITIONALLY
+    // COARSEN to the cap (wide query) so the budget spreads across
+    // [tStart, tEnd) instead of piling onto the densest locus.
     struct taffy_block_t *mapped_head = nullptr, *mapped_tail = nullptr;
     int64_t mapped_count = 0;
+    // Output ceiling.  Coverage (wide/binned) output is capped at
+    // max_output_blocks (one per bin).  Detail (narrow) output emits every
+    // block in the window -- the window is span-bounded, so the count is
+    // bounded by the LOCAL alignment density, not the cap; a high backstop
+    // only guards a pathologically dense locus.  Capping detail at
+    // max_output_blocks instead would truncate (window-dependently) and
+    // re-introduce the very instability the span-based switch removes.
+    int64_t emit_cap = H->max_output_blocks;
     auto append_mapped = [&](struct taffy_block_t *b) {
-        // Hard cap: belt-and-suspenders for the budget set up above.
-        // Catches mapBackAdjacencies flanks that would push us past the
-        // cap (the budget pre-cull doesn't reserve flank slots).
-        if (mapped_count >= H->max_output_blocks) {
+        if (mapped_count >= emit_cap) {
             free(b->qChrom);
             free(b);
             return;
@@ -1200,56 +1114,286 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
     // For QUERY_AND_TARGET_DUPS: collect non-primary alns grouped by
     // chain_id so each non-primary chain becomes one dupe-list entry.
     std::map<int64_t, taffy_target_dupe_list_t *> dupe_by_chain;
+    // Per-qChrom chain summaries, populated only on the coarse path.
+    std::vector<TaffyChainInfo> coarse_summaries;
 
+    std::vector<struct taffy_block_t *> cand;
+    cand.reserve((size_t) n);
     for (int64_t i = 0; i < n; i++) {
-        struct taffy_block_t *b = (struct taffy_block_t *) cx.alns[i].user;
-        if (b == nullptr) continue;   // merged away by the post-chain pass
+        struct taffy_block_t *b = (struct taffy_block_t *) alns[i].user;
+        if (b == nullptr) continue;   // defensive (no L2 merge nulls user now)
         int64_t cid = chain_id[i];
-        bool is_primary = (cid == primary_id);
-
-        // Budget cap: chains we couldn't fit get silently dropped.
-        if (!kept_chains.count(cid)) {
+        if (!kept_chains.count(cid) ||
+            (dupMode == TAFFY_NO_DUPS && cid != primary_id)) {
             free(b->qChrom);
             free(b);
             continue;
         }
+        b->chainId = cid;   // browser groups blocks of a chain for snake-trace
+        cand.push_back(b);
+    }
 
-        if (dupMode == TAFFY_NO_DUPS && !is_primary) {
-            // Drop non-primary blocks entirely.
-            free(b->qChrom);
-            free(b);
-            continue;
-        }
-
-        // Stamp the chain id so the browser can group blocks of the
-        // same chain for snake-trace rendering.  Post-merge survivors
-        // inherit naturally (they carry the same cid via chain_id[i]).
-        b->chainId = cid;
-
-        // Always append to mappedBlocks under QUERY_DUPS / QUERY_AND_TARGET_DUPS.
-        append_mapped(b);
-
-        if (dupMode == TAFFY_QUERY_AND_TARGET_DUPS && !is_primary) {
-            // Also build a dupe-list entry for this non-primary chain.
-            auto it = dupe_by_chain.find(cid);
-            if (it == dupe_by_chain.end()) {
-                taffy_target_dupe_list_t *d = (taffy_target_dupe_list_t *)
-                    st_calloc(1, sizeof(*d));
-                d->id     = cid;
-                d->qChrom = strdup(b->qChrom);  // own a copy; mappedBlocks owns its own
-                d->tRange = nullptr;
-                dupe_by_chain[cid] = d;
-                it = dupe_by_chain.find(cid);
+    // Within each chain, fold redundant nested/overlapping blocks into
+    // one tile.  The g1000 index emits the SAME diagonal at two
+    // granularities -- a merged big block plus the fine ungapped fragments
+    // nested inside it -- and a snake renderer then loops from the big
+    // block's edge back to each nested sliver (a jarring fake
+    // "rearrangement").  Two blocks are merged ONLY when they overlap on
+    // BOTH the reference AND the query axis (i.e. they're the same diagonal
+    // region, redundant).  Blocks that merely abut on the reference axis
+    // but step on the query axis are DIFFERENT alignments (a real indel /
+    // dup boundary) and stay separate, as do real gaps -- so genuine fine
+    // structure survives; only redundant nesting collapses.
+    std::sort(cand.begin(), cand.end(),
+              [](const struct taffy_block_t *a, const struct taffy_block_t *b) {
+                  if (a->chainId != b->chainId) return a->chainId < b->chainId;
+                  return a->tStart < b->tStart;
+              });
+    {
+        std::vector<struct taffy_block_t *> merged;
+        merged.reserve(cand.size());
+        for (struct taffy_block_t *b : cand) {
+            struct taffy_block_t *last = merged.empty() ? nullptr : merged.back();
+            bool do_merge = false;
+            if (last && last->chainId == b->chainId) {
+                int64_t l_te = last->tStart + last->size, b_te = b->tStart + b->size;
+                int64_t l_qe = last->qStart + last->size, b_qe = b->qStart + b->size;
+                bool ref_ov = b->tStart < l_te && last->tStart < b_te;
+                bool q_ov   = b->qStart < l_qe && last->qStart < b_qe;
+                do_merge = ref_ov && q_ov;     // overlap on BOTH axes
             }
-            // Append tRange node (in source-coord order; aln list is
-            // already q_start-sorted within the chain by the sweep).
-            taffy_target_range_t *r = (taffy_target_range_t *)
-                st_calloc(1, sizeof(*r));
-            r->tStart = b->tStart;
-            r->size   = b->size;
-            r->next   = it->second->tRange;   // prepend (we'll reverse below if needed)
-            it->second->tRange = r;
+            if (do_merge) {
+                int64_t last_end = last->tStart + last->size;
+                int64_t b_end    = b->tStart + b->size;
+                int64_t new_end  = b_end > last_end ? b_end : last_end;
+                // '-' strand: qStart is the LOW query coord, held by the
+                // block with the highest tStart, so it can only shrink.
+                if (last->strand == '-' && b->qStart < last->qStart)
+                    last->qStart = b->qStart;
+                last->size = new_end - last->tStart;
+                free(b->qChrom);
+                free(b);
+            } else {
+                merged.push_back(b);
+            }
         }
+        cand.swap(merged);
+    }
+
+    // De-duplicate the residual redundant layer: drop any block whose
+    // reference interval is fully contained in a LARGER block of the same
+    // chain.  The big (merged) block already represents that reference
+    // span; the nested fragment -- whether on the same diagonal or a few
+    // bp off it -- is the second granularity that makes the snake loop
+    // back.  Removing it leaves one consistent granularity per query with
+    // NO size/pixel threshold, and coverage is unchanged (the container
+    // covers the span).  Re-sort largest-first within (chain, tStart) so a
+    // container is always seen before the blocks it contains.
+    std::sort(cand.begin(), cand.end(),
+              [](const struct taffy_block_t *a, const struct taffy_block_t *b) {
+                  if (a->chainId != b->chainId) return a->chainId < b->chainId;
+                  if (a->tStart  != b->tStart)  return a->tStart  < b->tStart;
+                  return a->size > b->size;
+              });
+    {
+        std::vector<struct taffy_block_t *> tiled;
+        tiled.reserve(cand.size());
+        int64_t cur_chain = -1, max_end = 0;
+        for (struct taffy_block_t *b : cand) {
+            int64_t b_end = b->tStart + b->size;
+            if (b->chainId == cur_chain) {
+                if (b_end <= max_end) {            // reference-contained -> redundant
+                    free(b->qChrom);
+                    free(b);
+                    continue;
+                }
+                if (b_end > max_end) max_end = b_end;
+            } else {
+                cur_chain = b->chainId;
+                max_end   = b_end;
+            }
+            tiled.push_back(b);
+        }
+        cand.swap(tiled);
+    }
+
+    // Trim the residual partial overlaps so adjacent blocks within a chain
+    // ABUT instead of sharing a few reference bases.  A snake leveler's
+    // rule is binary -- a block whose target-start falls before the
+    // running edge of an earlier block on its row gets bumped to a new
+    // row, no matter how small the overlap or how big the block -- so a
+    // 47 bp overlap can exile an entire 49 kb block to row 2.  The shared
+    // bases are the chainer extending two blocks (flanking a small query
+    // insertion) into the same reference; we keep them on the EARLIER
+    // block and clip the later block's start up to the running edge.
+    // cand is already in (chainId, tStart) order from the de-dup sort, and
+    // post-de-dup every block extends past the edge, so the clip is always
+    // a proper sub-trim (d < size).
+    {
+        int64_t cur_chain = -1, edge = 0;
+        for (struct taffy_block_t *b : cand) {
+            if (b->chainId != cur_chain) {
+                cur_chain = b->chainId;
+                edge = b->tStart + b->size;
+                continue;
+            }
+            if (b->tStart < edge) {
+                int64_t d = edge - b->tStart;        // shared reference bp
+                if (d < b->size) {
+                    b->tStart += d;
+                    b->size   -= d;
+                    if (b->strand == '+') b->qStart += d;  // '-' keeps qStart
+                }
+            }
+            int64_t b_end = b->tStart + b->size;
+            if (b_end > edge) edge = b_end;
+        }
+    }
+
+    // Coarsen by ZOOM, not by how many blocks landed in the window: bin
+    // iff the per-block budget would make each block span >= a coverage
+    // bin.  This is panning-stable (a fixed locus renders the same at the
+    // same zoom).  Detail output then emits EVERY block (span-bounded
+    // count), so raise its ceiling off max_output_blocks.
+    int64_t coarse_cap = H->max_output_blocks > 0 ? H->max_output_blocks : 1;
+    bool coarsened = ((int64_t)(tEnd - tStart) / coarse_cap) >= BLOCK_MIN_COARSE_BIN;
+    if (!coarsened) emit_cap = 1000000;     // detail: emit all (high backstop)
+    if (!coarsened) {
+        // Narrow query: emit every candidate at full detail, plus (for
+        // QUERY_AND_TARGET_DUPS) the per-dupe-chain tRange lists.
+        for (struct taffy_block_t *b : cand) {
+            bool is_primary = (b->chainId == primary_id);
+            // Build the dupe-list entry BEFORE append_mapped(b): at the
+            // emit_cap backstop append_mapped frees b, so b->chainId /
+            // qChrom / tStart / size must be read first.  append_mapped(b)
+            // must be the LAST use of b.
+            if (dupMode == TAFFY_QUERY_AND_TARGET_DUPS && !is_primary) {
+                auto it = dupe_by_chain.find(b->chainId);
+                if (it == dupe_by_chain.end()) {
+                    taffy_target_dupe_list_t *d = (taffy_target_dupe_list_t *)
+                        st_calloc(1, sizeof(*d));
+                    d->id     = b->chainId;
+                    d->qChrom = strdup(b->qChrom);
+                    d->tRange = nullptr;
+                    dupe_by_chain[b->chainId] = d;
+                    it = dupe_by_chain.find(b->chainId);
+                }
+                taffy_target_range_t *r = (taffy_target_range_t *)
+                    st_calloc(1, sizeof(*r));
+                r->tStart = b->tStart;
+                r->size   = b->size;
+                r->next   = it->second->tRange;
+                it->second->tRange = r;
+            }
+            append_mapped(b);
+        }
+    } else {
+        // Wide query: bin [tStart, tEnd) into max_output_blocks bins, take
+        // ONE coverage block per occupied bin (the bin's dominant/largest
+        // block, sized to that bin's aligned coverage so it stays visible
+        // at chromosome zoom and anchored on a real diagonal), then GROUP
+        // those per-bin blocks BY DIAGONAL with the same collinear rule the
+        // narrow path uses.  Grouping by diagonal -- not by qChrom -- keeps
+        // a chromosome's orthologous backbone as one clean diagonal per arm
+        // and gives each paralog copy (a different diagonal that dominates
+        // some bins) its OWN row, instead of every copy of a qChrom winding
+        // through a single row.  Per-dupe / mapBack detail is dropped here.
+        int64_t span     = (int64_t) tEnd - (int64_t) tStart;
+        int64_t cap      = H->max_output_blocks;
+        int64_t bin_size = (span + cap - 1) / cap;
+        if (bin_size < 1) bin_size = 1;
+        struct BinAgg { struct taffy_block_t *dom; int64_t cov; };
+        std::map<int64_t, BinAgg> bins;
+        for (struct taffy_block_t *b : cand) {
+            // Bin index is ABSOLUTE (b->tStart / bin_size), not relative to
+            // the query start -- so a locus lands in the same bin no matter
+            // where the window's edge is, keeping the coverage view stable
+            // as you pan a fixed zoom (bin_size is fixed by the span).
+            int64_t bin = b->tStart / bin_size;
+            auto it = bins.find(bin);
+            if (it == bins.end()) {
+                BinAgg g; g.dom = b; g.cov = b->size; bins[bin] = g;
+            } else {
+                it->second.cov += b->size;
+                if (b->size > it->second.dom->size) it->second.dom = b;
+            }
+        }
+        // Materialize one coverage block per occupied bin (chainId TBD).
+        std::vector<struct taffy_block_t *> coarse;
+        coarse.reserve(bins.size());
+        for (auto &kv : bins) {
+            struct taffy_block_t *dom = kv.second.dom;
+            int64_t sz = kv.second.cov < bin_size ? kv.second.cov : bin_size;
+            if (sz < dom->size) sz = dom->size;
+            struct taffy_block_t *nb = (struct taffy_block_t *) st_calloc(1, sizeof(*nb));
+            nb->qChrom  = strdup(dom->qChrom);
+            nb->tStart  = dom->tStart;
+            nb->qStart  = dom->qStart;
+            nb->size    = sz;
+            nb->strand  = dom->strand;
+            nb->chainId = 0;
+            coarse.push_back(nb);
+        }
+        for (struct taffy_block_t *b : cand) { free(b->qChrom); free(b); }
+
+        // Emit every coverage bin.  Absolute binning over [tStart,tEnd) can
+        // yield cap+1 occupied bins; each is counted into coarse_summaries
+        // below, so the emit ceiling must cover them all -- otherwise the
+        // last bin's block is dropped by append_mapped while its summary
+        // survives (an orphan chainSummary + a silently lost bin).  Bounded:
+        // coarse.size() <= max_output_blocks + 1.
+        emit_cap = (int64_t) coarse.size();
+
+        // Diagonal grouping: sort by (qChrom, strand, tStart), then chain
+        // consecutive bins that stay on one diagonal.  dd here is exactly
+        // the offset (qStart-tStart) jump between adjacent bins, so a
+        // paralog copy or the centromere step breaks to a new chain while
+        // the backbone (slow drift) stays one chain.  Bins are bin_size bp
+        // apart, so allow that much reference/query gap.
+        std::sort(coarse.begin(), coarse.end(),
+                  [](const struct taffy_block_t *a, const struct taffy_block_t *b) {
+                      int c = strcmp(a->qChrom ? a->qChrom : "", b->qChrom ? b->qChrom : "");
+                      if (c != 0) return c < 0;
+                      if (a->strand != b->strand) return a->strand < b->strand;
+                      return a->tStart < b->tStart;
+                  });
+        int64_t cc_gap = bin_size > BLOCK_L2_MAX_GAP ? bin_size : BLOCK_L2_MAX_GAP;
+        // Per-bin offset drift along ONE diagonal can reach bin scale (a
+        // single bin may hide a multi-kb indel), so allow that much dd --
+        // still orders of magnitude below the Mb+ jump to a paralog copy.
+        int64_t cc_tol = bin_size > BLOCK_L2_COLLINEAR_TOL ? bin_size : BLOCK_L2_COLLINEAR_TOL;
+        int64_t cc_n = 0;
+        std::map<int64_t, TaffyChainInfo> cc_agg;
+        for (size_t i = 0; i < coarse.size(); i++) {
+            bool extend = false;
+            if (i > 0) {
+                struct taffy_block_t *A = coarse[i - 1];
+                struct taffy_block_t *B = coarse[i];
+                if (A->strand == B->strand &&
+                    strcmp(A->qChrom ? A->qChrom : "", B->qChrom ? B->qChrom : "") == 0) {
+                    int64_t t_gap = B->tStart - (A->tStart + A->size);
+                    int64_t q_gap = (A->strand == '+')
+                                  ? (B->qStart - (A->qStart + A->size))
+                                  : (A->qStart - (B->qStart + B->size));
+                    int64_t at = t_gap < 0 ? -t_gap : t_gap;
+                    int64_t aq = q_gap < 0 ? -q_gap : q_gap;
+                    int64_t dd = (t_gap - q_gap) < 0 ? (q_gap - t_gap) : (t_gap - q_gap);
+                    if (at <= cc_gap && aq <= cc_gap && dd <= cc_tol)
+                        extend = true;
+                }
+            }
+            if (!extend) {
+                cc_n++;
+                TaffyChainInfo ci; ci.id = cc_n; ci.total_score = 0;
+                ci.total_bp = 0; ci.n_alns = 0; cc_agg[cc_n] = ci;
+            }
+            coarse[i]->chainId = cc_n;
+            cc_agg[cc_n].total_bp    += coarse[i]->size;
+            cc_agg[cc_n].total_score += coarse[i]->size;
+            cc_agg[cc_n].n_alns      += 1;
+            append_mapped(coarse[i]);
+        }
+        for (auto &kv : cc_agg) coarse_summaries.push_back(kv.second);
     }
 
     // ---- mapBackAdjacencies ---------------------------------------------
@@ -1258,8 +1402,10 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
     // to a tSpecies region OUTSIDE [tStart, tEnd) on tChrom.  Matches
     // HAL's mapAdjacencies (halBlockMapper.cpp::mapAdjacencies) but at
     // chain granularity (one flank per side per chain) rather than per
-    // mapped segment -- a chain is the snake-track unit.
-    if (mapBackAdjacencies) {
+    // mapped segment -- a chain is the snake-track unit.  Skipped when the
+    // output was positionally coarsened (the per-chain edge geometry the
+    // flank scan needs no longer matches the emitted blocks).
+    if (mapBackAdjacencies && !coarsened) {
         TuiGenomeLift *gl_t = get_or_load_gl(H, tSpecies, errStr);
         if (gl_t) {
             // Span per (chain_id, qChrom): min q_start aln-index and max
@@ -1285,12 +1431,12 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
                     ChainEdge e;
                     e.left_idx  = i;
                     e.right_idx = i;
-                    e.qChrom    = cx.alns[i].t_name;
+                    e.qChrom    = alns[i].t_name;
                     edges[cid] = e;
                 } else {
-                    if (cx.alns[i].q_start < cx.alns[it->second.left_idx].q_start)
+                    if (alns[i].q_start < alns[it->second.left_idx].q_start)
                         it->second.left_idx = i;
-                    if (cx.alns[i].q_end > cx.alns[it->second.right_idx].q_end)
+                    if (alns[i].q_end > alns[it->second.right_idx].q_end)
                         it->second.right_idx = i;
                 }
             }
@@ -1315,8 +1461,8 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
                     }
                     return lo;
                 };
-                int64_t left_qStart  = cx.alns[E.left_idx].t_start;
-                int64_t right_qEnd   = cx.alns[E.right_idx].t_end;
+                int64_t left_qStart  = alns[E.left_idx].t_start;
+                int64_t right_qEnd   = alns[E.right_idx].t_end;
                 int64_t left_idx_runs  = bsearch_t_start(left_qStart);
                 int64_t right_idx_runs = bsearch_t_start(right_qEnd) - 1;
                 if (right_idx_runs < 0) right_idx_runs = 0;
@@ -1348,27 +1494,40 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
     res->mappedBlocks     = mapped_head;
     res->targetDupeBlocks = dupe_head;
 
-    // Build chainSummaries: one entry per kept chain, score-desc order
-    // (chains[] is already sorted that way by taffy_chain).  Includes
-    // the primary chain (kept_chains is built primary-first) so the
-    // primary's id+score becomes browser-visible for the first time.
+    // Build chainSummaries, score-desc.  Coarse path: one per query
+    // chromosome (the per-qChrom groups built above).  Detail path: one
+    // per real chain that actually appears in mappedBlocks (not merely
+    // kept_chains).
     struct taffy_chain_summary_t *cs_head = nullptr, *cs_tail = nullptr;
-    for (int64_t k = 0; k < n_chains; k++) {
-        if (!kept_chains.count(chains[k].id)) continue;
+    auto push_summary = [&](int64_t id, int64_t score, int64_t bp, int64_t na) {
         struct taffy_chain_summary_t *cs = (struct taffy_chain_summary_t *)
             st_calloc(1, sizeof(*cs));
-        cs->id         = chains[k].id;
-        cs->totalScore = chains[k].total_score;
-        cs->totalBp    = chains[k].total_bp;
-        cs->nAlns      = chains[k].n_alns;
-        cs->next       = nullptr;
+        cs->id = id; cs->totalScore = score; cs->totalBp = bp; cs->nAlns = na;
+        cs->next = nullptr;
         if (!cs_head) cs_head = cs;
         if (cs_tail) cs_tail->next = cs;
         cs_tail = cs;
+    };
+    if (coarsened) {
+        std::sort(coarse_summaries.begin(), coarse_summaries.end(),
+                  [](const TaffyChainInfo &a, const TaffyChainInfo &b) {
+                      if (a.total_score != b.total_score) return a.total_score > b.total_score;
+                      return a.id < b.id;
+                  });
+        for (const TaffyChainInfo &ci : coarse_summaries)
+            push_summary(ci.id, ci.total_score, ci.total_bp, ci.n_alns);
+    } else {
+        std::set<int64_t> emitted_chains;
+        for (struct taffy_block_t *b = mapped_head; b; b = b->next)
+            if (b->chainId != 0) emitted_chains.insert(b->chainId);
+        for (int64_t k = 0; k < n_chains; k++) {
+            if (!emitted_chains.count(chains[k].id)) continue;
+            push_summary(chains[k].id, chains[k].total_score,
+                         chains[k].total_bp, chains[k].n_alns);
+        }
     }
     res->chainSummaries = cs_head;
 
-    free(chains);
     return res;
 }
 

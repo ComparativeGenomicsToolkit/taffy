@@ -152,13 +152,17 @@ static void test_chain_params_invalid_handle(CuTest *tc) {
 
 /* --- chain_overlap_frac setter/getter ----------------------------- */
 
-static void test_chain_overlap_frac_default_is_zero(CuTest *tc) {
+static void test_chain_overlap_frac_default_is_half(CuTest *tc) {
     char *err = NULL;
     int h = taffyOpen(TEST_TUI, &err);
     if (h < 0) { free(err); return; }
     double f = -999.0;
     CuAssertIntEquals(tc, 0, taffyGetChainOverlapFrac(h, &f, &err));
-    CuAssertTrue(tc, f == 0.0);   /* strict paralogy filter by default */
+    /* Default 0.5: strict 0.0 drops a whole chain on ANY overlap, which
+     * culls ~17% of real ortholog coverage on the fragmented universal
+     * .tui; 0.5 keeps coverage while still filtering >50%-redundant
+     * paralogs. */
+    CuAssertTrue(tc, f == 0.5);
     taffyClose(h, &err); free(err);
 }
 
@@ -336,10 +340,10 @@ static void test_max_output_blocks_setter(CuTest *tc) {
     int h = taffyOpen(TEST_TUI, &err);
     if (h < 0) { free(err); return; }
 
-    /* Default cap is 500. */
+    /* Default cap is 1000. */
     int64_t cap = 0;
     CuAssertIntEquals(tc, 0, taffyGetMaxOutputBlocks(h, &cap, &err));
-    CuAssertTrue(tc, cap == 500);
+    CuAssertTrue(tc, cap == 1000);
 
     /* Set + roundtrip. */
     CuAssertIntEquals(tc, 0, taffySetMaxOutputBlocks(h, 47, &err));
@@ -380,14 +384,20 @@ static void test_max_output_blocks_setter(CuTest *tc) {
     free(err);
 }
 
-/* Output-cap invariant: every dupMode must yield mappedBlocks <= 500.
- * Tests the budget logic by including paralogs (which on a small
- * fixture won't actually exceed the cap, but the assertion is the
- * contract -- larger fixtures would exercise the truncation). */
+/* Output-budget invariant: the COVERAGE (coarsened, wide-zoom) path emits
+ * at most max_output_blocks+1 blocks -- one per occupied bin (+1 boundary).
+ * Detail (narrow) output is deliberately NOT budget-bounded: it emits every
+ * block in the span so a fixed locus renders identically regardless of the
+ * window edges (the span, not the cap, bounds the count).  So we force the
+ * coverage path with a small budget over the full chromosome (601 kb / 50 =
+ * ~12 kb per bin, above the coarsen threshold) and assert the bin bound. */
 static void test_get_blocks_respects_output_cap(CuTest *tc) {
     char *err = NULL;
     int h = taffyOpen(TEST_TUI, &err);
     if (h < 0) { free(err); return; }
+
+    int64_t cap = 50;
+    CuAssertIntEquals(tc, 0, taffySetMaxOutputBlocks(h, cap, &err));
 
     taffy_dup_type_t modes[] = {
         TAFFY_NO_DUPS, TAFFY_QUERY_DUPS, TAFFY_QUERY_AND_TARGET_DUPS
@@ -399,9 +409,7 @@ static void test_get_blocks_respects_output_cap(CuTest *tc) {
         CuAssertPtrNotNull(tc, res);
         int64_t n = 0;
         for (struct taffy_block_t *b = res->mappedBlocks; b; b = b->next) n++;
-        /* Hard cap is 500.  Asserting that contract here regardless of
-         * the fixture's natural block count. */
-        CuAssertTrue(tc, n <= 500);
+        CuAssertTrue(tc, n <= cap + 1);
         taffyFreeBlockResults(res);
     }
 
@@ -522,6 +530,47 @@ static void test_strand_revcase_all_chains_correct(CuTest *tc) {
     free(err);
 }
 
+/* Regression: panning a fixed zoom must not change a locus's rendering.
+ * The coarsen switch is span-based (a zoom property), NOT block-count-based,
+ * and coverage bins are absolute-aligned -- so two windows of the SAME span
+ * covering a shared interior locus return byte-identical coverage blocks for
+ * that locus, no matter where the window edges fall.  The old count-based
+ * switch flipped detail<->coverage as a window's total block count crossed
+ * the cap while panning across a dense locus, making dupe bars blink. */
+static void test_window_stability_coarse(CuTest *tc) {
+    char *err = NULL;
+    int h = taffyOpen(TEST_TUI, &err);
+    if (h < 0) { free(err); return; }
+    CuAssertIntEquals(tc, 0, taffySetMaxOutputBlocks(h, 20, &err)); /* force coverage */
+
+    /* Two 400 kb windows sharing the interior [120k,360k]; their coverage
+     * blocks for that interior must be identical (chainId is per-window and
+     * intentionally excluded -- only the geometry must be stable). */
+    int64_t start[2] = { 0, 80000 };
+    char buf[2][16384];
+    for (int w = 0; w < 2; w++) {
+        struct taffy_block_results_t *res = taffyGetBlocksInTargetRange(
+            h, "simMouse_chr6", "simHuman_chr6", "simHuman.chr6",
+            start[w], start[w] + 400000, 0, TAFFY_NO_SEQUENCES,
+            TAFFY_QUERY_AND_TARGET_DUPS, 0, NULL, &err);
+        CuAssertPtrNotNull(tc, res);
+        size_t off = 0;
+        buf[w][0] = '\0';
+        for (struct taffy_block_t *b = res->mappedBlocks; b; b = b->next)
+            if (b->tStart >= 120000 && b->tStart < 360000 &&
+                off < sizeof(buf[w]) - 64)
+                off += (size_t) snprintf(buf[w] + off, sizeof(buf[w]) - off,
+                    "%ld,%ld,%ld,%c;", (long) b->tStart, (long) b->qStart,
+                    (long) b->size, b->strand);
+        taffyFreeBlockResults(res);
+    }
+    CuAssertTrue(tc, buf[0][0] != '\0');       /* the locus is actually covered */
+    CuAssertStrEquals(tc, buf[0], buf[1]);     /* identical => panning-stable */
+
+    taffyClose(h, &err);
+    free(err);
+}
+
 /* ------------------------------------------------------------------ */
 /* Suite                                                               */
 /* ------------------------------------------------------------------ */
@@ -537,13 +586,14 @@ CuSuite* blockviz_test_suite(void) {
     SUITE_ADD_TEST(suite, test_chain_params_rejects_negative);
     SUITE_ADD_TEST(suite, test_chain_params_null_outputs_ok);
     SUITE_ADD_TEST(suite, test_chain_params_invalid_handle);
-    SUITE_ADD_TEST(suite, test_chain_overlap_frac_default_is_zero);
+    SUITE_ADD_TEST(suite, test_chain_overlap_frac_default_is_half);
     SUITE_ADD_TEST(suite, test_chain_overlap_frac_roundtrip);
     SUITE_ADD_TEST(suite, test_chain_overlap_frac_rejects_out_of_range);
     SUITE_ADD_TEST(suite, test_chain_overlap_frac_invalid_handle);
     SUITE_ADD_TEST(suite, test_get_blocks_narrow_per_run);
     SUITE_ADD_TEST(suite, test_get_blocks_full_chrom_merged);
     SUITE_ADD_TEST(suite, test_get_blocks_respects_output_cap);
+    SUITE_ADD_TEST(suite, test_window_stability_coarse);
     SUITE_ADD_TEST(suite, test_max_output_blocks_setter);
     SUITE_ADD_TEST(suite, test_chain_id_and_summaries);
     SUITE_ADD_TEST(suite, test_strand_iv_rev_xor_run_strand);

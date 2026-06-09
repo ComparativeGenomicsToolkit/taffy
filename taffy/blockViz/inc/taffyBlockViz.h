@@ -66,15 +66,12 @@ struct taffy_target_dupe_list_t {
     char *qChrom;
 };
 
-/** Per-chain summary returned alongside the block lists.  One entry
- * per chain that survived the budget cull (primary chain is always
- * included; non-primary chains follow in score-descending order).
- * Use the id field to look up which mappedBlocks (via taffy_block_t.
- * chainId) belong to this chain.  bp is the chain's total covered bp;
- * total_score is the chain's chain.c score (sum aln scores - gap
- * costs); nAlns is the chain's aln count BEFORE post-chain merge --
- * useful for browser stats but doesn't equal the emitted block count.
- * NULL when no chain pass ran (bin mode). */
+/** Per-chain summary returned alongside the block lists.  One entry per
+ * chainId that appears in mappedBlocks, in score-descending order.  Use
+ * the id field to look up which mappedBlocks (via taffy_block_t.chainId)
+ * belong to this chain.  totalBp is the chain's covered bp; totalScore
+ * is its score; nAlns is its aln count.  Coverage (wide) queries report
+ * one entry per query chromosome (matching the per-qChrom chainIds). */
 struct taffy_chain_summary_t {
     struct taffy_chain_summary_t *next;
     taffy_int_t id;
@@ -88,7 +85,7 @@ struct taffy_chain_summary_t {
 struct taffy_block_results_t {
     struct taffy_block_t *mappedBlocks;
     struct taffy_target_dupe_list_t *targetDupeBlocks;
-    struct taffy_chain_summary_t *chainSummaries;   /* score-desc; primary first; NULL in bin mode */
+    struct taffy_chain_summary_t *chainSummaries;   /* score-desc; one per emitted chainId */
 };
 
 /** One contiguous aligned block (one gap-free run of qChrom that
@@ -102,16 +99,21 @@ struct taffy_block_t {
     taffy_int_t qStart;
     taffy_int_t size;
     char strand;                /* '+' or '-' */
-    /* Opaque group id for the taffy_chain partition this block belongs
-     * to.  Blocks of the same chain share chainId.  Stable WITHIN one
-     * taffyGetBlocksInTargetRange result; NOT stable across queries
-     * (chain.c assigns 1-based monotonic ids in qsort order).  Use this
-     * to group mappedBlocks for snake-trace rendering instead of
-     * inferring adjacency from qChrom+strand+tStart (which collides on
-     * paralog chains sharing qChrom+strand).  Matches the id field of
-     * taffy_target_dupe_list_t for non-primary chains; the primary
-     * chain's id has no separate surface today (see chainSummaries).
-     * 0 for bin-mode output (one block per coverage bin, no chain).
+    /* Opaque, always-positive (1-based) group id for snake-trace
+     * rendering: blocks of the same chainId form one snake.  Stable
+     * WITHIN one taffyGetBlocksInTargetRange result; NOT stable across
+     * queries.  Use it instead of inferring adjacency from
+     * qChrom+strand+tStart (which collides on paralog chains sharing
+     * qChrom+strand).
+     *   - Detail (narrow) queries: one id per real alignment chain (an
+     *     orthologous arm is one id; off-diagonal paralogs get their own).
+     *   - Coverage (wide) queries that hit the positional-coarsen path:
+     *     one id PER DIAGONAL -- the per-bin coverage blocks are grouped by
+     *     the same collinear rule as detail, so an orthologous arm is one
+     *     row and each paralog copy (a different diagonal that dominates
+     *     some bins) gets its own, instead of every copy of a qChrom
+     *     winding through a single per-chromosome row.
+     * chainSummaries carries the matching id->score/bp entries either way.
      */
     taffy_int_t chainId;
     char *qSequence;            /* query DNA, NULL unless seqMode != NO_SEQUENCES */
@@ -233,13 +235,17 @@ int taffyGetChainParams(int taffyHandle,
                         int64_t *max_gap_length,
                         char **errStr);
 
-/** Per-query hard cap on mappedBlocks linked-list length.  Default 500
- * (browser-conservative; sits well under HAL's halSnakeTrack.c
- * NUM_LEVELS=1000).  Raise if you have a renderer with more headroom
- * or are rendering coverage tracks where block count doesn't map to a
- * level array.  Primary chain is always kept in full; dupes and bin
- * cells get silently truncated when the cap is hit.  Must be >= 1
- * (smaller values are rejected with errStr set).
+/** Coverage budget: the number of bins the wide-zoom (coarsened) path
+ * tiles the query into, so coverage output is bounded at ~this many blocks
+ * (one per occupied bin).  Default 1000 (= HAL's halSnakeTrack.c
+ * NUM_LEVELS).  The detail (narrow) path is deliberately NOT bounded by
+ * this: it emits EVERY block in the span, so a fixed locus renders
+ * identically regardless of where the window edges fall (panning-stable) --
+ * the span itself bounds the count.  The detail<->coverage switch is
+ * span-based: coverage kicks in when (span / this) exceeds a coverage-bin
+ * width (~10 kb), i.e. at chromosome-scale zoom, NOT when a window happens
+ * to contain many blocks.  Lower it for a coarser overview, raise it for a
+ * finer coverage tiling.  Must be >= 1 (rejected with errStr set otherwise).
  *
  * Returns 0 on success, -1 on invalid handle or invalid n. */
 int taffySetMaxOutputBlocks(int taffyHandle, int64_t n, char **errStr);
@@ -256,13 +262,19 @@ int taffyGetMaxOutputBlocks(int taffyHandle, int64_t *n, char **errStr);
  * fraction of the candidate chain's own q-bp.
  *
  * Semantics:
- *   frac = 0.0   (DEFAULT)   strict: drop on ANY q-overlap with a kept
- *                            chain.  Primary chain always survives;
- *                            true paralogs of it at the same queried
- *                            bp get filtered out; inversions and
+ *   frac = 0.5   (DEFAULT)   balanced: drop a chain only when >50% of
+ *                            its q-coverage is redundant with a kept
+ *                            chain.  Filters true paralogs while keeping
+ *                            real ortholog coverage; inversions and
  *                            disjoint-q chains stay regardless of strand.
- *   frac in (0,1]            relaxed: accept chains overlapping up to
- *                            this fraction of their own q-bp.
+ *   frac = 0.0               strict: drop on ANY q-overlap.  WRONG for
+ *                            the universal .tui -- the alignment is split
+ *                            into many chains with tiny boundary
+ *                            overlaps, so this culls ~17% of real
+ *                            ortholog coverage (e.g. hs1->hg38).  Use
+ *                            only on a pre-merged / unfragmented source.
+ *   frac in (0,1]            accept chains overlapping up to this
+ *                            fraction of their own q-bp.
  *   frac = -1.0              disable the filter entirely (browser sees
  *                            every chain, modulo the max_output_blocks
  *                            budget).
@@ -294,43 +306,33 @@ void taffyFreeMetadataList(struct taffy_metadata_t *metadata);
 /** Return blocks of `qSpecies` aligned within `tChrom`:[tStart, tEnd)
  * on `tSpecies`.  Output is a linked list of taffy_block_t.
  *
- * HARD OUTPUT CAP: mappedBlocks length is bounded at 500 in every
- * regime below.  Browser snake-track renderers (HAL's halSnakeTrack.c
- * NUM_LEVELS=1000) stay well clear of their limit.  Drops are silent.
+ * Two regimes, chosen by ZOOM (query span), NOT by block count -- so a
+ * fixed locus renders identically as you pan a fixed zoom (no blinking):
+ *   - DETAIL (narrow span): every aligned block is returned at full
+ *     resolution; bounded by local alignment density, not max_output_blocks.
+ *   - COVERAGE (wide span, once span/max_output_blocks exceeds a ~10 kb
+ *     bin): the span is tiled into <= max_output_blocks absolute-aligned
+ *     bins, one coverage block per occupied bin; per-dupe detail is
+ *     dropped.  For very wide overviews a coarsened LOD .tui is cheaper.
  *
- * Two output regimes:
+ * Pipeline:
+ *   1. The tSpecies range is mapped to universal-column intervals; for
+ *      each, the qSpecies runs are visited and chained + collinear-merged
+ *      in windows (cheap, bounded memory) into merged blocks.
+ *   2. Blocks are grouped into chains by collinearity (one diagonal per
+ *      chain); the overlap-frac paralogy filter (taffySetChainOverlapFrac,
+ *      default 0.5) drops chains mostly redundant with a higher-scoring
+ *      kept chain.
+ *   3. Within each chain, redundant nested fragments are merged/dropped and
+ *      partial overlaps trimmed so blocks tile the reference WITHOUT
+ *      overlapping -- a snake renderer then has no fake loop-backs.
+ *   4. Detail emits every surviving block; coverage bins them (grouping
+ *      bins per diagonal).  Each taffy_block_t carries a real
+ *      (tStart, qStart, size, strand) and a chainId; routing follows dupMode.
  *
- * 1. Per-run + chain merge (default; spans < 5 Mb).  Visited runs go
- *    through taffy_chain, then adjacent collinear alns within a chain
- *    are merged into one taffy_block_t.  Primary chain is always kept
- *    in full; non-primary (dupe) chains are added in score-descending
- *    order until the 500-block budget is exhausted.  Lower-score dupes
- *    are silently dropped.
- *
- *    Implication for snake-track callers: at paralog-rich queries
- *    (segdup hotspots in apes etc.) you'll see the top-scoring dupes
- *    and a deterministic truncation of the rest.  If you want strict
- *    primary-only output, pass dupMode = TAFFY_NO_DUPS.
- *
- * 2. Auto-binning (spans >= 5 Mb).  When (tEnd - tStart) / 500 >=
- *    10 kb, the implementation switches to a bin accumulator instead
- *    of per-run blocks.  Each output block represents coverage of one
- *    (qChrom, strand, bin) cell:
- *      - block.tStart  = bin start on tChrom (bin_size = span/500)
- *      - block.size    = total bp covered by mapped runs landing in
- *                        this bin from `qChrom` on `strand` (may
- *                        exceed bin_size when source paralogs map to
- *                        the same target region -- coverage signal)
- *      - block.qStart  = synthetic monotone surrogate (bin_idx *
- *                        bin_size, NOT a real qSpecies coord)
- *      - block.strand  = '+' or '-' of the contributing runs
- *    Bin mode skips the chain pass and mapBackAdjacencies (those
- *    don't apply to aggregated coverage); targetDupeBlocks is always
- *    NULL in bin mode.  Output is hard-capped at 500 blocks; if the
- *    bin accumulator has more entries, the tail (by std::map key
- *    order = sorted qChrom name, strand, bin index) is silently
- *    dropped.  Targets coverage-histogram rendering, not snake;
- *    render accordingly.
+ * Implication for snake-track callers: at paralog-rich detail queries
+ * (segdup hotspots) you'll see all the paralog dupes; pass
+ * dupMode = TAFFY_NO_DUPS for primary-only.
  *
  * @param taffyHandle      handle from taffyOpen
  * @param qSpecies         genome to fetch blocks FROM
