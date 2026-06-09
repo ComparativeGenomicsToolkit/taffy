@@ -74,9 +74,12 @@ typedef struct _ChainNode {
 
 static int intcmp(int64_t a, int64_t b) { return a > b ? 1 : (a < b ? -1 : 0); }
 
-/* Sort input alns by (q_name, strand, q_start).  Stable on equal keys
- * via pointer tie-break -- matters because the sweep iterates in this
- * order. */
+/* Sort input alns by (q_name, strand, q_start), then a TOTAL value order on
+ * the target coords.  The sweep iterates in this order and ties decide chain
+ * membership, so the old (int64_t)pointer tie-break made taffy_chain's output
+ * depend on heap layout -- non-deterministic across runs and builds.  (Exact-
+ * duplicate alns still tie, but they chain identically, so their residual
+ * order is immaterial.) */
 static int aln_cmp_by_q_loc(const void *a, const void *b) {
     const TaffyAln *x = a, *y = b;
     int c = strcmp(x->q_name ? x->q_name : "", y->q_name ? y->q_name : "");
@@ -84,11 +87,20 @@ static int aln_cmp_by_q_loc(const void *a, const void *b) {
     if (x->strand != y->strand) return x->strand < y->strand ? -1 : 1;
     c = intcmp(x->q_start, y->q_start);
     if (c) return c;
-    c = intcmp((int64_t)(intptr_t) x, (int64_t)(intptr_t) y);
-    return c;
+    c = strcmp(x->t_name ? x->t_name : "", y->t_name ? y->t_name : "");
+    if (c) return c;
+    c = intcmp(x->t_start, y->t_start);
+    if (c) return c;
+    c = intcmp(x->t_end, y->t_end);
+    if (c) return c;
+    return intcmp(x->q_end, y->q_end);
 }
 
-/* Active-chains key: (t_name, t_end, q_end), with pointer tiebreak. */
+/* Active-chains key: (t_name, t_end, q_end), then a VALUE tiebreak
+ * (q_start, t_start) so the predecessor-scan order is independent of heap
+ * layout.  The pointer compare survives only as a last resort for exact-
+ * duplicate alns (all coords equal) -- those chain identically, so their
+ * residual order is immaterial; it just keeps them distinct in the set. */
 static int chain_cmp_by_t_loc(const void *a, const void *b) {
     const ChainNode *c1 = a, *c2 = b;
     const TaffyAln *p1 = c1->aln, *p2 = c2->aln;
@@ -98,14 +110,26 @@ static int chain_cmp_by_t_loc(const void *a, const void *b) {
     if (c) return c;
     c = intcmp(p1->q_end, p2->q_end);
     if (c) return c;
+    c = intcmp(p1->q_start, p2->q_start);
+    if (c) return c;
+    c = intcmp(p1->t_start, p2->t_start);
+    if (c) return c;
     return intcmp((int64_t)(intptr_t) c1, (int64_t)(intptr_t) c2);
 }
 
-/* All-chains key: by score (so popping last == highest). */
+/* All-chains key: by score (so popping last == highest), then a VALUE
+ * tiebreak on the rep aln's coords so the pop order -- and thus chain-id
+ * assignment -- is independent of heap layout.  Pointer compare is the last
+ * resort for exact-duplicate alns only (immaterial: they chain identically). */
 static int chain_cmp_by_score(const void *a, const void *b) {
     const ChainNode *c1 = a, *c2 = b;
     int r = intcmp(c1->score, c2->score);
     if (r) return r;
+    const TaffyAln *p1 = c1->aln, *p2 = c2->aln;
+    r = intcmp(p1->q_start, p2->q_start); if (r) return r;
+    r = intcmp(p1->t_start, p2->t_start); if (r) return r;
+    r = intcmp(p1->q_end,   p2->q_end);   if (r) return r;
+    r = intcmp(p1->t_end,   p2->t_end);   if (r) return r;
     return intcmp((int64_t)(intptr_t) c1, (int64_t)(intptr_t) c2);
 }
 
