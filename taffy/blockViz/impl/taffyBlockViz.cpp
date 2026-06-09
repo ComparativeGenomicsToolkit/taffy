@@ -465,7 +465,12 @@ extern "C" struct taffy_chromosome_t *taffyGetChroms(int h, const char *species,
     if (!H) return nullptr;
     std::lock_guard<std::mutex> lock(H->mu);
 
-    stHash *seqs = tui_sequence_lengths(H->tui_path_str.c_str());
+    // Only this species' sequences, via a lower-bound seek + contiguous prefix
+    // scan of the directory (O(log n_d + k)) instead of enumerating every
+    // genome's sequences (the whole-directory slurp that dominated query time
+    // on the 1155-genome .tui).  Keys are still full "<species>.<seq>" names,
+    // so the prefix filter below is a cheap pass-through.
+    stHash *seqs = tui_genome_seq_lengths(H->tui, species);
     if (!seqs) return nullptr;
 
     // Filter to entries whose key starts with "<species>." -- collect
@@ -909,13 +914,13 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
     // Resolve the .tui d-line key for tChrom: "<tSpecies>.<tChrom>".
     std::string tFullName = std::string(tSpecies) + "." + tChrom;
 
-    // tEnd == 0 -> use full chrom length.
+    // tEnd == 0 -> use full chrom length.  Resolve it with a single directory
+    // binary search (O(log n_d)) instead of building a hash of every genome's
+    // sequence table -- the whole-directory slurp cost ~2.4 s / 794 MB per
+    // query on the 1155-genome .tui, just to read one length.
     if (tEnd == 0) {
-        stHash *seqs = tui_sequence_lengths(H->tui_path_str.c_str());
-        if (seqs) {
-            tEnd = (int64_t)(intptr_t) stHash_search(seqs, (void *) tFullName.c_str());
-            stHash_destruct(seqs);
-        }
+        int64_t fullLen = tui_seq_length(H->tui, tFullName.c_str());
+        if (fullLen > 0) tEnd = fullLen;
         if (tEnd == 0) { set_err(errStr, "taffyBlockViz: unknown tChrom"); return nullptr; }
     }
 

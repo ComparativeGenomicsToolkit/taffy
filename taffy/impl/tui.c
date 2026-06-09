@@ -1968,6 +1968,54 @@ stHash *tui_sequence_lengths(const char *tui_path) {
     return out;
 }
 
+// Length of one sequence by full name, via a single binary search of the
+// name-sorted directory.  O(log n_d) seeks, no whole-directory hash.  The
+// targeted form of tui_sequence_lengths -- the blockViz full-chrom-length
+// resolve used to slurp every genome's sequence table (~2.4 s / 794 MB on
+// the 1155-genome .tui) just to read one length.
+int64_t tui_seq_length(Tui *tui, const char *seq_name) {
+    if (tui == NULL || tui->of == NULL || seq_name == NULL) return -1;
+    int64_t len = -1;
+    int64_t ord = tui_find_d(tui->of, tui->n_d, seq_name, &len);
+    return (ord < 0) ? -1 : len;
+}
+
+// One genome's sequences (full "genome.seq" -> length), via lower-bound seek
+// to the "<genome>." prefix + a contiguous forward scan -- the genome's
+// d-records are adjacent in the name-sorted directory.  O(log n_d + k) for k
+// the genome's sequence count, instead of enumerating all genomes.  Mirrors
+// tui_genome_lift_load's pass-1 directory scan.
+stHash *tui_genome_seq_lengths(Tui *tui, const char *genome) {
+    if (tui == NULL || tui->of == NULL || genome == NULL || *genome == 0)
+        return NULL;
+    OneFile *of = tui->of;
+    size_t gn = strlen(genome);
+    char *prefix = st_malloc(gn + 2);
+    memcpy(prefix, genome, gn);
+    prefix[gn] = '.';
+    prefix[gn + 1] = 0;
+    size_t plen = gn + 1;
+
+    int64_t first = tui_find_d_lower_bound(of, tui->n_d, prefix);
+    stHash *out = stHash_construct3(stHash_stringKey, stHash_stringEqualKey,
+                                    free, NULL);
+    char buf[8192];
+    for (int64_t i = first; i <= tui->n_d; i++) {
+        if (!oneGoto(of, 'd', i)) break;
+        if (oneReadLine(of) != 'd') break;
+        int64_t bn = oneLen(of);
+        if (bn < 0 || bn >= (int64_t)sizeof(buf)) break;
+        memcpy(buf, oneString(of), (size_t)bn);
+        buf[bn] = 0;
+        if (strncmp(buf, prefix, plen) != 0) break;   // past this genome's run
+        int64_t slen = oneInt(of, 2);
+        stHash_insert(out, stString_copy(buf), (void *)(intptr_t)slen);
+    }
+    free(prefix);
+    if (stHash_size(out) == 0) { stHash_destruct(out); return NULL; }
+    return out;
+}
+
 TuiGenomeInfo *tui_genome_names(const char *tui_path, int64_t *n_out) {
     if (n_out) *n_out = 0;
     if (tui_path == NULL) return NULL;

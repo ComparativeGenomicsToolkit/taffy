@@ -188,6 +188,27 @@ int64_t *tui_load_seq_runs(Tui *tui, const char *seq_name, int64_t *n_out);
 stHash *tui_sequence_lengths(const char *tui_path);
 
 /*
+ * Length (bp) of ONE sequence by its full "genome.sequence" d-line name, via
+ * a single O(log n_d) binary search of the name-sorted directory -- the
+ * targeted alternative to tui_sequence_lengths when you need just one length
+ * (e.g. resolving a query's full-chrom end).  Returns -1 if absent.  Uses the
+ * cached cursor on `tui`, so the caller must serialize on it (same note as
+ * tui_query / tui_load_seq_runs).
+ */
+int64_t tui_seq_length(Tui *tui, const char *seq_name);
+
+/*
+ * Sequences of ONE genome: full "genome.sequence" name -> length (bp), same
+ * stHash value convention as tui_sequence_lengths.  Lower-bound seeks to the
+ * genome's "<genome>." prefix then scans its contiguous d-records (the
+ * directory is name-sorted, so a genome's sequences are adjacent) -- O(log
+ * n_d + k) for k the genome's sequence count, NOT the whole directory.
+ * Returns NULL if the genome has no sequences.  Uses the cached cursor on
+ * `tui`; serialize on it.
+ */
+stHash *tui_genome_seq_lengths(Tui *tui, const char *genome);
+
+/*
  * Per-resolved-genome metadata, returned by tui_genome_names().  `name` is
  * malloc'd; free via tui_genome_info_free.
  */
