@@ -122,8 +122,19 @@ static int chain_cmp_by_score(const void *a, const void *b) {
 static stSortedSetIterator *predecessor_iter(stSortedSet *active, ChainNode *cn) {
     TaffyAln *p = cn->aln;
     int64_t q_end_save = p->q_end, t_end_save = p->t_end;
-    p->q_end = p->q_start;
+    /* We want the largest active node with t_end <= cn.t_start (its closest
+     * predecessor on the target axis), then walk backward from there.  The
+     * SECONDARY key q_end is set to INT64_MAX, NOT q_start: an exactly-
+     * abutting predecessor (t_end == cn.t_start AND q_end == cn.q_start)
+     * otherwise ties on BOTH coordinates and chain_cmp_by_t_loc falls through
+     * to its pointer tiebreak -- so whether searchLessThanOrEqual includes it
+     * depends on heap address.  When it's excluded the backward walk never
+     * reaches it and the chain SHATTERS at a zero-cost abutting boundary
+     * (paffy has this exact bug -- see chaining.c get_predecessor_chains).
+     * q_end=MAX sorts the search key above every real node at t_end==t_start,
+     * so all are reached; the loop below filters the q-overlapping ones. */
     p->t_end = p->t_start;
+    p->q_end = INT64_MAX;
     ChainNode *cn2 = stSortedSet_searchLessThanOrEqual(active, cn);
     p->q_end = q_end_save;
     p->t_end = t_end_save;

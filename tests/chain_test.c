@@ -136,6 +136,30 @@ static void test_two_abutting_forward_chain(CuTest *tc) {
     free(alns); free(cid); free(chs);
 }
 
+/* Regression for the abutting-predecessor shatter: a long run of EXACTLY
+ * abutting collinear blocks (zero gap on both axes -> chaining is free) must
+ * form ONE chain.  Before the predecessor_iter fix the search key tied with
+ * each abutting predecessor on (t_end,q_end) and chain_cmp_by_t_loc's pointer
+ * tiebreak excluded it whenever the predecessor's heap address sorted above
+ * the new node's -- so the run shattered into an address-dependent number of
+ * chains (the 2-block case above passed only by luck of allocation order).
+ * 20 blocks makes an accidentally all-monotonic layout vanishingly unlikely,
+ * so this reliably fails on the bug and is deterministic on the fix. */
+static void test_long_abutting_run_single_chain(CuTest *tc) {
+    enum { N = 20 };
+    TaffyAln in[N];
+    for (int i = 0; i < N; i++)
+        in[i] = mk("q", (int64_t) i*1000, (int64_t)(i+1)*1000,
+                   "t", (int64_t) i*1000, (int64_t)(i+1)*1000, +1);
+    TaffyAln *alns; int64_t *cid; TaffyChainInfo *chs; int64_t nc;
+    run_chain(in, N, 0, 1, INT64_MAX, &alns, &cid, &chs, &nc);
+    CuAssertIntEquals(tc, 1, (int) nc);
+    CuAssertIntEquals(tc, N, (int) chs[0].n_alns);
+    CuAssertIntEquals(tc, N * 1000, (int) chs[0].total_bp);
+    CuAssertIntEquals(tc, N * 1000, (int) chs[0].total_score);  /* all gaps free */
+    free(alns); free(cid); free(chs);
+}
+
 static void test_three_collinear_chain_when_score_exceeds_cost(CuTest *tc) {
     /* gap = 50+50 on each link with open=0, extend=1: cost=100.
      * Each aln has score 1000, so 100 < 1000 satisfies the guard. */
@@ -400,6 +424,7 @@ CuSuite* chain_test_suite(void) {
     SUITE_ADD_TEST(suite, test_empty_input);
     SUITE_ADD_TEST(suite, test_single_aln);
     SUITE_ADD_TEST(suite, test_two_abutting_forward_chain);
+    SUITE_ADD_TEST(suite, test_long_abutting_run_single_chain);
     SUITE_ADD_TEST(suite, test_three_collinear_chain_when_score_exceeds_cost);
     SUITE_ADD_TEST(suite, test_gap_cost_blocks_chaining);
     SUITE_ADD_TEST(suite, test_query_overlap_does_not_chain);
