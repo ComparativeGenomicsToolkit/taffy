@@ -1085,7 +1085,15 @@ static void chunk_lift_visit_cb(const TuiRun *r, void *user) {
         L->c_end      = ce;
         L->t_start    = t_out_start;
         L->t_end      = t_out_end;
-        L->strand     = rel_fwd ? +1 : -1;
+        /* Chain geometry, NOT output strand: this chain's axes are the
+         * universal COLUMN (c_start/c_end, the q-axis) and the TARGET
+         * (t_start/t_end), and the target coords above are derived from
+         * r->strand alone -- so the diagonal's slope is r->strand.  iv_rev
+         * is the SOURCE orientation, not an axis here, and must NOT enter
+         * (folding it in mis-partitions/mirrors runs in taffy_chain and
+         * corrupts overlap-frac filtering on iv_rev=1 regions).  The output
+         * strand stays rel_fwd-composed via out_strand below. */
+        L->strand     = r->strand ? +1 : -1;
         L->out_strand = out_strand;
         // Windowed flush: when q-span from window's left edge exceeds
         // chain_window bp, chain + filter the current buffer, emit

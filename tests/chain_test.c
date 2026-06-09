@@ -217,6 +217,36 @@ static void test_reverse_strand_chains(CuTest *tc) {
     free(alns); free(cid); free(chs);
 }
 
+/* Regression (audit): taffy_chain_overlap_frac_select must compute a
+ * reverse chain's FULL q-coverage.  After taffy_chain a reverse chain's
+ * alns sit in DESCENDING forward-q order, so the old single-forward-pass
+ * union collapsed to just the rightmost interval -- undercounting coverage
+ * and silently UNDER-filtering paralogs whenever an inversion is present.
+ * Here a forward paralog lies fully inside the reverse chain's q-span and
+ * must be dropped; with the bug it was wrongly kept. */
+static void test_overlap_frac_reverse_chain_full_coverage(CuTest *tc) {
+    void *TAG_REV = (void *) 1, *TAG_PARA = (void *) 2;
+    TaffyAln in[] = {
+        mk("q",    0, 1000, "t", 90000, 91000, -1),   /* reverse chain, q[0..1000) */
+        mk("q", 1050, 2050, "t", 88950, 89950, -1),   /*   ...q[1050..2050) */
+        mk("q", 2100, 3100, "t", 87900, 88900, -1),   /*   ...q[2100..3100) */
+        mk("q",    0, 1000, "u",  5000,  6000, +1),   /* fwd paralog @ q[0..1000) */
+    };
+    in[0].user = TAG_REV;
+    in[3].user = TAG_PARA;
+    TaffyAln *alns; int64_t *cid; TaffyChainInfo *chs; int64_t nc;
+    run_chain(in, 4, 0, 1, INT64_MAX, &alns, &cid, &chs, &nc);
+    CuAssertTrue(tc, nc == 2);                  /* reverse chain + the paralog */
+    int64_t rev  = cid_for_tag(alns, 4, cid, TAG_REV);
+    int64_t para = cid_for_tag(alns, 4, cid, TAG_PARA);
+    char *keep = st_calloc((size_t)(nc + 1), 1);
+    taffy_chain_overlap_frac_select(alns, 4, cid, chs, nc, /*max_id=*/nc,
+                                    /*overlap_frac=*/0.5, /*cap=*/0, keep);
+    CuAssertTrue(tc, keep[rev]  == 1);          /* highest-score chain kept */
+    CuAssertTrue(tc, keep[para] == 0);          /* fully redundant -> dropped */
+    free(keep); free(alns); free(cid); free(chs);
+}
+
 static void test_mixed_strands_dont_join(CuTest *tc) {
     /* Two alns at adjacent q ranges but opposite strands.  Must end
      * up in separate chains -- the partition step splits +/- before
@@ -375,6 +405,7 @@ CuSuite* chain_test_suite(void) {
     SUITE_ADD_TEST(suite, test_query_overlap_does_not_chain);
     SUITE_ADD_TEST(suite, test_target_overlap_does_not_chain);
     SUITE_ADD_TEST(suite, test_reverse_strand_chains);
+    SUITE_ADD_TEST(suite, test_overlap_frac_reverse_chain_full_coverage);
     SUITE_ADD_TEST(suite, test_mixed_strands_dont_join);
     SUITE_ADD_TEST(suite, test_different_q_names_dont_join);
     SUITE_ADD_TEST(suite, test_different_t_names_dont_join);

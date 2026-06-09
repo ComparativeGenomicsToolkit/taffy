@@ -156,7 +156,10 @@ static int64_t chain_partition(TaffyAln *alns, int64_t n,
     /* alns is already sorted by q_start by the caller. */
 
     stSortedSet *active = stSortedSet_construct3(chain_cmp_by_t_loc, NULL);
-    stSortedSet *chains = stSortedSet_construct3(chain_cmp_by_score, free);
+    /* NULL element-destructor: ID assignment below stSortedSet_remove()s
+     * every node from `chains` (remove does NOT invoke the destructor), so
+     * the set never frees them -- we free them explicitly via nodes_by_idx. */
+    stSortedSet *chains = stSortedSet_construct3(chain_cmp_by_score, NULL);
     stList *to_remove   = stList_construct();
     ChainNode **nodes_by_idx = st_calloc((size_t) n, sizeof(ChainNode *));
 
@@ -263,8 +266,11 @@ static int64_t chain_partition(TaffyAln *alns, int64_t n,
         arr[k].n_alns      = n_alns_in_chain;
     }
 
-    /* All ChainNode allocations were owned by `chains`, freed via its
-     * destructor; nothing to free here except scaffolding. */
+    /* Free every ChainNode via the full index.  ID assignment removed them
+     * all from `chains` (and `active` holds borrowed pointers with a NULL
+     * destructor), so neither set owns them -- nodes_by_idx[i] is the only
+     * surviving handle to each. */
+    for (int64_t i = 0; i < n; i++) free(nodes_by_idx[i]);
     free(nodes_by_idx);
     stList_setDestructor(to_remove, NULL);
     stList_destruct(to_remove);
@@ -422,12 +428,21 @@ int64_t taffy_chain_merge_collinear(TaffyAln *alns, int64_t n,
     return n - n_merges;
 }
 
+typedef struct { int64_t lo, hi; } QIv;
+static int qiv_cmp_lo(const void *a, const void *b) {
+    int64_t la = ((const QIv *) a)->lo, lb = ((const QIv *) b)->lo;
+    return (la > lb) - (la < lb);
+}
+
 /* Overlap-aware paralogy filter -- see chain.h.
  *
  * Implementation:
  *   - CSR-style chain bucket built in one O(n) pass: bucket_off[cid..
- *     cid+1) is the contiguous index range in bucket_aln for chain cid,
- *     in q_start order (inherited from taffy_chain's global sort).
+ *     cid+1) is the contiguous index range in bucket_aln for chain cid.
+ *     The global sort is ASCENDING forward-q for forward chains but
+ *     DESCENDING forward-q for reverse chains (taffy_chain mirrors
+ *     reverse-strand q-coords), so each chain's q-intervals are re-sorted
+ *     ascending before the union -- see the per-chain merge below.
  *   - kept_iv is maintained sorted+disjoint via proper 2-list union
  *     (O(m+n) per accept) into a ping-pong buffer; both buffers grow
  *     geometrically on demand.
@@ -443,7 +458,6 @@ void taffy_chain_overlap_frac_select(const TaffyAln *alns, int64_t n,
                                      int64_t cap,
                                      char *keep_chain) {
     if (n == 0 || n_chains_out == 0) return;
-    typedef struct { int64_t lo, hi; } QIv;
 
     /* CSR bucket of alns by chain id. */
     int64_t *bucket_off = st_calloc((size_t)(max_id + 2), sizeof(int64_t));
@@ -479,19 +493,32 @@ void taffy_chain_overlap_frac_select(const TaffyAln *alns, int64_t n,
             while (cap_cand < n_in) cap_cand *= 2;
             cand_iv = st_realloc(cand_iv, (size_t)cap_cand * sizeof(QIv));
         }
-        /* Merge candidate q-intervals in one forward pass (alns are
-         * already in q_start order within a chain). */
+        /* Gather this chain's q-intervals, then SORT ascending by lo
+         * before merging.  A reverse-strand chain's alns sit in DESCENDING
+         * forward-q order, so a single forward pass over raw array order
+         * would fold every interval but the rightmost into one (extending
+         * only .hi) -- undercounting cand_bp AND leaving cand_iv unsorted,
+         * which corrupts the kept_iv 2-list union below (it requires both
+         * inputs sorted+disjoint).  Forward chains are already sorted, so
+         * the sort is a no-op for them. */
         int64_t nm = 0;
         for (int64_t z = b_lo; z < b_hi; z++) {
-            int64_t lo = alns[bucket_aln[z]].q_start;
-            int64_t hi = alns[bucket_aln[z]].q_end;
-            if (nm > 0 && lo <= cand_iv[nm-1].hi) {
-                if (hi > cand_iv[nm-1].hi) cand_iv[nm-1].hi = hi;
-            } else {
-                cand_iv[nm].lo = lo;
-                cand_iv[nm].hi = hi;
-                nm++;
+            cand_iv[nm].lo = alns[bucket_aln[z]].q_start;
+            cand_iv[nm].hi = alns[bucket_aln[z]].q_end;
+            nm++;
+        }
+        qsort(cand_iv, (size_t) nm, sizeof(QIv), qiv_cmp_lo);
+        {   /* collapse overlapping/abutting intervals in place */
+            int64_t w = 0;
+            for (int64_t r = 0; r < nm; r++) {
+                if (w > 0 && cand_iv[r].lo <= cand_iv[w-1].hi) {
+                    if (cand_iv[r].hi > cand_iv[w-1].hi)
+                        cand_iv[w-1].hi = cand_iv[r].hi;
+                } else {
+                    cand_iv[w++] = cand_iv[r];
+                }
             }
+            nm = w;
         }
         int64_t cand_bp = 0;
         for (int64_t i = 0; i < nm; i++) cand_bp += cand_iv[i].hi - cand_iv[i].lo;
