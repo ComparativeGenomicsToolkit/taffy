@@ -85,6 +85,18 @@ struct TaffyHandle {
     // TAFFY_DEFAULT_MAX_OUTPUT_BLOCKS (1000); tunable at runtime via
     // taffySetMaxOutputBlocks.
     int64_t max_output_blocks = TAFFY_DEFAULT_MAX_OUTPUT_BLOCKS;
+    // Noise filter (OFF by default).  Drop an output block iff its size is
+    // BOTH < min_block_span_frac of the query window AND < min_block_rel_frac
+    // of the largest output block -- i.e. < min(window*span_frac, max*rel_frac)
+    // ("below A and below B" == "below min(A,B)").  The window span stands in
+    // for screen width (browser passes span_frac ~ 1/track-pixels), so this is
+    // a sub-pixel test without a pixel count; the relative term is self-
+    // protecting (a uniformly-small region keeps -- nothing is small relative
+    // to its own max -- while slivers beside a real feature drop).  Both must
+    // be > 0 to engage; span_frac=1 makes it relative-only, rel_frac=1 makes
+    // it window-only.  Set via taffySetMinBlockFilter.
+    double  min_block_span_frac = 0.0;
+    double  min_block_rel_frac  = 0.0;
     // mapBackAdjacencies: per-(qSpecies, qChrom) sorted run table.
     // Key is the fully-qualified "<genome>.<chrom>" string the .tui
     // uses for d-line lookups.  Lazily populated on first flank scan
@@ -276,6 +288,30 @@ extern "C" int taffyGetMaxOutputBlocks(int h, int64_t *n, char **errStr) {
     if (!H) return -1;
     std::lock_guard<std::mutex> lock(H->mu);
     if (n) *n = H->max_output_blocks;
+    return 0;
+}
+
+extern "C" int taffySetMinBlockFilter(int h, double spanFrac, double relFrac,
+                                      char **errStr) {
+    if (spanFrac < 0.0 || spanFrac > 1.0 || relFrac < 0.0 || relFrac > 1.0) {
+        set_err(errStr, "taffyBlockViz: min-block filter fractions must be in [0.0, 1.0]");
+        return -1;
+    }
+    TaffyHandle *H = lookup_handle(h, errStr);
+    if (!H) return -1;
+    std::lock_guard<std::mutex> lock(H->mu);
+    H->min_block_span_frac = spanFrac;
+    H->min_block_rel_frac  = relFrac;
+    return 0;
+}
+
+extern "C" int taffyGetMinBlockFilter(int h, double *spanFrac, double *relFrac,
+                                      char **errStr) {
+    TaffyHandle *H = lookup_handle(h, errStr);
+    if (!H) return -1;
+    std::lock_guard<std::mutex> lock(H->mu);
+    if (spanFrac) *spanFrac = H->min_block_span_frac;
+    if (relFrac)  *relFrac  = H->min_block_rel_frac;
     return 0;
 }
 
@@ -991,8 +1027,15 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
               [](const TaffyAln &a, const TaffyAln &b) {
                   int c = strcmp(a.t_name ? a.t_name : "", b.t_name ? b.t_name : "");
                   if (c != 0) return c < 0;
-                  if (a.strand != b.strand) return a.strand < b.strand;
-                  return a.q_start < b.q_start;
+                  if (a.strand  != b.strand)  return a.strand  < b.strand;
+                  if (a.q_start != b.q_start) return a.q_start < b.q_start;
+                  // TOTAL order: same (t_name,strand,q_start) alns must sort
+                  // build-independently (taffy_chain's upstream sort breaks
+                  // such ties by POINTER), else the greedy groups them by heap
+                  // layout -> non-deterministic coverage across rebuilds.
+                  if (a.q_end   != b.q_end)   return a.q_end   < b.q_end;
+                  if (a.t_start != b.t_start) return a.t_start < b.t_start;
+                  return a.t_end < b.t_end;
               });
 
     // Greedy collinear grouping within a (qChrom, strand) partition.
@@ -1111,6 +1154,27 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
         mapped_tail = b;
         mapped_count++;
     };
+    // Drop sub-resolution noise from a to-be-emitted block vector: a block is
+    // dropped iff size < min(window*span_frac, maxSize*rel_frac), where maxSize
+    // is taken over the SAME vector (so the largest block always survives and a
+    // uniformly-small region is preserved).  Frees the dropped blocks.  No-op
+    // unless BOTH fractions are > 0.  See the handle fields for the rationale.
+    auto filter_noise = [&](std::vector<struct taffy_block_t *> &v) {
+        if (H->min_block_span_frac <= 0.0 || H->min_block_rel_frac <= 0.0 || v.empty())
+            return;
+        int64_t span  = (int64_t) tEnd - (int64_t) tStart;
+        int64_t maxsz = 0;
+        for (struct taffy_block_t *b : v) if (b->size > maxsz) maxsz = b->size;
+        int64_t win_thr = (int64_t) ((double) span  * H->min_block_span_frac);
+        int64_t rel_thr = (int64_t) ((double) maxsz * H->min_block_rel_frac);
+        int64_t thr = win_thr < rel_thr ? win_thr : rel_thr;   // below BOTH == below min
+        v.erase(std::remove_if(v.begin(), v.end(),
+                    [&](struct taffy_block_t *b) {
+                        if (b->size >= thr) return false;
+                        free(b->qChrom); free(b);
+                        return true;
+                    }), v.end());
+    };
     // For QUERY_AND_TARGET_DUPS: collect non-primary alns grouped by
     // chain_id so each non-primary chain becomes one dupe-list entry.
     std::map<int64_t, taffy_target_dupe_list_t *> dupe_by_chain;
@@ -1147,7 +1211,9 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
     std::sort(cand.begin(), cand.end(),
               [](const struct taffy_block_t *a, const struct taffy_block_t *b) {
                   if (a->chainId != b->chainId) return a->chainId < b->chainId;
-                  return a->tStart < b->tStart;
+                  if (a->tStart  != b->tStart)  return a->tStart  < b->tStart;
+                  if (a->size    != b->size)    return a->size    < b->size;
+                  return a->qStart < b->qStart;   // TOTAL order: build-stable
               });
     {
         std::vector<struct taffy_block_t *> merged;
@@ -1193,7 +1259,8 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
               [](const struct taffy_block_t *a, const struct taffy_block_t *b) {
                   if (a->chainId != b->chainId) return a->chainId < b->chainId;
                   if (a->tStart  != b->tStart)  return a->tStart  < b->tStart;
-                  return a->size > b->size;
+                  if (a->size    != b->size)    return a->size > b->size;
+                  return a->qStart < b->qStart;   // TOTAL order: build-stable
               });
     {
         std::vector<struct taffy_block_t *> tiled;
@@ -1261,6 +1328,7 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
     if (!coarsened) {
         // Narrow query: emit every candidate at full detail, plus (for
         // QUERY_AND_TARGET_DUPS) the per-dupe-chain tRange lists.
+        filter_noise(cand);   // drop sub-resolution slivers (no-op unless enabled)
         for (struct taffy_block_t *b : cand) {
             bool is_primary = (b->chainId == primary_id);
             // Build the dupe-list entry BEFORE append_mapped(b): at the
@@ -1315,7 +1383,14 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
                 BinAgg g; g.dom = b; g.cov = b->size; bins[bin] = g;
             } else {
                 it->second.cov += b->size;
-                if (b->size > it->second.dom->size) it->second.dom = b;
+                // Deterministic dominant: larger wins; ties break by lower
+                // tStart then qStart, so the bin's anchor never depends on
+                // block iteration / heap order.
+                struct taffy_block_t *d = it->second.dom;
+                if (b->size > d->size ||
+                    (b->size == d->size && b->tStart < d->tStart) ||
+                    (b->size == d->size && b->tStart == d->tStart && b->qStart < d->qStart))
+                    it->second.dom = b;
             }
         }
         // Materialize one coverage block per occupied bin (chainId TBD).
@@ -1335,6 +1410,7 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
             coarse.push_back(nb);
         }
         for (struct taffy_block_t *b : cand) { free(b->qChrom); free(b); }
+        filter_noise(coarse);  // drop sparse / sub-resolution bins (no-op unless enabled)
 
         // Emit every coverage bin.  Absolute binning over [tStart,tEnd) can
         // yield cap+1 occupied bins; each is counted into coarse_summaries

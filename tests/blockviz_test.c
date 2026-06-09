@@ -530,22 +530,29 @@ static void test_strand_revcase_all_chains_correct(CuTest *tc) {
     free(err);
 }
 
-/* Regression: panning a fixed zoom must not change a locus's rendering.
- * The coarsen switch is span-based (a zoom property), NOT block-count-based,
- * and coverage bins are absolute-aligned -- so two windows of the SAME span
- * covering a shared interior locus return byte-identical coverage blocks for
- * that locus, no matter where the window edges fall.  The old count-based
- * switch flipped detail<->coverage as a window's total block count crossed
- * the cap while panning across a dense locus, making dupe bars blink. */
+/* Regression: panning a fixed zoom must not make blocks blink in/out.  The
+ * coarsen switch is span-based (a zoom property), NOT block-count-based, and
+ * coverage bins are absolute-aligned -- so two windows of the SAME span over a
+ * shared interior locus return the SAME blocks (tStart/qStart/strand) for that
+ * locus, no matter where the window edges fall.  The old count-based switch
+ * flipped detail<->coverage as a window's block count crossed the cap while
+ * panning a dense locus, making dupe bars blink.
+ *
+ * We compare block PRESENCE (position + strand), NOT the coverage bp-sum: that
+ * sum carries a sub-pixel (~1 bp), invisible window-dependence -- the trim's
+ * running edge propagates from a boundary-spanning chain's start, which sits at
+ * a different clipped offset in each window -- so a byte-exact size check would
+ * over-assert a difference no one can see (and that any block re-ordering
+ * perturbs). */
 static void test_window_stability_coarse(CuTest *tc) {
     char *err = NULL;
     int h = taffyOpen(TEST_TUI, &err);
     if (h < 0) { free(err); return; }
     CuAssertIntEquals(tc, 0, taffySetMaxOutputBlocks(h, 20, &err)); /* force coverage */
 
-    /* Two 400 kb windows sharing the interior [120k,360k]; their coverage
-     * blocks for that interior must be identical (chainId is per-window and
-     * intentionally excluded -- only the geometry must be stable). */
+    /* Two 400 kb windows sharing the interior [120k,360k]; the SAME blocks
+     * (position + strand) must appear for that interior (chainId is per-window
+     * and intentionally excluded; size is too -- see header). */
     int64_t start[2] = { 0, 80000 };
     char buf[2][16384];
     for (int w = 0; w < 2; w++) {
@@ -560,12 +567,68 @@ static void test_window_stability_coarse(CuTest *tc) {
             if (b->tStart >= 120000 && b->tStart < 360000 &&
                 off < sizeof(buf[w]) - 64)
                 off += (size_t) snprintf(buf[w] + off, sizeof(buf[w]) - off,
-                    "%ld,%ld,%ld,%c;", (long) b->tStart, (long) b->qStart,
-                    (long) b->size, b->strand);
+                    "%ld,%ld,%c;", (long) b->tStart, (long) b->qStart, b->strand);
         taffyFreeBlockResults(res);
     }
     CuAssertTrue(tc, buf[0][0] != '\0');       /* the locus is actually covered */
-    CuAssertStrEquals(tc, buf[0], buf[1]);     /* identical => panning-stable */
+    CuAssertStrEquals(tc, buf[0], buf[1]);     /* same blocks => no blinking */
+
+    taffyClose(h, &err);
+    free(err);
+}
+
+/* The min-block noise filter (taffySetMinBlockFilter): with it engaged, blocks
+ * below BOTH a fraction of the window AND a fraction of the largest block are
+ * dropped; the largest block always survives; off (the default) is a no-op. */
+static void test_min_block_filter(CuTest *tc) {
+    char *err = NULL;
+    int h = taffyOpen(TEST_TUI, &err);
+    if (h < 0) { free(err); return; }
+    CuAssertIntEquals(tc, 0, taffySetMaxOutputBlocks(h, 30, &err));   /* force coverage */
+
+    /* baseline: filter off (default) */
+    struct taffy_block_results_t *r0 = taffyGetBlocksInTargetRange(
+        h, "simMouse_chr6", "simHuman_chr6", "simHuman.chr6", 0, 600000, 0,
+        TAFFY_NO_SEQUENCES, TAFFY_QUERY_AND_TARGET_DUPS, 0, NULL, &err);
+    CuAssertPtrNotNull(tc, r0);
+    int n0 = 0; int64_t maxsz = 0, minsz = INT64_MAX;
+    for (struct taffy_block_t *b = r0->mappedBlocks; b; b = b->next) {
+        n0++;
+        if (b->size > maxsz) maxsz = b->size;
+        if (b->size < minsz) minsz = b->size;
+    }
+    taffyFreeBlockResults(r0);
+    CuAssertTrue(tc, n0 >= 1);
+
+    /* off (0,0) must be a no-op */
+    CuAssertIntEquals(tc, 0, taffySetMinBlockFilter(h, 0.0, 0.0, &err));
+    struct taffy_block_results_t *roff = taffyGetBlocksInTargetRange(
+        h, "simMouse_chr6", "simHuman_chr6", "simHuman.chr6", 0, 600000, 0,
+        TAFFY_NO_SEQUENCES, TAFFY_QUERY_AND_TARGET_DUPS, 0, NULL, &err);
+    CuAssertPtrNotNull(tc, roff);
+    int noff = 0;
+    for (struct taffy_block_t *b = roff->mappedBlocks; b; b = b->next) noff++;
+    taffyFreeBlockResults(roff);
+    CuAssertIntEquals(tc, n0, noff);
+
+    /* engage: window-off (1.0) so the threshold is 0.5 * the largest block */
+    CuAssertIntEquals(tc, 0, taffySetMinBlockFilter(h, 1.0, 0.5, &err));
+    struct taffy_block_results_t *r1 = taffyGetBlocksInTargetRange(
+        h, "simMouse_chr6", "simHuman_chr6", "simHuman.chr6", 0, 600000, 0,
+        TAFFY_NO_SEQUENCES, TAFFY_QUERY_AND_TARGET_DUPS, 0, NULL, &err);
+    CuAssertPtrNotNull(tc, r1);
+    int n1 = 0; int64_t maxsz1 = 0, minsz1 = INT64_MAX;
+    for (struct taffy_block_t *b = r1->mappedBlocks; b; b = b->next) {
+        n1++;
+        if (b->size > maxsz1) maxsz1 = b->size;
+        if (b->size < minsz1) minsz1 = b->size;
+    }
+    taffyFreeBlockResults(r1);
+    CuAssertTrue(tc, n1 >= 1);              /* never emptied */
+    CuAssertTrue(tc, n1 <= n0);             /* only drops */
+    CuAssertTrue(tc, maxsz1 == maxsz);      /* the largest block survives */
+    CuAssertTrue(tc, minsz1 >= maxsz / 2);  /* every survivor >= 0.5 * max */
+    if (minsz < maxsz / 2) CuAssertTrue(tc, n1 < n0);   /* a droppable block existed -> dropped */
 
     taffyClose(h, &err);
     free(err);
@@ -598,5 +661,6 @@ CuSuite* blockviz_test_suite(void) {
     SUITE_ADD_TEST(suite, test_chain_id_and_summaries);
     SUITE_ADD_TEST(suite, test_strand_iv_rev_xor_run_strand);
     SUITE_ADD_TEST(suite, test_strand_revcase_all_chains_correct);
+    SUITE_ADD_TEST(suite, test_min_block_filter);
     return suite;
 }

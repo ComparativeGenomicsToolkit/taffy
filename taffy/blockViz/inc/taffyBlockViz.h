@@ -255,6 +255,35 @@ int taffySetMaxOutputBlocks(int taffyHandle, int64_t n, char **errStr);
  * handle. */
 int taffyGetMaxOutputBlocks(int taffyHandle, int64_t *n, char **errStr);
 
+/** Noise filter: drop output blocks too small to render meaningfully.
+ * OFF by default (both fractions 0).  A block is dropped iff its size is
+ * BOTH < spanFrac of the query window AND < relFrac of the largest output
+ * block -- equivalently, < min(window*spanFrac, maxBlock*relFrac).
+ *
+ * Rationale: the query window span stands in for the track's pixel width,
+ * so passing spanFrac ~ 1/pixels makes this a sub-pixel test with no pixel
+ * count in the API.  The relative term is self-protecting: a uniformly-small
+ * region survives (nothing is small relative to its own max) while slivers
+ * beside a real feature drop.  Dropped blocks are simply not emitted, so the
+ * snake renderer bridges the surviving neighbours -- removing a sliver also
+ * removes its hairline connectors.  The largest block always survives, so the
+ * result is never emptied.
+ *
+ * Applies to both detail and coverage output (at wide zoom the coverage bins
+ * are themselves ~1/max_output_blocks of the window, so the sparse ones are
+ * the clutter this removes).  Both fractions must be > 0 to engage;
+ * spanFrac=1 makes it relative-only, relFrac=1 makes it window-only.
+ *
+ * Returns 0 on success, -1 on invalid handle or out-of-[0,1] fraction
+ * (set errStr).  Thread-safe. */
+int taffySetMinBlockFilter(int taffyHandle, double spanFrac, double relFrac,
+                           char **errStr);
+
+/** Read back the min-block filter fractions.  Either out-pointer may be
+ * NULL.  Returns 0 on success, -1 on invalid handle. */
+int taffyGetMinBlockFilter(int taffyHandle, double *spanFrac, double *relFrac,
+                           char **errStr);
+
 /** Per-handle overlap-fraction threshold for the chain paralogy filter
  * applied after taffy_chain has assigned chain ids.  Chains are walked
  * in score-desc order and accepted iff their union-of-aln q-coverage
