@@ -25,10 +25,12 @@
 #include <errno.h>
 #include <getopt.h>
 #include <inttypes.h>
+#include <malloc.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <time.h>
 
 static void usage(void) {
@@ -58,6 +60,37 @@ static void usage(void) {
         "     --lodTxt PATH        Append/update a HAL-style \"<B>\\t<path>\\n\"\n"
         "                          line at PATH (replaces any existing line\n"
         "                          for the same B).\n"
+        "     --genomeList FILE    Read genome names from FILE (one per line;\n"
+        "                          '#' comments OK).  Overrides the g-record\n"
+        "                          roster requirement -- use this when the\n"
+        "                          source .tui predates the g-record schema\n"
+        "                          (b8f6811) and rebuilding isn't practical.\n"
+        "                          Each name MUST be a real d-line prefix on\n"
+        "                          the source .tui or that genome is skipped.\n"
+        "                          TRANSITIONAL flag; remove once all .tui\n"
+        "                          files have g records.\n"
+        "     --fillBins           Emit length=B for every output cell instead\n"
+        "                          of length=bp_coverage.  Each aligned bin\n"
+        "                          renders as a full bin-width block in a\n"
+        "                          snake viewer; the per-bin coverage signal\n"
+        "                          in length is lost but the visual continuity\n"
+        "                          improves at zoom-out.  Overrides\n"
+        "                          --minBinFrac.\n"
+        "     --minBinFrac F       For each cell emit length=max(bp, B*F).\n"
+        "                          F in [0.0, 1.0]; 0.0 = pure coverage\n"
+        "                          (default), 1.0 = same as --fillBins.\n"
+        "                          Use a small fraction (e.g. 0.25) to keep\n"
+        "                          the coverage signal but give thin bins a\n"
+        "                          visible minimum width.  DEFAULT 0.0.\n"
+        "     --maxParalogsPerBin K\n"
+        "                          For each (seq, uc_bin), keep at most K\n"
+        "                          cells (the K highest-bp).  At LOD, source\n"
+        "                          paralogs scattered across many g_bins\n"
+        "                          share a uc_bin and stack vertically in\n"
+        "                          the snake renderer; this cap bounds the\n"
+        "                          worst-case stack depth.  Pair with\n"
+        "                          --fillBins for clean bin-aligned rows.\n"
+        "                          DEFAULT 0 (no cap).\n"
         "  -l --logLevel STR       critical|info|debug.  DEFAULT critical.\n"
         "  -h --help               Print this help.\n");
 }
@@ -147,6 +180,76 @@ static void coarsen_visit_cb(const TuiRun *r, void *user) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Paralog dedup (optional, --maxParalogsPerBin)                       */
+/* ------------------------------------------------------------------ */
+
+/* Walk the cells hash; within each (seq, uc_bin) group keep only the
+ * top max_per_bin cells by bp; free the rest.
+ *
+ * Motivation: at LOD, source paralogs that get fragmented across many
+ * g_bins all share the same uc_bin and emit as separate cells.  In a
+ * snake viewer these stack vertically -- one row per cell at the
+ * crowded uc_bin -- which the user can't render gracefully.  Capping
+ * at K limits worst-case stack height to ~K + cross-seq paralog count.
+ *
+ * Runs in O(N log N) on cell count.  Walks the hash once into an array,
+ * sorts by (seq, uc_bin, -bp), then sweeps groups and frees beyond K.
+ */
+typedef struct {
+    CellKey *k;
+    int64_t  bp;
+} DedupEntry;
+
+static int dedup_entry_cmp(const void *a, const void *b) {
+    const DedupEntry *p = (const DedupEntry *)a;
+    const DedupEntry *q = (const DedupEntry *)b;
+    /* (seq ptr, uc_bin asc, bp desc) */
+    if (p->k->seq < q->k->seq) return -1;
+    if (p->k->seq > q->k->seq) return 1;
+    if (p->k->uc_bin < q->k->uc_bin) return -1;
+    if (p->k->uc_bin > q->k->uc_bin) return 1;
+    if (p->bp > q->bp) return -1;
+    if (p->bp < q->bp) return 1;
+    return 0;
+}
+
+static int64_t cell_dedup_paralogs(stHash *cells, int64_t max_per_bin) {
+    int64_t n = stHash_size(cells);
+    if (n == 0 || max_per_bin <= 0) return 0;
+    DedupEntry *arr = (DedupEntry *)st_malloc((size_t)n * sizeof(DedupEntry));
+    stHashIterator *it = stHash_getIterator(cells);
+    int64_t i = 0;
+    CellKey *k;
+    while ((k = (CellKey *)stHash_getNext(it)) != NULL) {
+        int64_t *bp_p = (int64_t *)stHash_search(cells, k);
+        arr[i].k  = k;
+        arr[i].bp = *bp_p;
+        i++;
+    }
+    stHash_destructIterator(it);
+    qsort(arr, (size_t)n, sizeof(DedupEntry), dedup_entry_cmp);
+    int64_t removed = 0;
+    int64_t j = 0;
+    while (j < n) {
+        int64_t end = j + 1;
+        while (end < n && arr[end].k->seq    == arr[j].k->seq
+                       && arr[end].k->uc_bin == arr[j].k->uc_bin) end++;
+        /* Group is [j, end).  Keep first max_per_bin (already sorted by
+         * bp desc within group); drop the rest. */
+        for (int64_t m = j + max_per_bin; m < end; m++) {
+            /* removeAndFreeKey calls the registered key destructor (free),
+             * and returns the value pointer for us to free. */
+            int64_t *v = (int64_t *)stHash_removeAndFreeKey(cells, arr[m].k);
+            free(v);
+            removed++;
+        }
+        j = end;
+    }
+    free(arr);
+    return removed;
+}
+
+/* ------------------------------------------------------------------ */
 /* Per-genome emit: sort cells -> chunk -> encode -> write S/C/R     */
 /* ------------------------------------------------------------------ */
 
@@ -192,7 +295,11 @@ static int64_t drain_cells(stHash *cells, int64_t min_cell_bp,
                            stHash *seq_to_dir_idx,
                            SeqGroup **groups_out) {
     /* Bucket cells by seq pointer. */
-    stHash *by_seq = stHash_construct();      /* seq -> stList of EmitCell* */
+    /* Value destructor frees the per-seq stList, which in turn frees its
+     * EmitCells (constructed with stList_construct3(0, free) below).
+     * Plain stHash_construct() registers NULL destructors and leaks every
+     * EmitCell per genome (~40 B/cell × millions of cells across a run). */
+    stHash *by_seq = stHash_construct2(NULL, (void (*)(void *))stList_destruct);
     stHashIterator *it = stHash_getIterator(cells);
     CellKey *k;
     while ((k = (CellKey *)stHash_getNext(it)) != NULL) {
@@ -247,9 +354,25 @@ static int64_t drain_cells(stHash *cells, int64_t min_cell_bp,
 
 /* Write one genome's S/C/R records.  Mirrors phase2_genome_write at
  * tui.c:1131-1158.  Builds chunks honoring TUI_CHUNK_RUNS and
- * TUI_CHUNK_G_MAX caps so the reader's per-chunk t-range skip works. */
+ * TUI_CHUNK_G_MAX caps so the reader's per-chunk t-range skip works.
+ *
+ * Output-length policy: by default length=bp (the raw coverage in
+ * the cell).  fill_bins=1 emits length=B (full bin-width).  Otherwise
+ * length=max(bp, B*min_bin_frac).  See --fillBins / --minBinFrac help.
+ *
+ * s_ord_counter is the running tally of S-records written across the
+ * whole file (1-indexed; incremented before each S-record).  capture
+ * (full_name -> int64_t* s_ord) records the actual s_ord for each
+ * written S, used later to populate the d-record's parent-S pointer
+ * with the real ordinal (not the dir_index, which doesn't match the
+ * genome-roster emission order). */
 static void write_genome(OneFile *of, SeqGroup *groups, int64_t n_groups,
-                         int64_t B, int64_t *c_ord_emit) {
+                         int64_t B, int64_t *c_ord_emit,
+                         int64_t *s_ord_counter, stHash *capture,
+                         int fill_bins, double min_bin_frac) {
+    int64_t min_len = fill_bins ? B : (int64_t)(B * min_bin_frac);
+    if (min_len > B) min_len = B;
+    if (min_len < 0) min_len = 0;
     for (int64_t gi = 0; gi < n_groups; gi++) {
         SeqGroup *g = &groups[gi];
         /* S line: seq name + length-in-coarse-units = number of g_bins.
@@ -258,8 +381,18 @@ static void write_genome(OneFile *of, SeqGroup *groups, int64_t n_groups,
         for (int64_t i = 0; i < g->n_cells; i++)
             if (g->cells[i].g_bin > max_g_bin) max_g_bin = g->cells[i].g_bin;
         oneInt(of, 1) = (max_g_bin + 1) * B;   /* approximate seq_len upper bound */
+        ++(*s_ord_counter);                    /* this S becomes ordinal *s_ord_counter */
         oneWriteLine(of, 'S', strlen(g->full_name), (void *)g->full_name);
-        int64_t s_ord = g->seq_idx_in_dir + 1;
+        int64_t s_ord = *s_ord_counter;
+        /* Capture (full_name -> s_ord) so the d-record writer (post-loop)
+         * can point this seq's d-line at the right S-record.  The dir
+         * index does NOT match s_ord here: S-records come out in
+         * genome-roster order, while d-records are name-sorted globally. */
+        if (capture != NULL) {
+            int64_t *p = (int64_t *)st_malloc(sizeof(int64_t));
+            *p = s_ord;
+            stHash_insert(capture, stString_copy(g->full_name), p);
+        }
         int64_t i = 0;
         while (i < g->n_cells) {
             /* Build one chunk's triples.  cells[] is sorted by uc_bin
@@ -286,9 +419,11 @@ static void write_genome(OneFile *of, SeqGroup *groups, int64_t n_groups,
             int64_t *buf = (int64_t *)st_malloc((size_t)cm * 3 * sizeof(int64_t));
             for (int64_t k = 0; k < cm; k++) {
                 EmitCell *e = &g->cells[start + k];
+                int64_t len = e->bp;
+                if (len < min_len) len = min_len;
                 buf[3*k + 0] = e->g_bin * B;     /* t_start */
                 buf[3*k + 1] = e->uc_bin * B;    /* g_start */
-                buf[3*k + 2] = (e->bp << 1) | 0; /* lenc: + strand */
+                buf[3*k + 2] = (len << 1) | 0;   /* lenc: + strand */
             }
             int64_t raw_len = 0, def_len = 0;
             uint8_t *def = tui_encode_runs(buf, cm, &raw_len, &def_len);
@@ -378,18 +513,41 @@ int taf_coarsen_main(int argc, char *argv[]) {
     int64_t  min_cell_bp    = 1;
     int      from_tui       = 0;
     char    *lod_txt        = NULL;
+    char    *genome_list    = NULL;
     char    *log_level      = NULL;
+    /* Output-length policy.  Each cell carries the raw bp of source
+     * alignment that fell in (g_bin, uc_bin).  Default emits length=bp,
+     * which makes a partially-aligned bin render as a small block at
+     * the bin start in a snake viewer -- visually sparse.  --fillBins
+     * emits length=B so every cell with any alignment renders as a
+     * full bin-width block (lose coverage signal, gain visual
+     * continuity).  --minBinFrac F emits length=max(bp, B*F): keeps
+     * the variable-length signal but enforces a visible minimum.
+     * Mutually exclusive in effect: fillBins overrides minBinFrac. */
+    int      fill_bins      = 0;
+    double   min_bin_frac   = 0.0;
+    /* Per-uc_bin paralog cap.  At LOD, source paralogs that get scattered
+     * across many g_bins all share the same uc_bin and stack vertically
+     * in a snake viewer (each pile is one row of the chain).  This cap
+     * keeps at most the top-K cells (by bp) per (seq, uc_bin), removing
+     * the LOD-introduced paralog explosion.  0 = no cap (default). */
+    int64_t  max_paralogs_per_bin = 0;
 
-    enum { OPT_MIN_CELL_BP = 256, OPT_FROM_TUI, OPT_LOD_TXT };
+    enum { OPT_MIN_CELL_BP = 256, OPT_FROM_TUI, OPT_LOD_TXT, OPT_GENOME_LIST,
+           OPT_FILL_BINS, OPT_MIN_BIN_FRAC, OPT_MAX_PARALOGS_PER_BIN };
     static struct option long_options[] = {
-        { "inputFile",  required_argument, 0, 'i' },
-        { "outputFile", required_argument, 0, 'o' },
-        { "binSize",    required_argument, 0, 'B' },
-        { "minCellBp",  required_argument, 0, OPT_MIN_CELL_BP },
-        { "fromTui",    no_argument,       0, OPT_FROM_TUI },
-        { "lodTxt",     required_argument, 0, OPT_LOD_TXT },
-        { "logLevel",   required_argument, 0, 'l' },
-        { "help",       no_argument,       0, 'h' },
+        { "inputFile",          required_argument, 0, 'i' },
+        { "outputFile",         required_argument, 0, 'o' },
+        { "binSize",            required_argument, 0, 'B' },
+        { "minCellBp",          required_argument, 0, OPT_MIN_CELL_BP },
+        { "fromTui",            no_argument,       0, OPT_FROM_TUI },
+        { "lodTxt",             required_argument, 0, OPT_LOD_TXT },
+        { "genomeList",         required_argument, 0, OPT_GENOME_LIST },
+        { "fillBins",           no_argument,       0, OPT_FILL_BINS },
+        { "minBinFrac",         required_argument, 0, OPT_MIN_BIN_FRAC },
+        { "maxParalogsPerBin",  required_argument, 0, OPT_MAX_PARALOGS_PER_BIN },
+        { "logLevel",           required_argument, 0, 'l' },
+        { "help",               no_argument,       0, 'h' },
         { 0, 0, 0, 0 }
     };
 
@@ -401,9 +559,13 @@ int taf_coarsen_main(int argc, char *argv[]) {
             case 'i': input_file  = optarg; break;
             case 'o': output_file = optarg; break;
             case 'B': bin_size    = atoll(optarg); break;
-            case OPT_MIN_CELL_BP: min_cell_bp = atoll(optarg); break;
-            case OPT_FROM_TUI:    from_tui = 1; break;
-            case OPT_LOD_TXT:     lod_txt = optarg; break;
+            case OPT_MIN_CELL_BP:  min_cell_bp = atoll(optarg); break;
+            case OPT_FROM_TUI:     from_tui = 1; break;
+            case OPT_LOD_TXT:      lod_txt = optarg; break;
+            case OPT_GENOME_LIST:  genome_list = optarg; break;
+            case OPT_FILL_BINS:    fill_bins = 1; break;
+            case OPT_MIN_BIN_FRAC: min_bin_frac = atof(optarg); break;
+            case OPT_MAX_PARALOGS_PER_BIN: max_paralogs_per_bin = atoll(optarg); break;
             case 'l': log_level   = optarg; break;
             case 'h': usage(); return 0;
             default:  usage(); return 1;
@@ -417,6 +579,14 @@ int taf_coarsen_main(int argc, char *argv[]) {
     }
     if (min_cell_bp < 1) {
         fprintf(stderr, "ERROR: --minCellBp must be >= 1\n");
+        return 1;
+    }
+    if (min_bin_frac < 0.0 || min_bin_frac > 1.0) {
+        fprintf(stderr, "ERROR: --minBinFrac must be in [0.0, 1.0]\n");
+        return 1;
+    }
+    if (max_paralogs_per_bin < 0) {
+        fprintf(stderr, "ERROR: --maxParalogsPerBin must be >= 0\n");
         return 1;
     }
     st_setLogLevelFromString(log_level);
@@ -449,20 +619,73 @@ int taf_coarsen_main(int argc, char *argv[]) {
     st_logInfo("tui-coarsen: source .tui has T = %" PRIi64 " universal columns; "
                "bin size B = %" PRIi64 "\n", T_src, bin_size);
 
-    /* Load genome roster.  Hard-error on legacy .tui without g records;
-     * coarsening needs the correct genome list. */
+    /* Load genome roster.  Two sources, in order of preference:
+     *   1. --genomeList FILE  (transitional override; one name per line,
+     *      '#' comments OK).  Use when the .tui predates the g-record
+     *      schema and rebuilding isn't practical.  Each name must be a
+     *      real d-line prefix; mismatches are silently skipped.
+     *   2. The .tui's g records (the proper long-term path).
+     * If neither is available we refuse to coarsen -- guessing genome
+     * boundaries from d-line first-dot heuristics breaks on dotted
+     * accessions (GCA_028885655.2 vs GCA_028885655). */
     int64_t n_genomes = 0;
-    TuiGenomeInfo *roster = tui_genome_names(src_tui_path, &n_genomes);
-    if (roster == NULL || n_genomes == 0) {
-        fprintf(stderr,
-                "tui-coarsen: source .tui has no genome roster (g records).\n"
-                "  Rebuild the .tui with a newer taffy (commit b8f6811 or later)\n"
-                "  so genome resolution is exact.  Refusing to coarsen.\n");
-        tui_destruct(src);
-        free(src_tui_path); free(out_path_owned);
-        return 1;
+    TuiGenomeInfo *roster = NULL;
+    if (genome_list != NULL) {
+        /* Parse the genome list file: one name per line; skip blanks/
+         * '#' comments.  total_bp / n_chroms are unknown here (we only
+         * need names for coarsening), so populate as 0 -- they're only
+         * used when copying the g-record roster forward into the LOD
+         * file, and a missing g records source means the LOD won't have
+         * accurate totals either way (acceptable for the transitional
+         * path; documented in --genomeList help text). */
+        FILE *gf = fopen(genome_list, "r");
+        if (gf == NULL) {
+            fprintf(stderr, "tui-coarsen: cannot read --genomeList %s: %s\n",
+                    genome_list, strerror(errno));
+            tui_destruct(src);
+            free(src_tui_path); free(out_path_owned);
+            return 1;
+        }
+        int64_t cap = 32;
+        roster = (TuiGenomeInfo *)st_malloc((size_t)cap * sizeof(TuiGenomeInfo));
+        char *line = NULL; size_t lcap = 0; ssize_t got;
+        while ((got = getline(&line, &lcap, gf)) > 0) {
+            while (got > 0 && (line[got-1] == '\n' || line[got-1] == '\r'
+                              || line[got-1] == ' '  || line[got-1] == '\t')) {
+                line[--got] = 0;
+            }
+            char *s = line;
+            while (*s == ' ' || *s == '\t') s++;
+            if (*s == 0 || *s == '#') continue;
+            if (n_genomes == cap) {
+                cap *= 2;
+                roster = (TuiGenomeInfo *)st_realloc(roster,
+                                                    (size_t)cap * sizeof(TuiGenomeInfo));
+            }
+            roster[n_genomes].name     = stString_copy(s);
+            roster[n_genomes].total_bp = 0;
+            roster[n_genomes].n_chroms = 0;
+            n_genomes++;
+        }
+        free(line);
+        fclose(gf);
+        st_logInfo("tui-coarsen: %" PRIi64 " genomes from --genomeList %s\n",
+                   n_genomes, genome_list);
+    } else {
+        roster = tui_genome_names(src_tui_path, &n_genomes);
+        if (roster == NULL || n_genomes == 0) {
+            fprintf(stderr,
+                    "tui-coarsen: source .tui has no genome roster (g records).\n"
+                    "  Either rebuild the .tui with a newer taffy (commit b8f6811\n"
+                    "  or later) for the proper genome roster, OR pass\n"
+                    "  --genomeList <file> with one genome name per line as a\n"
+                    "  transitional workaround.  Refusing to coarsen without one.\n");
+            tui_destruct(src);
+            free(src_tui_path); free(out_path_owned);
+            return 1;
+        }
+        st_logInfo("tui-coarsen: %" PRIi64 " genomes from .tui g-records\n", n_genomes);
     }
-    st_logInfo("tui-coarsen: %" PRIi64 " genomes\n", n_genomes);
 
     /* Pull seq lengths for the directory.  Build name-sorted directory
      * (mirrors tui_create's tui.c:1441-1456 d-block). */
@@ -532,18 +755,21 @@ int taf_coarsen_main(int argc, char *argv[]) {
         free(xdef);
     }
 
-    /* d: directory, name-sorted, seqLen field = original base-pair length
-     * (we keep this faithful so taffy stats etc. still report sensible
-     * sizes; the COARSE seq-length lives implicitly in chunk g_max). */
-    for (int64_t i = 0; i < n_seqs; i++) {
-        oneInt(of, 1) = i;                   /* S-ord */
-        oneInt(of, 2) = dir[i].length;       /* seq length in base pairs */
-        oneWriteLine(of, 'd', strlen(dir[i].name), (void *)dir[i].name);
-    }
+    /* d-records are written LAST -- see the rationale block below the
+     * per-genome loop.  Briefly: each d-record stores the s_ord of its
+     * matching S-record, but the s_ord assignment depends on the order
+     * S-records are emitted (which follows the genome-roster order, not
+     * the name-sorted dir order).  So we collect the (name -> s_ord)
+     * mapping while writing S-records, then sort + emit d-records after. */
+
+    /* full_name -> int64_t* s_ord, populated by write_genome's S writes. */
+    stHash *capture = stHash_construct3(
+        stHash_stringKey, stHash_stringEqualKey, free, free);
 
     /* Per-genome coarsen + write.  Single-threaded for v1; OpenMP is a
      * follow-up (the parallel-for-ordered template at tui.c:1494-1512). */
     int64_t c_ord_emit = 0;
+    int64_t s_ord_emit = 0;
     time_t per_genome_t0 = time(NULL);
     for (int64_t gi = 0; gi < n_genomes; gi++) {
         const char *gname = roster[gi].name;
@@ -562,6 +788,14 @@ int taf_coarsen_main(int argc, char *argv[]) {
         tui_genome_lift_stream_runs(gl, coarsen_visit_cb, &cx);
 
         int64_t n_cells_raw = stHash_size(cx.cells);
+        if (max_paralogs_per_bin > 0) {
+            int64_t dropped = cell_dedup_paralogs(cx.cells, max_paralogs_per_bin);
+            if (dropped > 0) {
+                st_logDebug("tui-coarsen: %s: dedup dropped %" PRIi64
+                            " of %" PRIi64 " cells (max=%" PRIi64 ")\n",
+                            gname, dropped, n_cells_raw, max_paralogs_per_bin);
+            }
+        }
 
         SeqGroup *groups = NULL;
         int64_t n_groups = drain_cells(cx.cells, min_cell_bp,
@@ -575,15 +809,59 @@ int taf_coarsen_main(int argc, char *argv[]) {
             continue;
         }
 
-        write_genome(of, groups, n_groups, bin_size, &c_ord_emit);
+        write_genome(of, groups, n_groups, bin_size, &c_ord_emit,
+                     &s_ord_emit, capture,
+                     fill_bins, min_bin_frac);
 
+        /* Diagnostic: per-genome RSS + glibc heap trim.  On the 577-way
+         * we saw RSS grow ~30 MB/genome despite every per-genome alloc
+         * being freed; suspecting glibc ptmalloc arena retention from
+         * the millions-of-tiny-allocs workload (CellKey + int64_t +
+         * EmitCell per cell).  malloc_trim(0) hands free chunks at the
+         * top of the arena back to the OS; if RSS plateaus after this
+         * line, fragmentation was the cause.  Cheap (microseconds for
+         * arenas of this shape), so keep it on. */
+        malloc_trim(0);
+        struct rusage ru;
+        getrusage(RUSAGE_SELF, &ru);
         st_logInfo("tui-coarsen: %s: %" PRIi64 " cells (raw) over %" PRIi64
-                   " seqs in %" PRIi64 " s\n",
+                   " seqs in %" PRIi64 " s [rss %ld MB]\n",
                    gname, n_cells_raw, n_groups,
-                   (int64_t)(time(NULL) - g_t0));
+                   (int64_t)(time(NULL) - g_t0),
+                   ru.ru_maxrss / 1024);
     }
     st_logInfo("tui-coarsen: per-genome work done in %" PRIi64 " s\n",
                (int64_t)(time(NULL) - per_genome_t0));
+
+    /* d: directory.  Written AFTER S/C/R because each d-record stores
+     * the s_ord of its matching S-record (read back via oneGoto('S', ord)),
+     * and that ordinal is only known once write_genome has run.
+     *
+     * Dir order is name-sorted globally across all genomes (binary-search
+     * lookup requirement; see tui.h:97 + tui_find_d_lower_bound).  S-records
+     * are emitted in genome-roster order, so we cannot match s_ord = dir_idx.
+     * Instead we look each dir entry up in `capture`, populated by the per-
+     * genome S writes, and use its actual s_ord.  Inactive seqs (no
+     * alignment, so no S-record was written) get stored ord = -1 so the
+     * reader's oneGoto('S', 0) silently fails and the genome lift skips
+     * that seq cleanly.
+     *
+     * ONElib is order-agnostic on object types: the '&' footer index records
+     * file offsets per ordinal regardless of where in the file each object
+     * was written, so d-records after S/C/R index correctly.  Verified
+     * against the read-side binary search in tui_find_d_lower_bound. */
+    int64_t active_seqs = 0;
+    for (int64_t i = 0; i < n_seqs; i++) {
+        int64_t *ord_p = (int64_t *)stHash_search(capture, dir[i].name);
+        int64_t stored_ord = ord_p ? (*ord_p - 1) : (int64_t)(-1);
+        oneInt(of, 1) = stored_ord;
+        oneInt(of, 2) = dir[i].length;
+        oneWriteLine(of, 'd', strlen(dir[i].name), (void *)dir[i].name);
+        if (ord_p) active_seqs++;
+    }
+    st_logInfo("tui-coarsen: wrote %" PRIi64 " d-records (%" PRIi64
+               " active, %" PRIi64 " inactive sentinel ord=-1)\n",
+               (int64_t)n_seqs, active_seqs, (int64_t)n_seqs - active_seqs);
 
     /* g: genome roster -- copy over from source. */
     for (int64_t gi = 0; gi < n_genomes; gi++) {
@@ -591,6 +869,8 @@ int taf_coarsen_main(int argc, char *argv[]) {
         oneInt(of, 2) = roster[gi].n_chroms;
         oneWriteLine(of, 'g', strlen(roster[gi].name), (void *)roster[gi].name);
     }
+
+    stHash_destruct(capture);
 
     oneFileClose(of);
     oneSchemaDestroy(schema);
