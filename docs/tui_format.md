@@ -255,7 +255,7 @@ commits.
 ```
 P 3 tui                              universal column index
 
-D t 2 3 INT 3 INT                    total columns T (global), format_version
+D t 3 3 INT 3 INT 3 INT              total columns T (global), format major, minor
 D X 3 3 INT 3 INT 6 STRING           Index X: inflatedLen, nRec, deflate(SoA)
 O d 3 6 STRING 3 INT 3 INT           dir: seqName, S-ordinal, seqLen
 O S 4 6 STRING 3 INT 3 INT 3 INT     sequence object: seqName, seqLen,
@@ -267,24 +267,18 @@ D R 2 3 INT 6 STRING                 runs (one per chunk):
                                      inflatedLen, deflate(SoA delta blob)
 ```
 
-**Format version (the `t` record's second field).** The reader branches on
-it (`tui->format_version`).  Earlier `.tui` files (version 0) carried only
-`T` on `t`, a 2-field `S` (`seqName, seqLen`), and a 6-field — or, older
-still, 4-field — `C` (`g_min, g_max, parent S-ord, self c_ord [, t_min,
-t_max]`).  Version 1 (this document) moves the per-chunk file-addressing
-fields up to the per-sequence `S` record (`first_c_ord` = the file ordinal of
-the sequence's first chunk; `n_chunks` = its chunk count), so the chunk
-random-access the reverse lift needs once per sequence no longer costs two
-absolute integers on *every* chunk.  It also stores `g_max`/`t_max` as spans
-off `g_min`/`t_min` (smaller magnitude → fewer ltf8 bytes; `g_span` is bounded
-by `TUI_CHUNK_G_MAX`).  The new 4-field `C` collides by field count with the
-oldest 4-field legacy `C` but has different field semantics, hence the
-explicit version — the field count alone is no longer a sufficient
-discriminator.  All reader paths (`tui_query`, `tui_load_seq_runs`,
-`tui_genome_lift_*`) keep a version-0 branch, so old indexes still read
-byte-for-byte the same; version-1 also retires the dependence on ONElib's
-`oneObject(C)` accumulator (the lift now derives chunk ordinals from
-`first_c_ord + k`).
+**Format version (the `t` record's 2nd/3rd fields: `major`, `minor`).**
+`tui_load` REQUIRES an exact `0.1` and rejects any other version — there is no
+backward-compatible reader, so a format change of any kind means regenerating
+every `.tui` (the version started at `0.1`; the format is young and still
+moving).  The compact `C` moves the per-chunk file-addressing fields up to the
+per-sequence `S` record (`first_c_ord` = the file ordinal of the sequence's
+first chunk; `n_chunks` = its chunk count), so the chunk random-access the
+reverse lift needs once per sequence no longer costs two absolute integers on
+*every* chunk.  It also stores `g_max`/`t_max` as spans off `g_min`/`t_min`
+(smaller magnitude → fewer ltf8 bytes; `g_span` is bounded by `TUI_CHUNK_G_MAX`)
+and retires the dependence on ONElib's `oneObject(C)` accumulator (the lift
+derives chunk ordinals from `first_c_ord + k`).
 
 Write order: `t`, `X` (front-of-file, cheap whole-load), then the `d`
 directory in NAME-SORTED order (so the reader can binary-search it by name
@@ -365,23 +359,16 @@ abort loudly rather than emit a silently-truncated index.
   range of `t`.  In version 1 these are stored as `(g_min, g_span)` and
   `(t_min, t_span)` (the reader reconstructs `g_max = g_min + g_span`,
   `t_max = t_min + t_span`); the build does not assert tightness post hoc.
-- Format note: the on-disk format is versioned via the `t` record's second
-  field (`tui->format_version`).  Version 1 (current) uses a 4-field `C`
-  `{g_min, g_span, t_min, t_span}` and a 4-field `S`
-  `{seqName, seqLen, first_c_ord, n_chunks}`.  Version 0 covers all earlier
-  files: `t` = `{T}` only, `S` = `{seqName, seqLen}`, and `C` =
-  `{g_min, g_max, parent S-ord, self c_ord [, t_min, t_max]}` — a 6-field
-  shape with the t-range skip, or, older still, a 4-field shape without it.
-  The reader branches on the version (and, within version 0, on
-  `info['C']->nField` to detect the t-range fields); a missing-t-range
-  version-0 `C` falls back to the decode-every-chunk source-side path.  The
-  version-1 layout is what `taffy index -u` writes today; old indexes still
-  read identically.  Measured effect of the v0→v1 metadata reshape on the
-  8-way T2T apes universal MAF (76,819 chunks / 21,224 sequences, identical
-  chunking): `.tui` shrank 374.31 MB → 373.73 MB (−0.57 MB, −0.15%).  The
-  per-chunk saving (~9 ltf8 B) scales with chunk count, so the win grows
-  toward the vertebrate-scale chunk ceiling; at apes scale the run payload
-  is ~98.7% of the file and dominates.
+- Format note: the on-disk format carries `(major, minor)` on the `t`
+  record; `tui_load` requires an exact `0.1` and rejects anything else (no
+  backward-compatible reader — regenerate on a bump).  The layout is a
+  4-field `C` `{g_min, g_span, t_min, t_span}` and a 4-field `S`
+  `{seqName, seqLen, first_c_ord, n_chunks}`.  Measured effect of the
+  compact-`C` metadata reshape on the 8-way T2T apes universal MAF (76,819
+  chunks / 21,224 sequences, identical chunking): `.tui` shrank
+  374.31 MB → 373.73 MB (−0.57 MB, −0.15%).  The per-chunk saving (~9 ltf8 B)
+  scales with chunk count, so the win grows toward the vertebrate-scale chunk
+  ceiling; at apes scale the run payload is ~98.7% of the file and dominates.
 - Validation numbers (rodent 1.16 GiB → 253 MiB after delta+deflate)
   predate the chunked layout; the chunked format adds a tiny per-chunk
   overhead (16 B for the two new t-range INTs × ~6k-100M chunks at
