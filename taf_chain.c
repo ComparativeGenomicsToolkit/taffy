@@ -256,22 +256,23 @@ static int64_t bucket_by_seq(stList *chains, const char *genome,
     return n_g;
 }
 
-/* Encode and write one genome's chained runs as S/C/R chunks. */
+/* Encode and write one genome's chained runs via the shared tui_write_sequence
+ * (the single source of truth for the on-disk S/C/R layout). */
 static void write_genome(OneFile *of, SeqGroup *groups, int64_t n_groups,
                          int64_t *c_ord_emit, int64_t *s_ord_counter,
                          stHash *capture) {
     for (int64_t gi = 0; gi < n_groups; gi++) {
         SeqGroup *g = &groups[gi];
-        /* S: approximate seq_len = max(t_start + length) across this seq's chains. */
+        /* Approximate seq_len = max(t_start + length) across this seq's chains. */
         int64_t max_t_end = 0;
         for (int64_t i = 0; i < g->n_runs; i++) {
             ChainRun *cr = g->runs[i];
             int64_t te = cr->t_start + cr->length;
             if (te > max_t_end) max_t_end = te;
         }
-        oneInt(of, 1) = max_t_end;
+        /* s_ord bookkeeping for the directory's S-ordinal (implicit in write
+         * order; v1 C records carry no per-chunk parent-S-ord). */
         ++(*s_ord_counter);
-        oneWriteLine(of, 'S', strlen(g->full_name), (void *)g->full_name);
         int64_t s_ord = *s_ord_counter;
         if (capture != NULL) {
             int64_t *p = (int64_t *)st_malloc(sizeof(int64_t));
@@ -279,7 +280,10 @@ static void write_genome(OneFile *of, SeqGroup *groups, int64_t n_groups,
             stHash_insert(capture, stString_copy(g->full_name), p);
         }
 
-        /* Chunk the chained runs honoring TUI_CHUNK_RUNS + TUI_CHUNK_G_MAX. */
+        /* Chunk the chained runs (honoring TUI_CHUNK_RUNS + TUI_CHUNK_G_MAX)
+         * into the shared write descriptor, then emit via tui_write_sequence. */
+        TuiWriteChunk *wc = NULL;
+        int64_t nwc = 0, wc_cap = 0;
         int64_t i = 0;
         while (i < g->n_runs) {
             int64_t start = i;
@@ -315,18 +319,18 @@ static void write_genome(OneFile *of, SeqGroup *groups, int64_t n_groups,
             uint8_t *def = tui_encode_runs(buf, cm, &raw_len, &def_len);
             free(buf);
 
-            ++(*c_ord_emit);
-            oneInt(of, 0) = g_min;
-            oneInt(of, 1) = g_max;
-            oneInt(of, 2) = s_ord;
-            oneInt(of, 3) = *c_ord_emit;
-            oneInt(of, 4) = t_min;
-            oneInt(of, 5) = t_max;
-            oneWriteLine(of, 'C', 0, NULL);
-            oneInt(of, 0) = raw_len;
-            oneWriteLine(of, 'R', def_len, def);
-            free(def);
+            if (nwc == wc_cap) {
+                wc_cap = wc_cap ? wc_cap * 2 : 8;
+                wc = (TuiWriteChunk *)st_realloc(wc, wc_cap * sizeof(TuiWriteChunk));
+            }
+            wc[nwc].g_min = g_min; wc[nwc].g_max = g_max;
+            wc[nwc].t_min = t_min; wc[nwc].t_max = t_max;
+            wc[nwc].raw_len = raw_len; wc[nwc].def = def; wc[nwc].def_len = def_len;
+            nwc++;
         }
+        tui_write_sequence(of, g->full_name, max_t_end, wc, nwc, c_ord_emit);
+        for (int64_t k = 0; k < nwc; k++) free(wc[k].def);
+        free(wc);
         /* Each ChainRun was malloc'd in chain_visit_cb and owned via
          * SeqGroup.runs; free them now that they've been encoded. */
         for (int64_t i = 0; i < g->n_runs; i++) free(g->runs[i]);
@@ -528,9 +532,8 @@ int taf_chain_main(int argc, char *argv[]) {
         return 1;
     }
 
-    /* t: total columns (UNCHANGED -- chaining preserves universal coords). */
-    oneInt(of, 0) = T_src;
-    oneWriteLine(of, 't', 0, NULL);
+    /* t: total columns + format version (chaining preserves universal coords). */
+    tui_write_header(of, T_src);
 
     /* X: copy the source's X-record (universal-column -> .maf.gz file
      * position).  Chain merging doesn't change universal columns, so the

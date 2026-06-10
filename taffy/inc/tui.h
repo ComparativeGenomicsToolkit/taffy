@@ -420,6 +420,32 @@ OneFile *tui_open_write(const char *out_path, const char *prog,
                         const char *what, const char *blurb,
                         OneSchema **schema_out);
 
+/* Write the `t` header record: total universal columns + the current on-disk
+ * format version (major, minor).  Call once, right after tui_open_write. */
+void tui_write_header(OneFile *of, int64_t T);
+
+/* One output chunk for tui_write_sequence: the chunk's universal-column range
+ * [g_min, g_max) and source-coord range [t_min, t_max), plus its run blob
+ * (raw_len = inflated length; def/def_len = the deflate from tui_encode_runs).
+ * The caller owns `def`. */
+typedef struct {
+    int64_t  g_min, g_max;
+    int64_t  t_min, t_max;
+    int64_t  raw_len;
+    uint8_t *def;
+    int64_t  def_len;
+} TuiWriteChunk;
+
+/* Write one sequence -- the v1 `S` record (seqName, seqLen, first_c_ord,
+ * n_chunks) followed by its (C, R)+ chunk pairs -- advancing *c_ord_emit (the
+ * running file-position C ordinal).  THE single source of truth for the
+ * on-disk S/C/R layout: every .tui producer (taffy index, tui-chain) emits
+ * through here, so a format change can't be applied to one writer and missed
+ * in another.  Does NOT free the chunks' `def` blobs. */
+void tui_write_sequence(OneFile *of, const char *seq_name, int64_t seq_len,
+                        const TuiWriteChunk *chunks, int64_t n_chunks,
+                        int64_t *c_ord_emit);
+
 /* Encode `m` (t, g, lenc) triples in `buf` (m*3 int64) as the standard
  * .tui R-record payload: header + three SoA varint streams (gap | gsk |
  * lenc) + zlib deflate.  Caller frees the returned buffer.  *raw_len and

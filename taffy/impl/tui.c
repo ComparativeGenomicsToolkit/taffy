@@ -1137,6 +1137,38 @@ static Phase2Genome *phase2_genome_work(const P2GenomeRange *gr,
     return g;
 }
 
+// Write the `t` header record (total columns + format version major/minor).
+void tui_write_header(OneFile *of, int64_t T) {
+    oneInt(of, 0) = T;
+    oneInt(of, 1) = TUI_FORMAT_VERSION_MAJOR;
+    oneInt(of, 2) = TUI_FORMAT_VERSION_MINOR;
+    oneWriteLine(of, 't', 0, NULL);
+}
+
+// Emit one sequence: the v1 S record then its (C, R)+ chunk pairs.  THE single
+// source of truth for the on-disk S/C/R layout, shared by taffy index +
+// tui-chain so a format change can't be applied to one writer and missed in
+// the other.
+void tui_write_sequence(OneFile *of, const char *seq_name, int64_t seq_len,
+                        const TuiWriteChunk *chunks, int64_t n_chunks,
+                        int64_t *c_ord_emit) {
+    oneInt(of, 1) = seq_len;
+    oneInt(of, 2) = (*c_ord_emit) + 1;   // first_c_ord: this seq's 1st chunk (1-based)
+    oneInt(of, 3) = n_chunks;            // chunk count for this sequence
+    oneWriteLine(of, 'S', strlen(seq_name), (void *)seq_name);
+    for (int64_t k = 0; k < n_chunks; k++) {
+        const TuiWriteChunk *c = &chunks[k];
+        ++(*c_ord_emit);
+        oneInt(of, 0) = c->g_min;
+        oneInt(of, 1) = c->g_max - c->g_min;   // g_span >= 0 (<= TUI_CHUNK_G_MAX)
+        oneInt(of, 2) = c->t_min;
+        oneInt(of, 3) = c->t_max - c->t_min;   // t_span >= 0
+        oneWriteLine(of, 'C', 0, NULL);
+        oneInt(of, 0) = c->raw_len;
+        oneWriteLine(of, 'R', c->def_len, c->def);
+    }
+}
+
 // Writer: drain one genome's worker result into the OneFile.  Single-
 // threaded by construction (the OpenMP `ordered` region in the loop).
 // c_ord_emit is the file-position C ordinal counter.  v1 records, per
@@ -1148,22 +1180,17 @@ static Phase2Genome *phase2_genome_work(const P2GenomeRange *gr,
 static void phase2_genome_write(OneFile *of, Phase2Genome *g, int64_t *c_ord_emit) {
     for (int64_t i = 0; i < g->n_seqs; i++) {
         Phase2Seq *ps = &g->seqs[i];
-        oneInt(of, 1) = ps->slen;
-        oneInt(of, 2) = (*c_ord_emit) + 1;   // first_c_ord: this seq's 1st chunk (1-based)
-        oneInt(of, 3) = ps->n_chunks;        // n_chunks for this sequence
-        oneWriteLine(of, 'S', strlen(ps->seq_name), (void *)ps->seq_name);
+        // Hand the seq's chunks to the shared writer (single S/C/R layout).
+        TuiWriteChunk *wc = st_malloc((ps->n_chunks ? ps->n_chunks : 1) * sizeof(TuiWriteChunk));
         for (int64_t k = 0; k < ps->n_chunks; k++) {
             Phase2Chunk *c = &ps->chunks[k];
-            ++(*c_ord_emit);
-            oneInt(of, 0) = c->g_min;
-            oneInt(of, 1) = c->g_max - c->g_min;   // g_span >= 0 (<= TUI_CHUNK_G_MAX)
-            oneInt(of, 2) = c->t_min;
-            oneInt(of, 3) = c->t_max - c->t_min;   // t_span >= 0
-            oneWriteLine(of, 'C', 0, NULL);
-            oneInt(of, 0) = c->raw_len;
-            oneWriteLine(of, 'R', c->def_len, c->def);
-            free(c->def);
+            wc[k].g_min   = c->g_min;   wc[k].g_max = c->g_max;
+            wc[k].t_min   = c->t_min;   wc[k].t_max = c->t_max;
+            wc[k].raw_len = c->raw_len; wc[k].def   = c->def; wc[k].def_len = c->def_len;
         }
+        tui_write_sequence(of, ps->seq_name, ps->slen, wc, ps->n_chunks, c_ord_emit);
+        for (int64_t k = 0; k < ps->n_chunks; k++) free(ps->chunks[k].def);
+        free(wc);
         free(ps->chunks);
     }
     free(g->seqs);
@@ -1398,11 +1425,8 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
         return 1;
     }
 
-    // t: total columns + on-disk format version (major, minor).
-    oneInt(of, 0) = p1.T;
-    oneInt(of, 1) = TUI_FORMAT_VERSION_MAJOR;
-    oneInt(of, 2) = TUI_FORMAT_VERSION_MINOR;
-    oneWriteLine(of, 't', 0, NULL);
+    // t: total columns + on-disk format version.
+    tui_write_header(of, p1.T);
 
     // X: universal-column -> file_pos index (the .tai-equivalent).  Read the
     // column-ordered anchor spill, encode (deflated SoA), write one X line.
