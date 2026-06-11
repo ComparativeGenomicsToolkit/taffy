@@ -1764,13 +1764,13 @@ TuiInterval *tui_query(Tui *tui, const char *seq_name,
         memcmp(oneString(of), seq_name, sn) != 0) {
         return NULL;
     }
-    // Per-chunk t-range skip.  C records added t_min / t_max in field 4/5 to
-    // let the reader skip chunks whose source-coord range can't overlap
-    // [start, end) without paying the zlib decompress of the chunk's R blob
-    // (decode_runs+inflate is ~77% of taffy lift wall on rodents-scale .tui).
-    // C is {g_min, g_span, t_min, t_span}: the per-chunk t-range (t_max =
-    // t_min + t_span) is always present, so skip chunks disjoint from
-    // [start, end) before the (expensive) R decode.
+    // Per-chunk t-range skip.  Each C record carries the chunk's source-coord
+    // range (t_min at field 2, t_span at field 3) so the reader can skip
+    // chunks whose range can't overlap [start, end) without paying the zlib
+    // decompress of the chunk's R blob (decode_runs+inflate is ~77% of taffy
+    // lift wall on rodents-scale .tui).  C is {g_min, g_span, t_min, t_span};
+    // the t-range (t_max = t_min + t_span) is always present, so skip chunks
+    // disjoint from [start, end) before the (expensive) R decode.
     int64_t total = 0, cap = 0;
     while ((c = oneReadLine(of)) == 'C') {
         int64_t t_min = oneInt(of, 2);
@@ -1872,11 +1872,10 @@ int64_t *tui_load_seq_runs(Tui *tui, const char *seq_name, int64_t *n_out) {
         return NULL;
     }
     // Walk (C, R)+ chunk pairs and concat decoded triples into one flat
-    // array.  NB: tui_query has a per-chunk t-range skip (see C-record
-    // fields 4/5 + the c_has_t_range gate), this function deliberately
-    // does NOT skip -- its contract is "return ALL runs of the seq" so
-    // batch callers can binary-search the result by t_start in RAM.
-    // Skipping by t-range would defeat that contract.
+    // array.  NB: tui_query skips chunks by their t-range (C fields 2/3 =
+    // t_min, t_span); this function deliberately does NOT skip -- its
+    // contract is "return ALL runs of the seq" so batch callers can
+    // binary-search the result by t_start in RAM.  Skipping would defeat that.
     int64_t *runs = NULL;
     int64_t total = 0, cap = 0;
     while ((c = oneReadLine(of)) == 'C') {
@@ -1945,11 +1944,6 @@ struct _TuiGenomeLift {
     // serialize (blockViz holds g_mutex; CLI tools are single-threaded).
     OneFile   *of;
 };
-
-static int glrun_cmp(const void *a, const void *b) {
-    const GLRun *x = a, *y = b;
-    return (x->g_start < y->g_start) ? -1 : (x->g_start > y->g_start) ? 1 : 0;
-}
 
 static int tglchunk_cmp_gmin(const void *a, const void *b) {
     const TGLChunk *x = a, *y = b;
