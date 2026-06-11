@@ -436,15 +436,13 @@ typedef struct {
     int64_t  def_len;
 } TuiWriteChunk;
 
-/* Write one sequence -- the `S` record (seqName, seqLen, first_c_ord,
- * n_chunks) followed by its (C, R)+ chunk pairs -- advancing *c_ord_emit (the
- * running file-position C ordinal).  THE single source of truth for the
- * on-disk S/C/R layout: every .tui producer (taffy index, tui-chain) emits
- * through here, so a format change can't be applied to one writer and missed
- * in another.  Does NOT free the chunks' `def` blobs. */
+/* Write one sequence -- the `S` record (seqName, seqLen, n_chunks) followed by
+ * its (C, R)+ chunk pairs (C is a data line, not indexed).  THE single source
+ * of truth for the on-disk S/C/R layout: every .tui producer (taffy index,
+ * tui-chain) emits through here, so a format change can't be applied to one
+ * writer and missed in another.  Does NOT free the chunks' `def` blobs. */
 void tui_write_sequence(OneFile *of, const char *seq_name, int64_t seq_len,
-                        const TuiWriteChunk *chunks, int64_t n_chunks,
-                        int64_t *c_ord_emit);
+                        const TuiWriteChunk *chunks, int64_t n_chunks);
 
 /* Encode `m` (t, g, lenc) triples in `buf` (m*3 int64) as the standard
  * .tui R-record payload: header + three SoA varint streams (gap | gsk |

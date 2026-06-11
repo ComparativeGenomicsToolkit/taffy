@@ -255,8 +255,7 @@ static int64_t bucket_by_seq(stList *chains, const char *genome,
 /* Encode and write one genome's chained runs via the shared tui_write_sequence
  * (the single source of truth for the on-disk S/C/R layout). */
 static void write_genome(OneFile *of, SeqGroup *groups, int64_t n_groups,
-                         int64_t *c_ord_emit, int64_t *s_ord_counter,
-                         stHash *capture) {
+                         int64_t *s_ord_counter, stHash *capture) {
     for (int64_t gi = 0; gi < n_groups; gi++) {
         SeqGroup *g = &groups[gi];
         /* Approximate seq_len = max(t_start + length) across this seq's chains. */
@@ -324,7 +323,7 @@ static void write_genome(OneFile *of, SeqGroup *groups, int64_t n_groups,
             wc[nwc].raw_len = raw_len; wc[nwc].def = def; wc[nwc].def_len = def_len;
             nwc++;
         }
-        tui_write_sequence(of, g->full_name, max_t_end, wc, nwc, c_ord_emit);
+        tui_write_sequence(of, g->full_name, max_t_end, wc, nwc);
         for (int64_t k = 0; k < nwc; k++) free(wc[k].def);
         free(wc);
         /* Each ChainRun was malloc'd in chain_visit_cb and owned via
@@ -524,7 +523,6 @@ int taf_chain_main(int argc, char *argv[]) {
     stHash *capture = stHash_construct3(
         stHash_stringKey, stHash_stringEqualKey, free, free);
 
-    int64_t c_ord_emit = 0;
     int64_t s_ord_emit = 0;
     int64_t total_in   = 0, total_out = 0;
     time_t per_genome_t0 = time(NULL);
@@ -565,7 +563,7 @@ int taf_chain_main(int argc, char *argv[]) {
         stHash_destruct(cx.active);
         tui_genome_lift_destruct(gl);
 
-        write_genome(of, groups, n_groups, &c_ord_emit, &s_ord_emit, capture);
+        write_genome(of, groups, n_groups, &s_ord_emit, capture);
         /* write_genome frees each ChainRun struct + the groups[].runs
          * array + groups[].full_name + groups[].  No leftovers to clean. */
 

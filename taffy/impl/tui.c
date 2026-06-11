@@ -5,6 +5,8 @@
  *  Released under the MIT license, see LICENSE.txt
  */
 
+#define _GNU_SOURCE   /* ftello/fseeko with 64-bit off_t; matches ONElib.c */
+
 #include "taf.h"
 #include "tai.h"
 #include "tui.h"
@@ -49,34 +51,34 @@
 // format is young and expected to keep moving.)
 //
 //   t = {T, format_major, format_minor}
-//   S = {seqName, seqLen, first_c_ord, n_chunks}
+//   S = {seqName, seqLen, n_chunks}
 //   C = {g_min, g_span, t_min, t_span}  (4 INTs)
 //
-// The compact C moves the per-chunk file-addressing fields (parentS-ord +
-// self-c-ord) up to per-sequence S fields (first_c_ord + n_chunks): the lift
-// addresses a sequence's chunks as the file ordinals [first_c_ord,
-// first_c_ord+n_chunks) via oneGoto(C, ..), so the only-ever-used purpose of
-// the old per-chunk ordinals is served once per sequence instead of once per
-// chunk.  g_max/t_max are stored as spans off g_min/t_min (smaller magnitude
-// -> fewer ltf8 bytes; g_span is bounded by TUI_CHUNK_G_MAX).
+// C is a DATA line, not an object: there is no per-chunk goto-index (it would
+// dominate open cost at vertebrate scale -- ~hundreds of millions of entries,
+// ~GB resident, paid on every open).  A sequence's chunks are its contiguous
+// (C, R) pairs immediately following its S object; the lift seeks to the S
+// (still indexed) and walks them sequentially, recording each C's byte offset
+// in RAM for lazy R decode.  g_max/t_max are stored as spans off g_min/t_min
+// (smaller magnitude -> fewer ltf8 bytes; g_span is bounded by TUI_CHUNK_G_MAX).
 #define TUI_FORMAT_VERSION_MAJOR 0
-#define TUI_FORMAT_VERSION_MINOR 1
+#define TUI_FORMAT_VERSION_MINOR 2
 
 static const char *TUI_SCHEMA =
     "P 3 tui\n"
     "D t 3 3 INT 3 INT 3 INT\n"              // total columns T (global), format major, minor
     "D X 3 3 INT 3 INT 6 STRING\n"           // univ-col index: inflatedLen, nRec, deflate(SoA)
     "O d 3 6 STRING 3 INT 3 INT\n"           // dir: seqName, S-ordinal, seqLen -- O so oneGoto works
-    "O S 4 6 STRING 3 INT 3 INT 3 INT\n"     // sequence object: seqName, seqLen, first_c_ord, n_chunks
-    "O C 4 3 INT 3 INT 3 INT 3 INT\n"        // chunk header: g_min, g_span(=g_max-g_min),
-                                             //   t_min, t_span(=t_max-t_min).  g_span is bounded
-                                             //   by TUI_CHUNK_G_MAX; t_min/t_max(=t_min+t_span)
-                                             //   are the per-source-seq coordinate bounds, used
-                                             //   to skip chunks that don't overlap a source-side
+    "O S 3 6 STRING 3 INT 3 INT\n"           // sequence object: seqName, seqLen, n_chunks
+    "D C 4 3 INT 3 INT 3 INT 3 INT\n"        // chunk header (DATA line, NOT indexed):
+                                             //   g_min, g_span(=g_max-g_min), t_min,
+                                             //   t_span(=t_max-t_min).  g_span is bounded by
+                                             //   TUI_CHUNK_G_MAX; t_min/t_max(=t_min+t_span) are
+                                             //   the per-source-seq coordinate bounds, used to
+                                             //   skip chunks that don't overlap a source-side
                                              //   query without the zlib decode of the R blob.
-                                             //   The chunk's file ordinal and its parent S are
-                                             //   NOT stored here -- the lift derives them
-                                             //   from S's first_c_ord + n_chunks.
+                                             //   Reached sequentially from the seq's S (no goto
+                                             //   index); the lift records each C's byte offset.
     "D R 2 3 INT 6 STRING\n"                 // runs (one per chunk): inflatedLen, deflate(blob)
     "O g 3 6 STRING 3 INT 3 INT\n";          // genome roster (per resolved genome):
                                              //   name, total_bp (sum of seqLens),
@@ -962,12 +964,13 @@ static void tui_cleanup(Phase1 *p1, SeqKey *seqks, int64_t n_seqs,
 // Phase 2 worker / writer split.  The per-genome body (load spill -> sort
 // -> per-seq colinear merge -> chunk -> encode) is pure CPU once we have
 // the genome's spill path and per-seqks slen lookup; it has no shared
-// state.  The writer side (oneWriteLine S/C/R into the OneFile, plus the
-// file-position c_ord_emit counter that gets stamped into each C record)
-// must stay single-threaded.  We split the loop into:
+// state.  The writer side (oneWriteLine S/C/R into the OneFile) must stay
+// single-threaded -- both because ONElib isn't thread-safe and because the
+// lift relies on each genome's sequences (and each sequence's C/R pairs)
+// landing contiguously in file order.  We split the loop into:
 //
 //   phase2_genome_work(gi, ...) -> Phase2Genome*   [worker, parallel]
-//   phase2_genome_write(of, g, &c_ord_emit)        [writer, serial]
+//   phase2_genome_write(of, g)                     [writer, serial]
 //
 // so an OpenMP parallel-for-ordered can run N workers concurrently while
 // the ordered region serialises writes in seqks order (matching the
@@ -1145,15 +1148,12 @@ void tui_write_header(OneFile *of, int64_t T) {
 // tui-chain so a format change can't be applied to one writer and missed in
 // the other.
 void tui_write_sequence(OneFile *of, const char *seq_name, int64_t seq_len,
-                        const TuiWriteChunk *chunks, int64_t n_chunks,
-                        int64_t *c_ord_emit) {
+                        const TuiWriteChunk *chunks, int64_t n_chunks) {
     oneInt(of, 1) = seq_len;
-    oneInt(of, 2) = (*c_ord_emit) + 1;   // first_c_ord: this seq's 1st chunk (1-based)
-    oneInt(of, 3) = n_chunks;            // chunk count for this sequence
+    oneInt(of, 2) = n_chunks;            // chunk count for this sequence
     oneWriteLine(of, 'S', strlen(seq_name), (void *)seq_name);
     for (int64_t k = 0; k < n_chunks; k++) {
         const TuiWriteChunk *c = &chunks[k];
-        ++(*c_ord_emit);
         oneInt(of, 0) = c->g_min;
         oneInt(of, 1) = c->g_max - c->g_min;   // g_span >= 0 (<= TUI_CHUNK_G_MAX)
         oneInt(of, 2) = c->t_min;
@@ -1164,15 +1164,12 @@ void tui_write_sequence(OneFile *of, const char *seq_name, int64_t seq_len,
     }
 }
 
-// Writer: drain one genome's worker result into the OneFile.  Single-
-// threaded by construction (the OpenMP `ordered` region in the loop).
-// c_ord_emit is the file-position C ordinal counter.  The writer records, per
-// sequence S, the ordinal of its first chunk (first_c_ord = next C to be
-// written) plus its chunk count, so the lift addresses chunks by file
-// ordinal via oneGoto(C, first_c_ord+k) -- the per-chunk parent-S-ord and
-// self-c-ord of the old format are gone (and with them the dependence on ONElib's
-// unreliable oneObject(C) accumulator across cross-type oneGoto).
-static void phase2_genome_write(OneFile *of, Phase2Genome *g, int64_t *c_ord_emit) {
+// Writer: drain one genome's worker result into the OneFile.  Single-threaded
+// by construction (the OpenMP `ordered` region in the loop) so each genome's
+// sequences -- and each sequence's (C, R) chunk pairs -- land contiguously in
+// file order, which is what lets the lift walk a sequence's chunks
+// sequentially off its S record (C is a data line; there is no goto index).
+static void phase2_genome_write(OneFile *of, Phase2Genome *g) {
     for (int64_t i = 0; i < g->n_seqs; i++) {
         Phase2Seq *ps = &g->seqs[i];
         // Hand the seq's chunks to the shared writer (single S/C/R layout).
@@ -1183,7 +1180,7 @@ static void phase2_genome_write(OneFile *of, Phase2Genome *g, int64_t *c_ord_emi
             wc[k].t_min   = c->t_min;   wc[k].t_max = c->t_max;
             wc[k].raw_len = c->raw_len; wc[k].def   = c->def; wc[k].def_len = c->def_len;
         }
-        tui_write_sequence(of, ps->seq_name, ps->slen, wc, ps->n_chunks, c_ord_emit);
+        tui_write_sequence(of, ps->seq_name, ps->slen, wc, ps->n_chunks);
         for (int64_t k = 0; k < ps->n_chunks; k++) free(ps->chunks[k].def);
         free(wc);
         free(ps->chunks);
@@ -1493,8 +1490,8 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
     // construction (no first-dot-collision hazard, no re-resolve).
     //
     // Phase 2 is per-genome-independent CPU work; the actual writes into
-    // OneFile must stay serial (the c_ord_emit counter is the file-position
-    // C ordinal stamped INTO each C record, and ONElib isn't thread-safe).
+    // OneFile must stay serial (ONElib isn't thread-safe, and the lift needs
+    // each seq's C/R pairs contiguous in file order behind its S record).
     // We split into worker (sort/merge/chunk/encode -> Phase2Genome buffer)
     // and writer (oneWriteLine S/C/R) so the parallel loop below can use
     // schedule(dynamic) + ordered: workers in parallel, writes in seqks
@@ -1529,17 +1526,14 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
         slen_by_idx[k] = *(int64_t *)stHash_search(p1.seq_len, seqks[k].seq);
     }
 
-    // File-order C ordinal counter; assigned inside the writer.
-    int64_t c_ord_emit = 0;
-
     // Parallel-for over genomes.  schedule(dynamic, 1) gives one genome
     // per task -- well-matched to the heavy-tailed work (median 7s,
     // p95 407s on 577-way; the rare giants would clog a static partition).
     // ordered serialises the write region in iteration order = seqks order
-    // so the c_ord_emit counter and OneFile state stay un-contended and
-    // S record positions match the s_ord values already committed to the
-    // d directory above.  n_threads<=1 falls back to a serial loop (no
-    // OpenMP runtime cost).
+    // so OneFile state stays un-contended, each seq's C/R pairs stay
+    // contiguous behind its S, and S record positions match the s_ord values
+    // already committed to the d directory above.  n_threads<=1 falls back to
+    // a serial loop (no OpenMP runtime cost).
     //
     // MEMORY: each in-flight worker holds the FULL runs[] for its genome
     // (loaded by load_genome_runs, ~Run-struct + seq-string-copy per run)
@@ -1561,7 +1555,7 @@ int tui_create(LI *li, const char *out_path, const char *tmp_dir,
         #pragma omp ordered
         {
             int64_t nr_saved = gres->nr;
-            phase2_genome_write(of, gres, &c_ord_emit);
+            phase2_genome_write(of, gres);
             st_logInfo("tui: phase 2 genome %" PRIi64 "/%" PRIi64 " '%s' "
                        "worked in %" PRIi64 "s, written in %" PRIi64 "s "
                        "(%" PRIi64 " runs)\n",
@@ -1916,7 +1910,7 @@ typedef struct {
 // outside" test before paying the decode cost.
 typedef struct {
     int64_t g_min, g_max;        // column range from the C record
-    int64_t c_ord;               // 1-based C ordinal for oneGoto lazy load
+    int64_t c_byte;              // file offset of this chunk's C line (fseeko for lazy decode)
     int64_t seq_idx;             // index into TuiGenomeLift::seq_names
     GLRun  *runs;                // NULL until decoded; sorted by g_start
     int64_t n_runs;
@@ -2142,37 +2136,37 @@ TuiGenomeLift *tui_genome_lift_load(Tui *tui, const char *genome_name) {
 
     if (n == 0) { free(ents); oneFileClose(of); return NULL; }
 
-    // Pass 2: per-S walk -- for each of our target's sequences, oneGoto its
-    // S, then collect that seq's chunk metadata (C only, never the R blob; R
-    // is decoded lazily on first column-query hit).  Bypasses the global C
-    // list (which can be ~hundreds of thousands at vertebrate scale -- this
-    // targets only our few-tens to few-thousand seqs).
-    //
-    // S carries (first_c_ord, n_chunks); the chunks are the contiguous file
-    // ordinals [first_c_ord, first_c_ord+n_chunks), addressed via oneGoto(C).
-    // C is {g_min, g_span, ..} so g_max = g_min + g_span.
+    // Pass 2: per-S sequential walk -- for each target sequence, oneGoto its S
+    // (S stays an indexed object), then walk that seq's contiguous (C,R) pairs
+    // sequentially: record each C's byte offset for lazy chunk_decode, read its
+    // metadata, and skip past the paired R blob (decoded lazily on first
+    // column-query hit).  No oneGoto('C') -- the C metadata comes off the
+    // sequential stream, so the global C index is never consulted (it can be
+    // ~hundreds of millions of entries at vertebrate scale; this touches only
+    // our few-tens to few-thousand target seqs).  The (C,R) pairs follow S
+    // contiguously (genome-major, seq-contiguous, chunk-ordered writer).
+    // S carries n_chunks; C is {g_min, g_span, ..} so g_max = g_min + g_span.
     int64_t cap_c = 1024, nc = 0;
     TGLChunk *chunks = st_malloc(cap_c * sizeof(TGLChunk));
     for (int64_t k_seq = 0; k_seq < n; k_seq++) {
         int64_t s_ord = ents[k_seq].ord + 1;
         if (!oneGoto(of, 'S', s_ord)) continue;
         if (oneReadLine(of) != 'S') continue;
-        int64_t first_c_ord = oneInt(of, 2);
-        int64_t n_chunks    = oneInt(of, 3);
+        int64_t n_chunks = oneInt(of, 2);
         for (int64_t k = 0; k < n_chunks; k++) {
-            int64_t cur_c_ord = first_c_ord + k;
-            if (!oneGoto(of, 'C', cur_c_ord)) break;
+            int64_t c_byte            = ftello(of->f);          // this chunk's C line start
             if (oneReadLine(of) != 'C') break;
             if (nc == cap_c) { cap_c *= 2; chunks = st_realloc(chunks, cap_c * sizeof(TGLChunk)); }
             int64_t g_min             = oneInt(of, 0);
             chunks[nc].g_min          = g_min;
             chunks[nc].g_max          = g_min + oneInt(of, 1);  // g_span -> g_max
-            chunks[nc].c_ord          = cur_c_ord;
+            chunks[nc].c_byte         = c_byte;
             chunks[nc].seq_idx        = k_seq;
             chunks[nc].runs           = NULL;
             chunks[nc].n_runs         = 0;
             chunks[nc].max_end_prefix = NULL;
             nc++;
+            if (oneReadLineSkipList(of) != 'R') break;          // skip past the paired R blob (no fread/decode)
         }
     }
 
@@ -2221,7 +2215,7 @@ void tui_genome_lift_destruct(TuiGenomeLift *gl) {
     free(gl);
 }
 
-// Lazy-decode one chunk: oneGoto its C, read past C into the paired R, decode
+// Lazy-decode one chunk: fseeko to its recorded C offset, read C + the paired R, decode
 // the run triples, build GLRun array, build per-chunk max_end_prefix.
 // No-op if already decoded.  The writer pre-sorts each chunk's runs by
 // g_start, so the decoded triples come out g-sorted; no reader-side sort
@@ -2229,7 +2223,7 @@ void tui_genome_lift_destruct(TuiGenomeLift *gl) {
 // is not thread-safe).
 static void chunk_decode(TGLChunk *ch, OneFile *of) {
     if (ch->runs != NULL) return;
-    if (!oneGoto(of, 'C', ch->c_ord)) return;
+    if (fseeko(of->f, ch->c_byte, SEEK_SET) != 0) return;
     char c = oneReadLine(of);                  // C
     if (c != 'C') return;
     c = oneReadLine(of);                       // R (paired)

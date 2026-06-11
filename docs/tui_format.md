@@ -82,7 +82,7 @@ the writer never blows past `RLIMIT_NOFILE` at 1k+-genome scale.  See
 
 **Phase 2 — per-genome finalize.** Sort each spill by `(seq, t_start)`,
 colinear-merge runs across block boundaries, sort each chunk's runs by
-`g_start`, write the genome's `S` + (`C`, `R`)+ chunk objects.  One genome
+`g_start`, write the genome's `S` object + its (`C`, `R`)+ chunk pairs.  One genome
 at a time; genomes independent ⇒ parallelizable.
 
 Memory: bounded PER GENOME by that genome's spill size, not absolutely.
@@ -95,7 +95,7 @@ Each sequence's runs are split into chunks of `TUI_CHUNK_RUNS` (= 65536)
 runs at write time.  Within a chunk, runs are sorted by `g_start` (tight
 per-chunk `[g_min, g_max)` for the column-keyed lookups in Index L);
 between chunks, runs are still seq-major / t-major in the spill.  Each
-chunk pairs one `C` header object with one `R` payload data record.
+chunk is one `C` header data line plus one `R` payload data record.
 
 `R` is an explicit codec, not ONElib's built-in `INT_LIST` Huffman (which
 was poor on absolute `(t,g,len)` triples — measured ~13.7 B/run, 1.16 GiB
@@ -111,19 +111,20 @@ decompressing.
 ### Chunk metadata (`C` header)
 
 ```
-O C 4 INT INT INT INT             # g_min, g_span (=g_max-g_min),
+D C 4 INT INT INT INT             # g_min, g_span (=g_max-g_min),
                                   # t_min, t_span (=t_max-t_min)
 ```
 
 `g_min` + `g_span` give the chunk's universal-column range `[g_min,
 g_min+g_span)` (used by Index L's column-keyed lookup to early-out via
 `chunk_max_end[]`); `t_min` + `t_span` give the source-coord range (used by
-`tui_query` to skip non-overlapping chunks before decompress).  The chunk's
-parent sequence and its file ordinal are NOT stored on `C` in version 1 —
-Index L derives them from the parent `S` record's `first_c_ord` + `n_chunks`,
-and uses `oneGoto(C, first_c_ord+k)` for the lazy `R` decode.  (Version-0
-`C` records instead carried absolute `g_max`/`t_max` plus per-chunk `parent
-S-ord` and `self c_ord` fields.)
+`tui_query` to skip non-overlapping chunks before decompress).  `C` is a
+**data line, not an object** — there is no per-chunk goto-index (it would
+dominate open cost: ~hundreds of millions of entries / ~GB resident on a
+577-way, materialised on every open).  A sequence's chunks are simply its
+contiguous `(C, R)` pairs following its `S` object; the lift `oneGoto`s the
+`S` (still indexed) and walks them sequentially, recording each `C`'s byte
+offset in RAM for the lazy `R` decode.
 
 ---
 
@@ -141,13 +142,15 @@ layout.
 ### Load (`tui_genome_lift_load`)
 
 For target `G`: walk the `d` directory entries with prefix `"G."`,
-collect each matching seq's S-ordinal, jump to each S, read every C
-header (NOT the R payloads) into an in-memory `TGLChunk[]` array
-sorted by chunk `g_min`.  Build a running `max(g_max)` prefix array so
-the column-keyed lookup can early-exit when no earlier chunk could
-contain the queried column.  R payloads stay on disk; chunks are
-decoded LAZILY on first column hit (each `TGLChunk` keeps its file
-ordinal for `oneGoto(C, c_ord)` + `oneReadLine R`).
+collect each matching seq's S-ordinal, `oneGoto` each S, then walk that
+seq's contiguous `(C, R)` pairs sequentially -- reading every C header
+into an in-memory `TGLChunk[]` array sorted by chunk `g_min`, and skipping
+each R payload with `oneReadLineSkipList` (seeks past the blob without
+`fread`/decompress).  Build a running `max(g_max)` prefix array so the
+column-keyed lookup can early-exit when no earlier chunk could contain the
+queried column.  R payloads stay on disk; chunks are decoded LAZILY on
+first column hit (each `TGLChunk` keeps its `C` byte offset for `fseeko` +
+`oneReadLine C` + `oneReadLine R`).
 
 Memory at load: only chunk metadata (small).  Worst case after all
 chunks have been lazily decoded: the full target's lift table in RAM
@@ -250,7 +253,7 @@ own upstream). Binary form has a persisted per-object-type footer index
 Provenance/reference records tie it to the source MAF/TAF, `T`, cactus + hal
 commits.
 
-### Schema (as built — `taffy/impl/tui.c` `TUI_SCHEMA`, format version 1)
+### Schema (as built — `taffy/impl/tui.c` `TUI_SCHEMA`, format version 0.2)
 
 ```
 P 3 tui                              universal column index
@@ -258,9 +261,8 @@ P 3 tui                              universal column index
 D t 3 3 INT 3 INT 3 INT              total columns T (global), format major, minor
 D X 3 3 INT 3 INT 6 STRING           Index X: inflatedLen, nRec, deflate(SoA)
 O d 3 6 STRING 3 INT 3 INT           dir: seqName, S-ordinal, seqLen
-O S 4 6 STRING 3 INT 3 INT 3 INT     sequence object: seqName, seqLen,
-                                     first_c_ord, n_chunks
-O C 4 3 INT 3 INT 3 INT 3 INT        chunk header:
+O S 3 6 STRING 3 INT 3 INT           sequence object: seqName, seqLen, n_chunks
+D C 4 3 INT 3 INT 3 INT 3 INT        chunk header (DATA line, not indexed):
                                      g_min, g_span (= g_max - g_min),
                                      t_min, t_span (= t_max - t_min)
 D R 2 3 INT 6 STRING                 runs (one per chunk):
@@ -268,29 +270,31 @@ D R 2 3 INT 6 STRING                 runs (one per chunk):
 ```
 
 **Format version (the `t` record's 2nd/3rd fields: `major`, `minor`).**
-`tui_load` REQUIRES an exact `0.1` and rejects any other version — there is no
+`tui_load` REQUIRES an exact `0.2` and rejects any other version — there is no
 backward-compatible reader, so a format change of any kind means regenerating
 every `.tui` (the version started at `0.1`; the format is young and still
-moving).  The compact `C` moves the per-chunk file-addressing fields up to the
-per-sequence `S` record (`first_c_ord` = the file ordinal of the sequence's
-first chunk; `n_chunks` = its chunk count), so the chunk random-access the
-reverse lift needs once per sequence no longer costs two absolute integers on
-*every* chunk.  It also stores `g_max`/`t_max` as spans off `g_min`/`t_min`
-(smaller magnitude → fewer ltf8 bytes; `g_span` is bounded by `TUI_CHUNK_G_MAX`)
-and retires the dependence on ONElib's `oneObject(C)` accumulator (the lift
-derives chunk ordinals from `first_c_ord + k`).
+moving).  `C` is a **data line, not an object**: there is no per-chunk
+goto-index, which at vertebrate scale would dominate open cost (~hundreds of
+millions of `I64` offsets, ~GB resident, materialised on *every* open — and
+paid 3-4× per browser query across the lift / roster / chrom-list opens).  The
+lift instead `oneGoto`s a sequence's `S` (still indexed) and walks its
+contiguous `(C, R)` pairs sequentially, recording each `C`'s byte offset in RAM
+for the lazy `R` decode; `oneReadLineSkipList` seeks past each R blob during the
+scan without decompressing.  `C` also stores `g_max`/`t_max` as spans off
+`g_min`/`t_min` (smaller magnitude → fewer ltf8 bytes; `g_span` bounded by
+`TUI_CHUNK_G_MAX`).
 
 Write order: `t`, `X` (front-of-file, cheap whole-load), then the `d`
 directory in NAME-SORTED order (so the reader can binary-search it by name
 via `oneGoto(of,'d',mid)`), then per-sequence `S` followed by (`C`, `R`)+
 chunk pairs in genome-major order.  Genome is derived from the seq name
 at build (`genome_of`), used only to group per-genome spills; the reader
-does no genome resolution.  `first_c_ord` on each `S` is the running file
-ordinal of the next `C` to be written, so the lift addresses a sequence's
-chunks as the contiguous ordinal range `[first_c_ord, first_c_ord+n_chunks)`.
+does no genome resolution.  A sequence's chunks are its contiguous `(C, R)`
+pairs written immediately after its `S`, so the lift reaches them by a
+sequential walk off the `S` (no per-chunk ordinal is stored or needed).
 
-`d`, `S`, and `C` are all indexed object types (each gets a footer
-index).  `oneGoto(of,'d',i)` jumps to the i-th name-sorted directory
+`d` and `S` are indexed object types (each gets a footer index); `C` and `R`
+are data lines (no index).  `oneGoto(of,'d',i)` jumps to the i-th name-sorted directory
 entry; `oneGoto(of,'S',k)` jumps to the k-th genome-major sequence;
 `oneGoto(of,'C',c_ord)` jumps to a specific chunk header by file-order
 ordinal (used by Index L for lazy `R` decode).
@@ -356,19 +360,22 @@ abort loudly rather than emit a silently-truncated index.
   in `(column, file_pos)`; `idxCol[0] == 0` for MAF and any valid TAF.
 - Per-chunk `(g_min, g_max)` is the tight range of `g` over the chunk's
   runs after the writer's g-sort; per-chunk `(t_min, t_max)` is the tight
-  range of `t`.  In version 1 these are stored as `(g_min, g_span)` and
+  range of `t`.  These are stored as `(g_min, g_span)` and
   `(t_min, t_span)` (the reader reconstructs `g_max = g_min + g_span`,
   `t_max = t_min + t_span`); the build does not assert tightness post hoc.
 - Format note: the on-disk format carries `(major, minor)` on the `t`
-  record; `tui_load` requires an exact `0.1` and rejects anything else (no
+  record; `tui_load` requires an exact `0.2` and rejects anything else (no
   backward-compatible reader — regenerate on a bump).  The layout is a
-  4-field `C` `{g_min, g_span, t_min, t_span}` and a 4-field `S`
-  `{seqName, seqLen, first_c_ord, n_chunks}`.  Measured effect of the
-  compact-`C` metadata reshape on the 8-way T2T apes universal MAF (76,819
-  chunks / 21,224 sequences, identical chunking): `.tui` shrank
-  374.31 MB → 373.73 MB (−0.57 MB, −0.15%).  The per-chunk saving (~9 ltf8 B)
-  scales with chunk count, so the win grows toward the vertebrate-scale chunk
-  ceiling; at apes scale the run payload is ~98.7% of the file and dominates.
+  4-field `C` data line `{g_min, g_span, t_min, t_span}` (not indexed) and a
+  3-field `S` `{seqName, seqLen, n_chunks}`.  The 0.1 → 0.2 change demoted `C`
+  from an object to a data line, dropping its per-chunk goto-index.  That
+  index never appears on disk (the footer shrinks) and, more importantly, is
+  no longer materialised in RAM on open: ONElib otherwise builds an `I64`
+  offset array of one entry per chunk per object type, which on the 92 GB
+  577-way is ~1 GB / ~2.4 s — the dominant per-open cost, paid 3-4× per
+  browser query.  At apes scale the run payload is ~98.7% of the file and
+  dominates the on-disk size, so the footer saving is small; the open-cost
+  win scales with chunk count and is large only at vertebrate scale.
 - Validation numbers (rodent 1.16 GiB → 253 MiB after delta+deflate)
   predate the chunked layout; the chunked format adds a tiny per-chunk
   overhead (16 B for the two new t-range INTs × ~6k-100M chunks at
