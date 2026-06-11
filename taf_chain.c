@@ -75,10 +75,6 @@ static void usage(void) {
         "                          Chain-equivalent), 10000 (very aggressive).\n"
         "                          DEFAULT 1000.\n"
         "     --fromTui            Treat -i as the source .tui itself.\n"
-        "     --genomeList FILE    Read genome names from FILE (one per line;\n"
-        "                          '#' comments OK).  Overrides the g-record\n"
-        "                          roster requirement -- use when the source\n"
-        "                          .tui predates the g-record schema.\n"
         "  -l --logLevel STR       critical|info|debug.  DEFAULT critical.\n"
         "  -h --help               Print this help.\n");
 }
@@ -202,7 +198,7 @@ static int seq_group_cmp(const void *a, const void *b) {
 
 /* ------------------------------------------------------------------ */
 /* Per-genome emit: write S/C/R chunks honoring TUI caps.              */
-/* Mirrors taf_coarsen's write_genome.  Each S-record is one seq's      */
+/* Via the shared tui_write_sequence.  Each S-record is one seq's      */
 /* chained runs, packed into 1..N chunks (TUI_CHUNK_RUNS / G_MAX caps). */
 /* ------------------------------------------------------------------ */
 
@@ -271,7 +267,7 @@ static void write_genome(OneFile *of, SeqGroup *groups, int64_t n_groups,
             if (te > max_t_end) max_t_end = te;
         }
         /* s_ord bookkeeping for the directory's S-ordinal (implicit in write
-         * order; v1 C records carry no per-chunk parent-S-ord). */
+         * order; the C records carry no per-chunk parent-S-ord). */
         ++(*s_ord_counter);
         int64_t s_ord = *s_ord_counter;
         if (capture != NULL) {
@@ -341,7 +337,7 @@ static void write_genome(OneFile *of, SeqGroup *groups, int64_t n_groups,
 }
 
 /* ------------------------------------------------------------------ */
-/* Directory.  Mirrors taf_coarsen's dir handling.                     */
+/* Directory.  Name-sorted; written after all S/C/R.                     */
 /* ------------------------------------------------------------------ */
 
 typedef struct {
@@ -365,16 +361,14 @@ int taf_chain_main(int argc, char *argv[]) {
     char    *output_file    = NULL;
     int64_t  max_gap        = 1000;
     int      from_tui       = 0;
-    char    *genome_list    = NULL;
     char    *log_level      = NULL;
 
-    enum { OPT_FROM_TUI = 256, OPT_GENOME_LIST };
+    enum { OPT_FROM_TUI = 256 };
     static struct option long_options[] = {
         { "inputFile",   required_argument, 0, 'i' },
         { "outputFile",  required_argument, 0, 'o' },
         { "maxGap",      required_argument, 0, 'G' },
         { "fromTui",     no_argument,       0, OPT_FROM_TUI },
-        { "genomeList",  required_argument, 0, OPT_GENOME_LIST },
         { "logLevel",    required_argument, 0, 'l' },
         { "help",        no_argument,       0, 'h' },
         { 0, 0, 0, 0 }
@@ -388,7 +382,6 @@ int taf_chain_main(int argc, char *argv[]) {
             case 'o': output_file = optarg; break;
             case 'G': max_gap     = atoll(optarg); break;
             case OPT_FROM_TUI:    from_tui = 1; break;
-            case OPT_GENOME_LIST: genome_list = optarg; break;
             case 'l': log_level   = optarg; break;
             case 'h': usage(); return 0;
             default:  usage(); return 1;
@@ -440,52 +433,17 @@ int taf_chain_main(int argc, char *argv[]) {
     st_logInfo("tui-chain: source .tui has T = %" PRIi64 " universal columns; "
                "maxGap = %" PRIi64 "\n", T_src, max_gap);
 
-    /* Load genome roster (--genomeList or g-records). */
+    /* Load the genome roster from the source's g-records. */
     int64_t n_genomes = 0;
-    TuiGenomeInfo *roster = NULL;
-    if (genome_list != NULL) {
-        FILE *gf = fopen(genome_list, "r");
-        if (gf == NULL) {
-            fprintf(stderr, "tui-chain: cannot read --genomeList %s: %s\n",
-                    genome_list, strerror(errno));
-            tui_destruct(src); free(src_tui_path); free(out_path_owned);
-            return 1;
-        }
-        int64_t cap = 32;
-        roster = (TuiGenomeInfo *)st_malloc((size_t)cap * sizeof(TuiGenomeInfo));
-        char *line = NULL; size_t lcap = 0; ssize_t got;
-        while ((got = getline(&line, &lcap, gf)) > 0) {
-            while (got > 0 && (line[got-1] == '\n' || line[got-1] == '\r'
-                              || line[got-1] == ' '  || line[got-1] == '\t')) {
-                line[--got] = 0;
-            }
-            char *s = line;
-            while (*s == ' ' || *s == '\t') s++;
-            if (*s == 0 || *s == '#') continue;
-            if (n_genomes == cap) {
-                cap *= 2;
-                roster = (TuiGenomeInfo *)st_realloc(roster,
-                                                    (size_t)cap * sizeof(TuiGenomeInfo));
-            }
-            roster[n_genomes].name     = stString_copy(s);
-            roster[n_genomes].total_bp = 0;
-            roster[n_genomes].n_chroms = 0;
-            n_genomes++;
-        }
-        free(line); fclose(gf);
-        st_logInfo("tui-chain: %" PRIi64 " genomes from --genomeList %s\n",
-                   n_genomes, genome_list);
-    } else {
-        roster = tui_genome_names(src_tui_path, &n_genomes);
-        if (roster == NULL || n_genomes == 0) {
-            fprintf(stderr,
-                    "tui-chain: source .tui has no g-records.  Either rebuild\n"
-                    "  with newer taffy or pass --genomeList <file>.\n");
-            tui_destruct(src); free(src_tui_path); free(out_path_owned);
-            return 1;
-        }
-        st_logInfo("tui-chain: %" PRIi64 " genomes from .tui g-records\n", n_genomes);
+    TuiGenomeInfo *roster = tui_genome_names(src_tui_path, &n_genomes);
+    if (roster == NULL || n_genomes == 0) {
+        fprintf(stderr,
+                "tui-chain: source .tui has no g-records "
+                "(corrupt, or not built by `taffy index -u`?)\n");
+        tui_destruct(src); free(src_tui_path); free(out_path_owned);
+        return 1;
     }
+    st_logInfo("tui-chain: %" PRIi64 " genomes from .tui g-records\n", n_genomes);
 
     /* Build the directory (name-sorted, same as source). */
     stHash *seqlens = tui_sequence_lengths(src_tui_path);
@@ -562,7 +520,7 @@ int taf_chain_main(int argc, char *argv[]) {
     }
 
     /* capture: full_name -> s_ord, used by deferred d-record writer.
-     * Same fix pattern as taf_coarsen post-bug. */
+     * See the deferred d: directory writer below. */
     stHash *capture = stHash_construct3(
         stHash_stringKey, stHash_stringEqualKey, free, free);
 
@@ -631,7 +589,7 @@ int taf_chain_main(int argc, char *argv[]) {
                total_in > 0 ? (double)total_in / (double)total_out : 0.0);
 
     /* d: directory.  Written AFTER S/C/R, same deferred-pointer pattern as
-     * taf_coarsen post-fix (see big comment block there).  active seqs get
+     * the capture map built above.  active seqs get
      * their captured s_ord; inactive get sentinel -1. */
     int64_t active_seqs = 0;
     for (int64_t i = 0; i < n_seqs; i++) {

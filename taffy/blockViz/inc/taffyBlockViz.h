@@ -344,7 +344,7 @@ void taffyFreeMetadataList(struct taffy_metadata_t *metadata);
  *   - COVERAGE (wide span, once span/max_output_blocks exceeds a ~10 kb
  *     bin): the span is tiled into <= max_output_blocks absolute-aligned
  *     bins, one coverage block per occupied bin; per-dupe detail is
- *     dropped.  For very wide overviews a coarsened LOD .tui is cheaper.
+ *     dropped.
  *
  * Pipeline:
  *   1. The tSpecies range is mapped to universal-column intervals; for
@@ -415,19 +415,10 @@ struct taffy_block_results_t *taffyGetBlocksInTargetRange_filterByChrom(
 
 /** List of all genomes in the .tui (sorted alphabetically).
  * `parentName` and `parentBranchLength` are stubbed to "" / 0.0 in
- * this initial cut.
- *
- * .TUI REBUILD NOTE: when the .tui contains a g-record genome roster
- * (added at writer time -- see tui_create / "O g" records in the
- * schema), the full genome name including any version suffix is
- * returned ("GCA_028858775.2").  When the .tui PREDATES the g-record
- * schema (e.g. the existing cluster 92 GB 577-way .tui), this falls
- * back to splitting d-line keys on the FIRST dot, which truncates
- * dotted names ("GCA_028858775.2" -> "GCA_028858775").  Rebuild the
- * .tui to fix.  The actual query functions
- * (taffyGetBlocksInTargetRange, taffyGetChroms) take the full genome
- * string from the caller and work correctly either way; the
- * truncation only affects this cosmetic listing. */
+ * this initial cut.  Genome names -- including any dotted version
+ * suffix (NCBI accessions like "GCA_028858775.2") -- come straight
+ * from the .tui's "O g" genome-record roster, which every .tui
+ * carries. */
 struct taffy_species_t *taffyGetSpecies(int taffyHandle, char **errStr);
 
 /** List of chromosomes in the named genome (sorted alphabetically). */

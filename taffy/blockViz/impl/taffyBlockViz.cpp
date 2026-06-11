@@ -393,10 +393,9 @@ extern "C" void taffyFreeMetadataList(struct taffy_metadata_t *m) {
 /* ------------------------------------------------------------------ */
 
 // Per-genome row.  Source of truth is the .tui's g-record roster
-// (tui_genome_names) when present.  Older .tui files without g-records
-// fall back to a first-dot split of "<genome>.<seq>" d-line keys, which
-// is wrong for genome names containing dots (NCBI accessions like
-// "GCA_028858775.2") but the only option short of a rebuild.
+// (tui_genome_names); every .tui carries it, so the full genome name
+// -- including any dotted version suffix (NCBI accessions like
+// "GCA_028858775.2") -- comes straight from the roster.
 struct GenomeRow { std::string genome; taffy_int_t total_bp = 0; taffy_int_t n_chroms = 0; };
 
 static std::map<std::string, GenomeRow> enumerate_genomes(TaffyHandle *H) {
@@ -404,37 +403,15 @@ static std::map<std::string, GenomeRow> enumerate_genomes(TaffyHandle *H) {
 
     int64_t n_g = 0;
     TuiGenomeInfo *roster = tui_genome_names(H->tui_path_str.c_str(), &n_g);
-    if (roster != nullptr && n_g > 0) {
-        for (int64_t i = 0; i < n_g; i++) {
-            GenomeRow row;
-            row.genome   = roster[i].name;
-            row.total_bp = roster[i].total_bp;
-            row.n_chroms = roster[i].n_chroms;
-            out[row.genome] = row;
-        }
-        tui_genome_info_free(roster, n_g);
-        return out;
+    if (roster == nullptr || n_g <= 0) return out;
+    for (int64_t i = 0; i < n_g; i++) {
+        GenomeRow row;
+        row.genome   = roster[i].name;
+        row.total_bp = roster[i].total_bp;
+        row.n_chroms = roster[i].n_chroms;
+        out[row.genome] = row;
     }
-
-    // Fallback for pre-roster .tui: split d-line keys on the FIRST dot.
-    // Misclassifies dotted genome names; reported as a known limitation
-    // in the taffyGetSpecies header doc.
-    stHash *seqs = tui_sequence_lengths(H->tui_path_str.c_str());
-    if (!seqs) return out;
-    stHashIterator *it = stHash_getIterator(seqs);
-    char *k;
-    while ((k = (char *) stHash_getNext(it)) != NULL) {
-        char *dot = strchr(k, '.');
-        if (!dot) continue;
-        std::string genome(k, dot - k);
-        int64_t len = (int64_t)(intptr_t) stHash_search(seqs, k);
-        GenomeRow &row = out[genome];
-        if (row.genome.empty()) row.genome = genome;
-        row.total_bp += len;
-        row.n_chroms++;
-    }
-    stHash_destructIterator(it);
-    stHash_destruct(seqs);
+    tui_genome_info_free(roster, n_g);
     return out;
 }
 

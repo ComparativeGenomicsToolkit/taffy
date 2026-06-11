@@ -344,7 +344,7 @@ void tui_genome_lift_visit_runs(TuiGenomeLift *gl, int64_t c_lo, int64_t c_hi,
  * on giant ancestors).  Chunks that were ALREADY decoded by an earlier
  * caller are left intact -- safe to interleave with visit_runs callers.
  *
- * For one-shot whole-genome scans (taf_coarsen) where each chunk is
+ * For one-shot whole-genome scans (tui-chain) where each chunk is
  * touched exactly once and the visit_runs cache would only inflate
  * peak RSS.  The cb callback contract matches visit_runs.
  */
@@ -390,8 +390,8 @@ int64_t tui_extract_col_start(const TuiExtractIt *it);
 
 /////////////////////////////////////////////////////////////////////////////
 // internal: shared writer-side primitives.  Exported so secondary writers
-// (currently taf_coarsen.c, which builds LOD-resolution .tui files from
-// existing .tui inputs) reuse the same on-disk encoding without copy-paste
+// (currently tui-chain, which builds chained .tui files from existing
+// .tui inputs) reuse the same on-disk encoding without copy-paste
 // of the encode/cleanup logic.  NOT part of the stable public API; format
 // changes here must update BOTH tui_create AND every other writer.
 //
@@ -436,7 +436,7 @@ typedef struct {
     int64_t  def_len;
 } TuiWriteChunk;
 
-/* Write one sequence -- the v1 `S` record (seqName, seqLen, first_c_ord,
+/* Write one sequence -- the `S` record (seqName, seqLen, first_c_ord,
  * n_chunks) followed by its (C, R)+ chunk pairs -- advancing *c_ord_emit (the
  * running file-position C ordinal).  THE single source of truth for the
  * on-disk S/C/R layout: every .tui producer (taffy index, tui-chain) emits

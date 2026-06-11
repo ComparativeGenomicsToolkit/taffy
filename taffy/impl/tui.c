@@ -75,19 +75,14 @@ static const char *TUI_SCHEMA =
                                              //   to skip chunks that don't overlap a source-side
                                              //   query without the zlib decode of the R blob.
                                              //   The chunk's file ordinal and its parent S are
-                                             //   NOT stored here in v1 -- the lift derives them
+                                             //   NOT stored here -- the lift derives them
                                              //   from S's first_c_ord + n_chunks.
     "D R 2 3 INT 6 STRING\n"                 // runs (one per chunk): inflatedLen, deflate(blob)
     "O g 3 6 STRING 3 INT 3 INT\n";          // genome roster (per resolved genome):
                                              //   name, total_bp (sum of seqLens),
                                              //   n_chroms.  Written at the end of
                                              //   the .tui after all per-seq d/S/C/R
-                                             //   are emitted.  Old .tui (pre-roster)
-                                             //   files lack this line type entirely;
-                                             //   tui_genome_names() detects the
-                                             //   absence via of->info['g']==NULL and
-                                             //   returns NULL so callers can fall
-                                             //   back to a heuristic.
+                                             //   are emitted -- every .tui has it.
 
 // Writer-side chunk caps.  A chunk closes when EITHER trigger fires:
 //
@@ -205,7 +200,7 @@ static void tui_atexit_track_spill(const char *path) {
 
 // Track the .tui output path so a half-written file is removed on crash.
 // Called after oneFileOpenWriteNew() succeeds; cleared by tui_atexit_disarm().
-// Exported (extern in tui.h) so secondary writers (taf_coarsen) can use the
+// Exported (extern in tui.h) so secondary writers (taf_chain) can use the
 // same crash-cleanup safety net.
 void tui_atexit_track_tui(const char *path) {
     if (atexit_tui_path != NULL) { free(atexit_tui_path); }
@@ -213,7 +208,7 @@ void tui_atexit_track_tui(const char *path) {
 }
 
 // Disarm the crash cleanup on the normal success path, BEFORE tui_cleanup()
-// frees its path strings.  Idempotent.  Exported for taf_coarsen.
+// frees its path strings.  Idempotent.  Exported for taf_chain.
 void tui_atexit_disarm(void) {
     if (atexit_spill_paths != NULL) {
         stList_destruct(atexit_spill_paths);
@@ -805,7 +800,7 @@ static Run *load_genome_runs(const char *path, int64_t *n_out,
 //
 // Raw layout: header [uvarint m, uvarint |gap bytes|, uvarint |gsk bytes|]
 // then gap||gsk||lenc.  raw_len bounds the inflate buffer; m bounds decode.
-/* Exported via tui.h (internal-but-shared with taf_coarsen). */
+/* Exported via tui.h (internal-but-shared with taf_chain). */
 uint8_t *tui_encode_runs(const int64_t *buf, int64_t m,
                          int64_t *raw_len, int64_t *def_len) {
     uint8_t *G = st_malloc((size_t)(m * 10 + 1));   // gap stream
@@ -876,7 +871,7 @@ static int64_t decode_runs(const uint8_t *def, int64_t def_len,
 // increasing in anchor order, so plain non-negative uvarint deltas (no
 // zigzag).  Two SoA streams C|F; header = uvarint(n), uvarint(|C bytes|);
 // one zlib deflate.  Same shape as encode_runs but tuned for the index pairs.
-/* Exported via tui.h (internal-but-shared with taf_coarsen). */
+/* Exported via tui.h (internal-but-shared with taf_chain). */
 uint8_t *tui_encode_idx(const int64_t *col, const int64_t *fpos, int64_t n,
                         int64_t *raw_len, int64_t *def_len) {
     uint8_t *C = st_malloc((size_t)(n * 10 + 1));
@@ -1145,7 +1140,7 @@ void tui_write_header(OneFile *of, int64_t T) {
     oneWriteLine(of, 't', 0, NULL);
 }
 
-// Emit one sequence: the v1 S record then its (C, R)+ chunk pairs.  THE single
+// Emit one sequence: the S record then its (C, R)+ chunk pairs.  THE single
 // source of truth for the on-disk S/C/R layout, shared by taffy index +
 // tui-chain so a format change can't be applied to one writer and missed in
 // the other.
@@ -1171,11 +1166,11 @@ void tui_write_sequence(OneFile *of, const char *seq_name, int64_t seq_len,
 
 // Writer: drain one genome's worker result into the OneFile.  Single-
 // threaded by construction (the OpenMP `ordered` region in the loop).
-// c_ord_emit is the file-position C ordinal counter.  v1 records, per
+// c_ord_emit is the file-position C ordinal counter.  The writer records, per
 // sequence S, the ordinal of its first chunk (first_c_ord = next C to be
 // written) plus its chunk count, so the lift addresses chunks by file
 // ordinal via oneGoto(C, first_c_ord+k) -- the per-chunk parent-S-ord and
-// self-c-ord of v0 are gone (and with them the dependence on ONElib's
+// self-c-ord of the old format are gone (and with them the dependence on ONElib's
 // unreliable oneObject(C) accumulator across cross-type oneGoto).
 static void phase2_genome_write(OneFile *of, Phase2Genome *g, int64_t *c_ord_emit) {
     for (int64_t i = 0; i < g->n_seqs; i++) {
@@ -1203,7 +1198,7 @@ static void phase2_genome_write(OneFile *of, Phase2Genome *g, int64_t *c_ord_emi
  * oneFileClose).  Returns NULL on open failure -- caller is responsible
  * for any pre-allocated state cleanup and calling tui_atexit_disarm().
  *
- * Exported via tui.h (internal-but-shared with taf_coarsen) so any tool
+ * Exported via tui.h (internal-but-shared with taf_chain) so any tool
  * writing a .tui-format file uses the same boilerplate and the same
  * crash safety net.  prog/what/blurb populate the OneCode provenance
  * record (oneAddProvenance) -- same call shape tui_create uses. */
@@ -2064,9 +2059,9 @@ TuiGenomeInfo *tui_genome_names(const char *tui_path, int64_t *n_out) {
     if (tui_path == NULL) return NULL;
     OneFile *of = oneFileOpenRead(tui_path, NULL, "tui", 1);
     if (of == NULL) return NULL;
-    // Backward-compat: old .tui files predating the g-record schema lack
-    // the 'g' line type entirely; ONElib leaves of->info['g']==NULL in
-    // that case.  Return NULL so callers can fall back to a heuristic.
+    // Every .tui carries the 'g' roster; this guard is purely defensive
+    // -- a truncated or hand-built file could omit the line type, leaving
+    // of->info['g']==NULL, and the oneStats below would then deref it.
     if (of->info[(int)'g'] == NULL) { oneFileClose(of); return NULL; }
     I64 n_g = 0;
     oneStats(of, 'g', &n_g, NULL, NULL);
@@ -2457,7 +2452,7 @@ void tui_genome_lift_stream_runs(TuiGenomeLift *gl,
      * forever on the assumption that browser pan/zoom will hit them
      * again), this trades cache reuse for bounded memory -- only one
      * chunk's decoded runs are resident at a time (~3 MB peak).  For
-     * whole-genome scanning workloads (taf_coarsen) where each chunk
+     * whole-genome scanning workloads (taf_chain) where each chunk
      * is touched exactly once and the cache would only inflate peak
      * RSS to many tens of GB on giant ancestors. */
     for (int64_t ci = 0; ci < gl->n_chunks; ci++) {
