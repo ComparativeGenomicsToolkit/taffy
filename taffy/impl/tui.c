@@ -1612,8 +1612,10 @@ struct _Tui {
     int64_t T;          // total universal columns
     int64_t n_d;        // number of d-lines (binary-search upper bound)
     // Universal-column -> file_pos index (X track); both strictly increasing.
-    int64_t *idxCol, *idxFpos;
-    int64_t  idxN;
+    int64_t *idxCol, *idxFpos;   // NULL until lazily inflated (tui_idx_ensure)
+    int64_t  idxN;               // anchor count -- known at load, no inflate
+    uint8_t *idxDef;             // compressed X blob, kept for lazy inflate (freed on decode)
+    int64_t  idxDefLen, idxRawLen;
     // Cached OneFile handle, reused across tui_query / tui_load_seq_runs.
     // oneFileOpenRead on a multi-GB .tui parses the embedded schema + reads
     // the full footer index for every object type (S / C / R / d / X / t) --
@@ -1655,15 +1657,20 @@ Tui *tui_load(const char *tui_path) {
             }
             seen_t = 1;
         } else if (c == 'X') {
+            // Keep only the compressed X-anchor blob; defer the inflate to first
+            // use (tui_idx_ensure).  Inflating X is ~37% of open on a big .tui,
+            // and the coord lift + blockViz never touch it -- only tui_extract
+            // (view -r) and tui-chain do.  oneString's buffer is reused on the
+            // next read, so copy the blob now.
             int64_t x_raw = oneInt(of, 0);
             int64_t xn    = oneInt(of, 1);
             int64_t x_def = oneLen(of);
             const uint8_t *xdef = (const uint8_t *)oneString(of);
-            int64_t cap = xn ? xn : 1;
-            tui->idxCol  = st_malloc(cap * sizeof(int64_t));
-            tui->idxFpos = st_malloc(cap * sizeof(int64_t));
-            tui->idxN = decode_idx(xdef, x_def, x_raw, tui->idxCol, tui->idxFpos);
-            assert(tui->idxN == xn);
+            tui->idxN      = xn;
+            tui->idxRawLen = x_raw;
+            tui->idxDefLen = x_def;
+            tui->idxDef    = st_malloc((size_t)(x_def ? x_def : 1));
+            memcpy(tui->idxDef, xdef, (size_t)x_def);
             seen_x = 1;
         }
     }
@@ -1681,16 +1688,31 @@ Tui *tui_load(const char *tui_path) {
 void tui_destruct(Tui *tui) {
     if (tui == NULL) return;
     if (tui->of != NULL) oneFileClose(tui->of);
-    free(tui->idxCol); free(tui->idxFpos);
+    free(tui->idxCol); free(tui->idxFpos); free(tui->idxDef);
     free(tui->path);
     free(tui);
 }
 
 int64_t tui_total_columns(const Tui *tui) { return tui->T; }
 
+// Lazily inflate the X anchor index on first use.  tui_load keeps only the
+// compressed blob (idxDef); inflating it is ~37% of open on a big .tui and is
+// needed only by tui_extract (view -r) and tui-chain, never the coord lift or
+// blockViz.  Idempotent; the const accessors below cast away const because this
+// is a decode-on-first-use cache, not a logical mutation of the .tui.
+static void tui_idx_ensure(Tui *tui) {
+    if (tui->idxCol != NULL || tui->idxN == 0 || tui->idxDef == NULL) return;
+    tui->idxCol  = st_malloc(tui->idxN * sizeof(int64_t));
+    tui->idxFpos = st_malloc(tui->idxN * sizeof(int64_t));
+    int64_t n = decode_idx(tui->idxDef, tui->idxDefLen, tui->idxRawLen,
+                           tui->idxCol, tui->idxFpos);
+    assert(n == tui->idxN); (void)n;
+    free(tui->idxDef); tui->idxDef = NULL;
+}
+
 int64_t        tui_idx_n   (const Tui *tui) { return tui->idxN; }
-const int64_t *tui_idx_cols(const Tui *tui) { return tui->idxCol; }
-const int64_t *tui_idx_fpos(const Tui *tui) { return tui->idxFpos; }
+const int64_t *tui_idx_cols(const Tui *tui) { tui_idx_ensure((Tui *)tui); return tui->idxCol; }
+const int64_t *tui_idx_fpos(const Tui *tui) { tui_idx_ensure((Tui *)tui); return tui->idxFpos; }
 
 // Binary-search the d-lines (name-sorted by the writer) for `seq_name`.
 // Returns the S-ordinal (0-indexed; position in the genome-major S/R order),
@@ -2089,11 +2111,14 @@ void tui_genome_info_free(TuiGenomeInfo *info, int64_t n) {
 TuiGenomeLift *tui_genome_lift_load(Tui *tui, const char *genome_name) {
     if (tui == NULL || genome_name == NULL || *genome_name == 0) return NULL;
 
-    // Use a dedicated OneFile handle (not tui->of): this one persists on the
-    // returned gl for lazy chunk_decode on first column-query hit, and would
-    // otherwise have its file position clobbered by interleaved tui_query
-    // calls in the source-side path.  Closed in tui_genome_lift_destruct.
-    OneFile *of = oneFileOpenRead(tui->path, NULL, "tui", 1);
+    // Borrow tui's already-open handle instead of opening a second one --
+    // re-opening re-parses the schema and re-decodes the d/S goto-index (~15%
+    // of open on a big .tui).  Safe: every read (here, the source-side
+    // tui_query / tui_load_seq_runs, and chunk_decode) re-positions first via
+    // oneGoto / fseeko, and callers serialize (CLI single-threaded; blockViz
+    // holds g_mutex).  Borrowed => tui_genome_lift_destruct must NOT close it,
+    // and every caller destructs the gl before the tui.
+    OneFile *of = tui->of;
     if (of == NULL) return NULL;
 
     // Match d-lines on prefix "<genome_name>." -- the writer's d-line names
@@ -2106,7 +2131,7 @@ TuiGenomeLift *tui_genome_lift_load(Tui *tui, const char *genome_name) {
     size_t plen = gn + 1;
 
     int64_t first = tui_find_d_lower_bound(of, tui->n_d, prefix);
-    if (first > tui->n_d) { free(prefix); oneFileClose(of); return NULL; }
+    if (first > tui->n_d) { free(prefix); return NULL; }   // of borrowed: don't close
 
     // Pass 1: collect (S-ord, name, seqlen) for all matching d-lines.
     // d-lines are name-sorted so a prefix match is a contiguous range; stop
@@ -2134,7 +2159,7 @@ TuiGenomeLift *tui_genome_lift_load(Tui *tui, const char *genome_name) {
     }
     free(prefix);
 
-    if (n == 0) { free(ents); oneFileClose(of); return NULL; }
+    if (n == 0) { free(ents); return NULL; }               // of borrowed: don't close
 
     // Pass 2: per-S sequential walk -- for each target sequence, oneGoto its S
     // (S stays an indexed object), then walk that seq's contiguous (C,R) pairs
@@ -2175,8 +2200,7 @@ TuiGenomeLift *tui_genome_lift_load(Tui *tui, const char *genome_name) {
         free(chunks);
         for (int64_t i = 0; i < n; i++) free(ents[i].name);
         free(ents);
-        oneFileClose(of);
-        return NULL;
+        return NULL;                                       // of borrowed: don't close
     }
     qsort(chunks, nc, sizeof(TGLChunk), tglchunk_cmp_gmin);
 
@@ -2197,7 +2221,7 @@ TuiGenomeLift *tui_genome_lift_load(Tui *tui, const char *genome_name) {
     gl->chunks        = chunks;
     gl->n_chunks      = nc;
     gl->chunk_max_end = cme;
-    gl->of            = of;     // kept open; destruct closes
+    gl->of            = of;     // borrowed from tui (see above); destruct does NOT close
     return gl;
 }
 
@@ -2211,7 +2235,7 @@ void tui_genome_lift_destruct(TuiGenomeLift *gl) {
     }
     free(gl->chunks);
     free(gl->chunk_max_end);
-    if (gl->of != NULL) oneFileClose(gl->of);
+    // gl->of is borrowed from the Tui (tui_genome_lift_load); the Tui owns + closes it
     free(gl);
 }
 
@@ -2628,6 +2652,7 @@ TuiExtractIt *tui_extract_iterator(Tui *tui, LI *li, int is_maf, bool rle,
     // alignment_link_adjacent itself, so the TAF side stays as-is.
     it->readblk = is_maf ? tai_maf_read_block_nolink : taf_read_block;
     if (n_iv <= 0 || tui->idxN == 0) return it;        // empty iterator
+    tui_idx_ensure(tui);                               // inflate X anchors now (deferred at load)
     it->iv = st_malloc((size_t)n_iv * sizeof(TuiInterval));
     memcpy(it->iv, iv, (size_t)n_iv * sizeof(TuiInterval));
     it->n_iv = n_iv;
