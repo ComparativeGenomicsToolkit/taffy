@@ -267,6 +267,10 @@ D C 4 3 INT 3 INT 3 INT 3 INT        chunk header (DATA line, not indexed):
                                      t_min, t_span (= t_max - t_min)
 D R 2 3 INT 6 STRING                 runs (one per chunk):
                                      inflatedLen, deflate(SoA delta blob)
+O g 3 6 STRING 3 INT 3 INT           genome roster (indexed object): genomeName,
+                                     total_bp (sum of seqLens), n_chroms.  Written
+                                     last, after all per-seq d/S/C/R; every .tui
+                                     carries it.
 ```
 
 **Format version (the `t` record's 2nd/3rd fields: `major`, `minor`).**
@@ -293,11 +297,12 @@ does no genome resolution.  A sequence's chunks are its contiguous `(C, R)`
 pairs written immediately after its `S`, so the lift reaches them by a
 sequential walk off the `S` (no per-chunk ordinal is stored or needed).
 
-`d` and `S` are indexed object types (each gets a footer index); `C` and `R`
-are data lines (no index).  `oneGoto(of,'d',i)` jumps to the i-th name-sorted directory
-entry; `oneGoto(of,'S',k)` jumps to the k-th genome-major sequence;
-`oneGoto(of,'C',c_ord)` jumps to a specific chunk header by file-order
-ordinal (used by Index L for lazy `R` decode).
+`d`, `S`, and `g` are indexed object types (each gets a footer index); `C` and
+`R` are data lines (no index).  `oneGoto(of,'d',i)` jumps to the i-th name-sorted
+directory entry; `oneGoto(of,'S',k)` to the k-th genome-major sequence;
+`oneGoto(of,'g',j)` to the j-th roster genome.  A chunk's `(C, R)` pair has no
+goto — the lift reaches it by walking forward from the sequence's `S`, recording
+each `C`'s byte offset in RAM for the lazy `R` decode.
 
 ### Load / access
 
