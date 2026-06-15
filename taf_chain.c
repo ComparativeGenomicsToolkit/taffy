@@ -27,7 +27,9 @@
  * the encoded length; queries at positions within an internal gap will
  * report a target position that doesn't reflect a real source alignment.
  * --maxGap is the user's lever -- 0 = lossless (only chain truly
- * contiguous runs), 1000 = axtChain-equivalent (close-species default).
+ * contiguous runs), 1000 = axtChain-equivalent, 10000 = default
+ * (browser-tuned: keeps ~95% of base coverage at split-second lift,
+ * consistent across close and diverged clades).
  *
  *  Released under the MIT license, see LICENSE.txt
  */
@@ -71,9 +73,11 @@ static void usage(void) {
         "                          merge contiguous runs); higher values\n"
         "                          give more aggressive compression at the\n"
         "                          cost of internal precision.  Typical\n"
-        "                          values: 100 (conservative), 1000 (axt-\n"
-        "                          Chain-equivalent), 10000 (very aggressive).\n"
-        "                          DEFAULT 1000.\n"
+        "                          values: 0 (lossless), 1000 (conservative,\n"
+        "                          axtChain-equivalent), 10000 (browser\n"
+        "                          default -- keeps most base coverage at\n"
+        "                          split-second lift), 100000 (aggressive).\n"
+        "                          DEFAULT 10000.\n"
         "     --fromTui            Treat -i as the source .tui itself.\n"
         "  -l --logLevel STR       critical|info|debug.  DEFAULT critical.\n"
         "  -h --help               Print this help.\n");
@@ -358,7 +362,7 @@ int taf_chain_main(int argc, char *argv[]) {
 
     char    *input_file     = NULL;
     char    *output_file    = NULL;
-    int64_t  max_gap        = 1000;
+    int64_t  max_gap        = 10000;
     int      from_tui       = 0;
     char    *log_level      = NULL;
 
