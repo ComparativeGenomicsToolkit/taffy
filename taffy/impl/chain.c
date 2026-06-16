@@ -82,12 +82,12 @@ static int intcmp(int64_t a, int64_t b) { return a > b ? 1 : (a < b ? -1 : 0); }
  * order is immaterial.) */
 static int aln_cmp_by_q_loc(const void *a, const void *b) {
     const TaffyAln *x = a, *y = b;
-    int c = strcmp(x->q_name ? x->q_name : "", y->q_name ? y->q_name : "");
+    int c = intcmp(x->q_id, y->q_id);
     if (c) return c;
     if (x->strand != y->strand) return x->strand < y->strand ? -1 : 1;
     c = intcmp(x->q_start, y->q_start);
     if (c) return c;
-    c = strcmp(x->t_name ? x->t_name : "", y->t_name ? y->t_name : "");
+    c = intcmp(x->t_id, y->t_id);
     if (c) return c;
     c = intcmp(x->t_start, y->t_start);
     if (c) return c;
@@ -104,7 +104,7 @@ static int aln_cmp_by_q_loc(const void *a, const void *b) {
 static int chain_cmp_by_t_loc(const void *a, const void *b) {
     const ChainNode *c1 = a, *c2 = b;
     const TaffyAln *p1 = c1->aln, *p2 = c2->aln;
-    int c = strcmp(p1->t_name ? p1->t_name : "", p2->t_name ? p2->t_name : "");
+    int c = intcmp(p1->t_id, p2->t_id);
     if (c) return c;
     c = intcmp(p1->t_end, p2->t_end);
     if (c) return c;
@@ -212,8 +212,7 @@ static int64_t chain_partition(TaffyAln *alns, int64_t n,
             TaffyAln *p = pcn->aln;
             /* names + strand must match -- but in this partition the
              * q_name + strand are fixed, so just check t_name. */
-            if (strcmp(aln->t_name ? aln->t_name : "",
-                       p->t_name   ? p->t_name   : "") != 0) {
+            if (aln->t_id != p->t_id) {
                 /* sorted-set key starts with t_name; once we hit a
                  * different t_name, no earlier predecessor matches. */
                 break;
@@ -349,7 +348,32 @@ void taffy_chain(TaffyAln *alns, int64_t n,
     for (int64_t i = 0; i < n; i++)
         if (alns[i].strand < 0) mirror_q(&alns[i]);
 
-    /* Sort all alns by (q_name, strand, q_start) -- so same-partition
+    /* Intern q_name/t_name to integer ids so the sort + active-set
+     * comparators int-compare instead of strcmp.  strcmp on seq names
+     * dominated paralog-dense chromosome-scale queries (many runs across
+     * duplicated copies -- every sort + AVL compare was a strcmp).  One
+     * O(n) pass; ids are first-seen order, which only reorders independent
+     * partitions / t-groups.  Chain membership keys on (q,t) identity, not
+     * name VALUE, and chain-id assignment is score+coord-keyed, so the
+     * output block set is unchanged (validated byte-identical). */
+    stHash *intern = stHash_construct3(stHash_stringKey, stHash_stringEqualKey,
+                                       NULL, NULL);
+    int64_t next_iid = 1;
+    for (int64_t i = 0; i < n; i++) {
+        const char *qn = alns[i].q_name ? alns[i].q_name : "";
+        const char *tn = alns[i].t_name ? alns[i].t_name : "";
+        int64_t qid = (int64_t)(intptr_t) stHash_search(intern, (void *) qn);
+        if (qid == 0) { qid = next_iid++;
+                        stHash_insert(intern, (void *) qn, (void *)(intptr_t) qid); }
+        int64_t tid = (int64_t)(intptr_t) stHash_search(intern, (void *) tn);
+        if (tid == 0) { tid = next_iid++;
+                        stHash_insert(intern, (void *) tn, (void *)(intptr_t) tid); }
+        alns[i].q_id = qid;
+        alns[i].t_id = tid;
+    }
+    stHash_destruct(intern);
+
+    /* Sort all alns by (q_id, strand, q_start) -- so same-partition
      * alns are contiguous and each sub-sweep is one pass. */
     qsort(alns, (size_t) n, sizeof(TaffyAln), aln_cmp_by_q_loc);
 
@@ -358,10 +382,10 @@ void taffy_chain(TaffyAln *alns, int64_t n,
     int64_t i = 0;
     while (i < n) {
         int64_t j = i + 1;
-        const char *qn = alns[i].q_name ? alns[i].q_name : "";
+        int64_t qid = alns[i].q_id;
         int strand = alns[i].strand;
         while (j < n
-               && strcmp(alns[j].q_name ? alns[j].q_name : "", qn) == 0
+               && alns[j].q_id == qid
                && alns[j].strand == strand) j++;
         next_id = chain_partition(alns + i, j - i, gap_cost, gap_cost_params,
                                   max_gap_length,

@@ -52,6 +52,7 @@ typedef struct {
     int         strand;        // +1 or -1
     int64_t     score;          // per-aln score; typically aln length
     void       *user;           // back-pointer to caller's record
+    int64_t     q_id, t_id;     // interned q_name/t_name ids; set by taffy_chain (callers leave unset)
 } TaffyAln;
 
 /* Per-chain summary returned by taffy_chain.  `id` is 1-based and
