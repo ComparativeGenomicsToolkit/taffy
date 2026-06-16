@@ -286,6 +286,23 @@ int taffySetMinBlockFilter(int taffyHandle, double spanFrac, double relFrac,
 int taffyGetMinBlockFilter(int taffyHandle, double *spanFrac, double *relFrac,
                            char **errStr);
 
+/** Per-handle run floor: drop input alignment runs shorter than this (bp)
+ * BEFORE chaining.  On wide overview queries this collapses the chain DP
+ * over the sub-pixel micro-alignment tail (a whole-chromosome view is
+ * ~90% sub-100bp runs / <1% of bp), making segdup-dense chromosomes
+ * ~6-10x faster.  It slightly relaxes paralogy dedup (a few extra paralog
+ * blocks survive) -- sub-pixel, acceptable for overviews.
+ *
+ * minRun = -1 (default) = AUTO per query span (span/500000: ~100-500 bp at
+ * whole-chrom, 0 below ~500 kb so detail queries stay byte-exact); 0 = off;
+ * > 0 = explicit floor.  Returns 0 on success, -1 on invalid handle or
+ * minRun < -1 (set errStr).  Thread-safe. */
+int taffySetMinRunSize(int taffyHandle, int64_t minRun, char **errStr);
+
+/** Read back the run floor (-1 = auto).  Out-pointer may be NULL.
+ * Returns 0 on success, -1 on invalid handle. */
+int taffyGetMinRunSize(int taffyHandle, int64_t *minRun, char **errStr);
+
 /** Per-handle overlap-fraction threshold for the chain paralogy filter
  * applied after taffy_chain has assigned chain ids.  Chains are walked
  * in score-desc order and accepted iff their union-of-aln q-coverage

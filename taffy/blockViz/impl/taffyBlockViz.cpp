@@ -99,6 +99,10 @@ struct TaffyHandle {
     // disable; span_frac=1 makes it relative-only, rel_frac=1 window-only.
     double  min_block_span_frac = 0.001;
     double  min_block_rel_frac  = 0.1;
+    // Adaptive run floor: drop input runs shorter than this (bp) BEFORE
+    // chaining, on wide overview queries where they're sub-pixel.  -1 =
+    // auto (span/500000, ~0 for narrow detail queries); >= 0 overrides.
+    int64_t min_run_size = -1;
     // mapBackAdjacencies: per-(qSpecies, qChrom) sorted run table.
     // Key is the fully-qualified "<genome>.<chrom>" string the .tui
     // uses for d-line lookups.  Lazily populated on first flank scan
@@ -314,6 +318,25 @@ extern "C" int taffyGetMinBlockFilter(int h, double *spanFrac, double *relFrac,
     std::lock_guard<std::mutex> lock(H->mu);
     if (spanFrac) *spanFrac = H->min_block_span_frac;
     if (relFrac)  *relFrac  = H->min_block_rel_frac;
+    return 0;
+}
+
+// Run floor (bp): drop input runs shorter than this before chaining.
+// -1 (default) = auto per query span; 0 = off; > 0 = explicit floor.
+extern "C" int taffySetMinRunSize(int h, int64_t minRun, char **errStr) {
+    if (minRun < -1) { set_err(errStr, "taffyBlockViz: minRun must be >= -1 (-1 = auto)"); return -1; }
+    TaffyHandle *H = lookup_handle(h, errStr);
+    if (!H) return -1;
+    std::lock_guard<std::mutex> lock(H->mu);
+    H->min_run_size = minRun;
+    return 0;
+}
+
+extern "C" int taffyGetMinRunSize(int h, int64_t *minRun, char **errStr) {
+    TaffyHandle *H = lookup_handle(h, errStr);
+    if (!H) return -1;
+    std::lock_guard<std::mutex> lock(H->mu);
+    if (minRun) *minRun = H->min_run_size;
     return 0;
 }
 
@@ -628,6 +651,7 @@ struct BlockCtx {
     int64_t     chain_extend = TAFFY_CHAIN_DEFAULT_EXTEND;
     int64_t     chain_max_gap = TAFFY_CHAIN_DEFAULT_MAX_GAP;
     double      chain_overlap_frac = 0.0;   // <0 disables the per-window filter
+    int64_t     min_run = 0;                // per-query run floor (bp); set from span in get_blocks_impl
 
     // ---- windowed chain processing (mirrors taf_lift.c) ---------------
     int64_t     chain_window = 0;        // W (column bp); 0 = no within-iv windowing
@@ -840,6 +864,7 @@ static void block_visit_cb(const TuiRun *r, void *user) {
         ? r->t_start + (cs - r->g_start)
         : r->t_start + r->length - (ce - r->g_start);
 
+    if (size < cx->min_run) return;   // sub-floor run: skip before it enters the chain buffer
     if (cx->n_run_buf == cx->cap_run_buf) {
         cx->cap_run_buf = cx->cap_run_buf ? cx->cap_run_buf * 2 : 4096;
         cx->run_buf = (BlockRun *) st_realloc(cx->run_buf,
@@ -930,6 +955,14 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
     cx.chain_overlap_frac   = H->chain_overlap_frac;
     cx.chain_window         = BLOCK_CHAIN_WINDOW;
     cx.chain_window_overlap = BLOCK_CHAIN_WINDOW_OVERLAP;
+    // Adaptive run floor: on a wide overview, drop sub-pixel runs before
+    // they reach the chain DP.  A whole-chromosome view is ~90% sub-100bp
+    // runs (<1% of bp), and the O(n log n) sweep chokes on them in segdup-
+    // dense regions.  Auto = span/500000 (deeply sub-pixel: ~100-500 bp at
+    // whole-chrom, 0 below ~500 kb so detail views stay exact).  A handle
+    // override (>= 0) wins.
+    cx.min_run = (H->min_run_size >= 0) ? H->min_run_size
+                                        : (int64_t)(tEnd - tStart) / 500000;
 
     // Per-iv loop: tui_query hands us iv.t_start (tSpecies pos at
     // iv.start) and iv.rev (source-to-column orientation) per chunk.
