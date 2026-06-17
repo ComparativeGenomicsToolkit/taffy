@@ -62,7 +62,6 @@ struct TaffyHandle {
     // locking captures the full parallel-load win.
     std::mutex mu;
     Tui *tui = nullptr;
-    std::string tui_path_str;   // resolved .tui path (for tui_sequence_lengths)
     std::map<std::string, TuiGenomeLift *> lift_cache;
     // Chain tuning -- defaults match TAFFY_CHAIN_DEFAULT_{OPEN,EXTEND,MAX_GAP}.
     // Tunable per-handle via taffySetChainParams.
@@ -175,7 +174,6 @@ extern "C" int taffyOpen(const char *path, char **errStr) {
 
     TaffyHandle *H = new TaffyHandle();
     H->tui = tui;
-    H->tui_path_str = p;
     free(p);
     std::lock_guard<std::mutex> lock(g_table_mutex);
     int h = g_next_handle++;
@@ -607,9 +605,9 @@ static struct taffy_block_t *find_off_screen_flank(
 // architecture this mirrors).  Same shape as taf_lift.c's LiftRun, plus
 // the (t_ref, q_qsp) block geometry blockViz emits.  `seq` is borrowed
 // from the qSpecies TuiGenomeLift -- pointer stable until that gl is
-// destructed (tui.h TuiRun) -- so no interning is needed: taffy_chain
-// compares t_name by strcmp and the gl hands out one stable pointer per
-// chrom.
+// destructed (tui.h TuiRun).  taffy_chain interns q_name/t_name to ints
+// internally now, so blockViz no longer relies on the pointer for compare
+// speed; it stays a borrowed pointer with the gl's lifetime.
 struct BlockRun {
     const char *seq;            // qChrom (gl-borrowed, stable)
     int64_t     c_start, c_end; // universal-column range (window decision)
@@ -652,6 +650,8 @@ struct BlockCtx {
     int64_t     chain_max_gap = TAFFY_CHAIN_DEFAULT_MAX_GAP;
     double      chain_overlap_frac = 0.0;   // <0 disables the per-window filter
     int64_t     min_run = 0;                // per-query run floor (bp); set from span in get_blocks_impl
+    int64_t     iv_eligible = 0;            // runs entering the current iv (post-clip, pre-floor)
+    int64_t     iv_kept = 0;                // runs of the current iv that passed the floor
 
     // ---- windowed chain processing (mirrors taf_lift.c) ---------------
     int64_t     chain_window = 0;        // W (column bp); 0 = no within-iv windowing
@@ -843,6 +843,7 @@ static void block_visit_cb(const TuiRun *r, void *user) {
     int64_t ce = r_end < cx->c_hi      ? r_end      : cx->c_hi;
     if (cs >= ce) return;
     int64_t size = ce - cs;
+    cx->iv_eligible++;                // eligible (post-clip) run for this iv
 
     // tSpecies position at the clipped run [cs, ce).  iv_rev=0: column-asc
     // matches tSpecies-asc so the low end is at column cs.  iv_rev=1:
@@ -865,6 +866,7 @@ static void block_visit_cb(const TuiRun *r, void *user) {
         : r->t_start + r->length - (ce - r->g_start);
 
     if (size < cx->min_run) return;   // sub-floor run: skip before it enters the chain buffer
+    cx->iv_kept++;
     if (cx->n_run_buf == cx->cap_run_buf) {
         cx->cap_run_buf = cx->cap_run_buf ? cx->cap_run_buf * 2 : 4096;
         cx->run_buf = (BlockRun *) st_realloc(cx->run_buf,
@@ -959,8 +961,11 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
     // they reach the chain DP.  A whole-chromosome view is ~90% sub-100bp
     // runs (<1% of bp), and the O(n log n) sweep chokes on them in segdup-
     // dense regions.  Auto = span/500000 (deeply sub-pixel: ~100-500 bp at
-    // whole-chrom, 0 below ~500 kb so detail views stay exact).  A handle
-    // override (>= 0) wins.
+    // whole-chrom).  Integer division + the >=1 bp clipped-run size mean the
+    // floor is 0 or 1 -- dropping nothing -- until span >= 1 Mb, so detail
+    // views below ~1 Mb stay byte-exact.  A handle override (>= 0) wins.  The
+    // per-iv loop below re-runs with the floor OFF if it would empty an iv, so
+    // a fully sub-pixel-fragmented region never silently vanishes.
     cx.min_run = (H->min_run_size >= 0) ? H->min_run_size
                                         : (int64_t)(tEnd - tStart) / 500000;
 
@@ -976,10 +981,28 @@ get_blocks_impl(int h, const char *qSpecies, const char *tSpecies,
         cx.tpos_at_c_lo = iv[k].t_start;
         cx.iv_rev       = iv[k].rev;
         cx.window_start = INT64_MIN;
+        cx.iv_eligible  = 0;
+        cx.iv_kept      = 0;
         tui_genome_lift_visit_runs(gl_q, iv[k].start, iv[k].end,
                                    block_visit_cb, &cx);
         if (cx.n_run_buf > 0)
             block_flush_window(&cx, /*boundary_c=*/0, /*force_all=*/1);
+        // Run-floor safety net: if the floor swallowed an ENTIRE iv that had
+        // input, the region (or a low-coverage genome) would vanish from a wide
+        // overview.  Re-visit that iv with the floor off so a fully sub-pixel-
+        // fragmented region still yields its coverage block.  Cheap by
+        // construction: such an iv held only sub-floor runs.  (Relative paralog
+        // prominence within a still-populated iv stays approximate by design.)
+        if (cx.min_run > 0 && cx.iv_eligible > 0 && cx.iv_kept == 0) {
+            int64_t saved_floor = cx.min_run;
+            cx.min_run      = 0;
+            cx.window_start = INT64_MIN;
+            tui_genome_lift_visit_runs(gl_q, iv[k].start, iv[k].end,
+                                       block_visit_cb, &cx);
+            if (cx.n_run_buf > 0)
+                block_flush_window(&cx, /*boundary_c=*/0, /*force_all=*/1);
+            cx.min_run = saved_floor;
+        }
     }
     free(iv);
     free(cx.run_buf);

@@ -436,17 +436,24 @@ int taf_chain_main(int argc, char *argv[]) {
     }
     int64_t T_src = tui_total_columns(src);
     if (!g_given) {
-        /* Auto-pick maxGap from the universal column count T (browser-tuned
-         * for speed + general output).  Calibrated to two validated points --
-         * apes (T=3.27e9 -> 1000) and 577-way (T=72.5e9 -> 10000) -- as a
-         * sublinear power law G = 1000*(T/3.27e9)^0.743, clamped to that
-         * validated [1000, 10000] range.  More universal columns => broader /
-         * deeper / more-diverged alignment => larger inter-run gaps => larger
-         * G.  NOTE: a two-point fit; revisit if a mid-size alignment is added. */
-        double g = 1000.0 * pow((double) T_src / 3.27e9, 0.743);
-        max_gap = (int64_t) (g + 0.5);
-        if (max_gap < 1000)  max_gap = 1000;
-        if (max_gap > 10000) max_gap = 10000;
+        /* Auto-pick maxGap from the universal column count T (browser-tuned for
+         * speed + general output) as a sublinear power law, clamped to the
+         * validated [1000, 10000] range.  Calibrated to two validated points:
+         * apes (T=3.27e9 -> 1000) and 577-way / vertebrate scale (T>=72.5e9 ->
+         * the 10000 ceiling -- the formula reaches ~10003 there, so the clamp
+         * binds).  More universal columns => broader / deeper / more-diverged
+         * alignment => larger inter-run gaps => larger G.  NOTE: a two-point
+         * fit; revisit if a mid-size alignment is added.  T<=0 can only come
+         * from a corrupt/hand-built .tui (pow would be NaN) -- fall back to the
+         * floor. */
+        if (T_src <= 0) {
+            max_gap = 1000;
+        } else {
+            double g = 1000.0 * pow((double) T_src / 3.27e9, 0.7432);
+            max_gap = (int64_t) (g + 0.5);
+            if (max_gap < 1000)  max_gap = 1000;
+            if (max_gap > 10000) max_gap = 10000;
+        }
     }
     st_logInfo("tui-chain: source .tui has T = %" PRIi64 " universal columns; "
                "maxGap = %" PRIi64 "%s\n", T_src, max_gap,

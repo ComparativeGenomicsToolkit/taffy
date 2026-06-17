@@ -857,6 +857,21 @@ def test_lift_maxgap_default_matches_zero(tmp_path):
         "explicit --maxGap 0 must match implicit default")
 
 
+def test_tui_chain_auto_maxgap(tmp_path):
+    """tui-chain auto-picks --maxGap from the universal column count T when -G
+    is absent (clamped to [1000, 10000]); an explicit -G overrides; a negative
+    -G is rejected.  The evolverMammals .tui has a tiny T, so auto clamps to the
+    1000 floor."""
+    out = str(tmp_path / 'chained.tui')
+    _, err = run(TAFFY, 'tui-chain', '-i', UNI_MAF, '-o', out, '-l', 'info')
+    assert 'maxGap = 1000 (auto from T)' in err, err
+    _, err = run(TAFFY, 'tui-chain', '-i', UNI_MAF, '-o', out, '-G', '5000', '-l', 'info')
+    assert 'maxGap = 5000' in err and '(auto from T)' not in err, err
+    rej = subprocess.run([TAFFY, 'tui-chain', '-i', UNI_MAF, '-o', out, '-G', '-1'],
+                         capture_output=True, text=True)
+    assert rej.returncode != 0, "tui-chain must reject --maxGap -1"
+
+
 @pytest.mark.parametrize("max_gap,expected_rows", [
     (0,   7),    # no merging
     (1,   4),    # collapse the three 1bp gaps

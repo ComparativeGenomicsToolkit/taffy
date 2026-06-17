@@ -74,12 +74,20 @@ typedef struct _ChainNode {
 
 static int intcmp(int64_t a, int64_t b) { return a > b ? 1 : (a < b ? -1 : 0); }
 
-/* Sort input alns by (q_name, strand, q_start), then a TOTAL value order on
- * the target coords.  The sweep iterates in this order and ties decide chain
- * membership, so the old (int64_t)pointer tie-break made taffy_chain's output
- * depend on heap layout -- non-deterministic across runs and builds.  (Exact-
- * duplicate alns still tie, but they chain identically, so their residual
- * order is immaterial.) */
+/* qsort comparator for interning: order distinct seq-name pointers by content
+ * (strcmp) so interned ids come out in lexicographic name order. */
+static int name_ptr_cmp(const void *a, const void *b) {
+    return strcmp(*(const char *const *) a, *(const char *const *) b);
+}
+
+/* Sort input alns by (q_id, strand, q_start), then a TOTAL value order on the
+ * target coords.  q_id/t_id are interned in lexicographic NAME order (see
+ * taffy_chain), so this reproduces the original (q_name, ..., t_name, ...)
+ * strcmp ordering exactly while comparing ints.  The sweep iterates in this
+ * order and ties decide chain membership, so the old (int64_t)pointer tie-break
+ * made taffy_chain's output depend on heap layout -- non-deterministic across
+ * runs and builds.  (Exact-duplicate alns still tie, but they chain
+ * identically, so their residual order is immaterial.) */
 static int aln_cmp_by_q_loc(const void *a, const void *b) {
     const TaffyAln *x = a, *y = b;
     int c = intcmp(x->q_id, y->q_id);
@@ -96,7 +104,7 @@ static int aln_cmp_by_q_loc(const void *a, const void *b) {
     return intcmp(x->q_end, y->q_end);
 }
 
-/* Active-chains key: (t_name, t_end, q_end), then a VALUE tiebreak
+/* Active-chains key: (t_id, t_end, q_end), then a VALUE tiebreak
  * (q_start, t_start) so the predecessor-scan order is independent of heap
  * layout.  The pointer compare survives only as a last resort for exact-
  * duplicate alns (all coords equal) -- those chain identically, so their
@@ -211,10 +219,10 @@ static int64_t chain_partition(TaffyAln *alns, int64_t n,
         while ((pcn = stSortedSet_getPrevious(it)) != NULL) {
             TaffyAln *p = pcn->aln;
             /* names + strand must match -- but in this partition the
-             * q_name + strand are fixed, so just check t_name. */
+             * q_id + strand are fixed, so just check t_id. */
             if (aln->t_id != p->t_id) {
-                /* sorted-set key starts with t_name; once we hit a
-                 * different t_name, no earlier predecessor matches. */
+                /* sorted-set key starts with t_id; once we hit a
+                 * different t_id, no earlier predecessor matches. */
                 break;
             }
             if (aln->q_start < p->q_end) {
@@ -348,30 +356,40 @@ void taffy_chain(TaffyAln *alns, int64_t n,
     for (int64_t i = 0; i < n; i++)
         if (alns[i].strand < 0) mirror_q(&alns[i]);
 
-    /* Intern q_name/t_name to integer ids so the sort + active-set
-     * comparators int-compare instead of strcmp.  strcmp on seq names
-     * dominated paralog-dense chromosome-scale queries (many runs across
-     * duplicated copies -- every sort + AVL compare was a strcmp).  One
-     * O(n) pass; ids are first-seen order, which only reorders independent
-     * partitions / t-groups.  Chain membership keys on (q,t) identity, not
-     * name VALUE, and chain-id assignment is score+coord-keyed, so the
-     * output block set is unchanged (validated byte-identical). */
-    stHash *intern = stHash_construct3(stHash_stringKey, stHash_stringEqualKey,
-                                       NULL, NULL);
-    int64_t next_iid = 1;
+    /* Intern q_name/t_name to integer ids so the sort + active-set comparators
+     * int-compare instead of strcmp.  strcmp on seq names dominated paralog-
+     * dense chromosome-scale queries (many runs across duplicated copies --
+     * every sort + AVL compare was a strcmp).  Ids are assigned in LEXICOGRAPHIC
+     * name order, so the int comparators reproduce the original strcmp ordering
+     * EXACTLY: partition sweep order, chain-id assignment and tie-breaks are
+     * unchanged, so the output is byte-identical to the pre-interning sort AND
+     * independent of input order / heap layout.  One shared namespace (a name
+     * used as both q and t gets one id); ids start at 1, absent == NULL. */
+    stHash *iid = stHash_construct3(stHash_stringKey, stHash_stringEqualKey,
+                                    NULL, NULL);
+    const char **names = st_malloc((size_t)(n > 0 ? 2 * n : 1) * sizeof(char *));
+    int64_t n_names = 0;
+    for (int64_t i = 0; i < n; i++) {
+        const char *pair[2] = { alns[i].q_name ? alns[i].q_name : "",
+                                alns[i].t_name ? alns[i].t_name : "" };
+        for (int k = 0; k < 2; k++) {
+            if (stHash_search(iid, (void *) pair[k]) == NULL) {
+                stHash_insert(iid, (void *) pair[k], (void *)(intptr_t) 1); /* mark seen */
+                names[n_names++] = pair[k];
+            }
+        }
+    }
+    qsort(names, (size_t) n_names, sizeof(char *), name_ptr_cmp);
+    for (int64_t k = 0; k < n_names; k++)               /* overwrite mark with lexicographic id */
+        stHash_insert(iid, (void *) names[k], (void *)(intptr_t)(k + 1));
     for (int64_t i = 0; i < n; i++) {
         const char *qn = alns[i].q_name ? alns[i].q_name : "";
         const char *tn = alns[i].t_name ? alns[i].t_name : "";
-        int64_t qid = (int64_t)(intptr_t) stHash_search(intern, (void *) qn);
-        if (qid == 0) { qid = next_iid++;
-                        stHash_insert(intern, (void *) qn, (void *)(intptr_t) qid); }
-        int64_t tid = (int64_t)(intptr_t) stHash_search(intern, (void *) tn);
-        if (tid == 0) { tid = next_iid++;
-                        stHash_insert(intern, (void *) tn, (void *)(intptr_t) tid); }
-        alns[i].q_id = qid;
-        alns[i].t_id = tid;
+        alns[i].q_id = (int64_t)(intptr_t) stHash_search(iid, (void *) qn);
+        alns[i].t_id = (int64_t)(intptr_t) stHash_search(iid, (void *) tn);
     }
-    stHash_destruct(intern);
+    free(names);
+    stHash_destruct(iid);
 
     /* Sort all alns by (q_id, strand, q_start) -- so same-partition
      * alns are contiguous and each sub-sweep is one pass. */

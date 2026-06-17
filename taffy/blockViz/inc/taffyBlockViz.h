@@ -294,7 +294,9 @@ int taffyGetMinBlockFilter(int taffyHandle, double *spanFrac, double *relFrac,
  * blocks survive) -- sub-pixel, acceptable for overviews.
  *
  * minRun = -1 (default) = AUTO per query span (span/500000: ~100-500 bp at
- * whole-chrom, 0 below ~500 kb so detail queries stay byte-exact); 0 = off;
+ * whole-chrom; the floor is 0 or 1 -- dropping nothing, since every clipped
+ * run is >= 1 bp -- until span >= 1 Mb, so queries below ~1 Mb stay byte-exact);
+ * 0 = off;
  * > 0 = explicit floor.  Returns 0 on success, -1 on invalid handle or
  * minRun < -1 (set errStr).  Thread-safe. */
 int taffySetMinRunSize(int taffyHandle, int64_t minRun, char **errStr);

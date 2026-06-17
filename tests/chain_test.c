@@ -311,6 +311,32 @@ static void test_different_t_names_dont_join(CuTest *tc) {
     free(alns); free(cid); free(chs);
 }
 
+/* The interned ids are assigned in LEXICOGRAPHIC name order, so chain-id
+ * assignment is independent of the INPUT order of the alns (c831c00's
+ * byte-identity invariant).  Feed two single-aln partitions ("chr1","chr2")
+ * in both orders; each aln must get the same chain id either way, and the
+ * lexicographically-first partition ("chr1") must get chain id 1.  (The old
+ * first-seen interning gave chr2 id 1 when fed chr2-first, failing this.) */
+static void test_intern_order_independent(CuTest *tc) {
+    TaffyAln a1 = mk("chr1", 0, 1000, "t", 10000, 11000, +1); a1.user = (void *) 0x1;
+    TaffyAln a2 = mk("chr2", 0, 1000, "t", 20000, 21000, +1); a2.user = (void *) 0x2;
+
+    TaffyAln order_a[] = { a2, a1 };   /* chr2 first */
+    TaffyAln order_b[] = { a1, a2 };   /* chr1 first */
+    TaffyAln *alA, *alB; int64_t *cidA, *cidB; TaffyChainInfo *chA, *chB; int64_t ncA, ncB;
+    run_chain(order_a, 2, 0, 1, INT64_MAX, &alA, &cidA, &chA, &ncA);
+    run_chain(order_b, 2, 0, 1, INT64_MAX, &alB, &cidB, &chB, &ncB);
+
+    CuAssertTrue(tc, ncA == 2 && ncB == 2);
+    CuAssertTrue(tc, cid_for_tag(alA, 2, cidA, (void *) 0x1) ==
+                     cid_for_tag(alB, 2, cidB, (void *) 0x1));
+    CuAssertTrue(tc, cid_for_tag(alA, 2, cidA, (void *) 0x2) ==
+                     cid_for_tag(alB, 2, cidB, (void *) 0x2));
+    CuAssertTrue(tc, cid_for_tag(alA, 2, cidA, (void *) 0x1) == 1);  /* chr1 swept first */
+    free(alA); free(cidA); free(chA);
+    free(alB); free(cidB); free(chB);
+}
+
 /* ------------------------------------------------------------------ */
 /* Paralog separation -- the case blockViz cares about most            */
 /* ------------------------------------------------------------------ */
@@ -434,6 +460,7 @@ CuSuite* chain_test_suite(void) {
     SUITE_ADD_TEST(suite, test_mixed_strands_dont_join);
     SUITE_ADD_TEST(suite, test_different_q_names_dont_join);
     SUITE_ADD_TEST(suite, test_different_t_names_dont_join);
+    SUITE_ADD_TEST(suite, test_intern_order_independent);
     SUITE_ADD_TEST(suite, test_paralog_lands_in_separate_chain);
     SUITE_ADD_TEST(suite, test_max_gap_breaks_chain);
     SUITE_ADD_TEST(suite, test_chains_sorted_by_score_desc);

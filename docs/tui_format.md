@@ -296,6 +296,8 @@ at build (`genome_of`), used only to group per-genome spills; the reader
 does no genome resolution.  A sequence's chunks are its contiguous `(C, R)`
 pairs written immediately after its `S`, so the lift reaches them by a
 sequential walk off the `S` (no per-chunk ordinal is stored or needed).
+Finally the `g` roster (one record per resolved genome) is written last,
+after every per-sequence `d`/`S`/`C`/`R`.
 
 `d`, `S`, and `g` are indexed object types (each gets a footer index); `C` and
 `R` are data lines (no index).  `oneGoto(of,'d',i)` jumps to the i-th name-sorted
