@@ -120,12 +120,13 @@ typedef struct _Tui Tui;
  * Returns NULL if the file can't be opened / isn't a tui container.
  */
 /*
- * Thread-safety: tui_query and tui_load_seq_runs share a cached OneFile
- * cursor on tui->of (opened once in tui_load), so they are NOT thread-safe on
- * the same Tui *.  Callers serialize externally (blockViz holds g_mutex; CLI
- * callers are single-threaded).  tui_genome_lift_load opens a private OneFile
- * via tui->path and is concurrent-safe in the usual sense.  The
- * `TuiGenomeLift` it returns is NOT thread-safe -- see that function's docs.
+ * Thread-safety: tui_query, tui_load_seq_runs, tui_sequence_lengths,
+ * tui_genome_names, tui_seq_length, tui_genome_seq_lengths and
+ * tui_genome_lift_load all share the cached OneFile cursor on tui->of (opened
+ * once in tui_load), so they are NOT thread-safe on the same Tui *.  Callers
+ * serialize externally (blockViz holds g_mutex; CLI callers are single-
+ * threaded).  The `TuiGenomeLift` returned by tui_genome_lift_load is NOT
+ * thread-safe -- see that function's docs.
  */
 Tui *tui_load(const char *tui_path);
 
@@ -177,7 +178,8 @@ int64_t *tui_load_seq_runs(Tui *tui, const char *seq_name, int64_t *n_out);
  * the seq length stored directly as the value pointer (cast via intptr_t,
  * mirroring tai_sequence_lengths's convention).
  *
- * Returns NULL on I/O error.
+ * Returns NULL on I/O error.  Reuses tui's cached cursor (no re-open);
+ * serialize on `tui` (same note as tui_query).
  *
  * Includes ALL sequences in the universal alignment -- both anchor (row-0)
  * and leaf-genome.  The .tui doesn't tag them; callers that need anchor-
@@ -185,7 +187,7 @@ int64_t *tui_load_seq_runs(Tui *tui, const char *seq_name, int64_t *n_out);
  * filter by name prefix against the # hal tree's internal labels, OR shard
  * by universal-column range instead (see tui_total_columns).
  */
-stHash *tui_sequence_lengths(const char *tui_path);
+stHash *tui_sequence_lengths(Tui *tui);
 
 /*
  * Length (bp) of ONE sequence by its full "genome.sequence" d-line name, via
@@ -229,7 +231,7 @@ typedef struct {
  * boundary without ambiguity for genome names that contain dots
  * themselves (NCBI versioned accessions like "GCA_028858775.2").
  */
-TuiGenomeInfo *tui_genome_names(const char *tui_path, int64_t *n_out);
+TuiGenomeInfo *tui_genome_names(Tui *tui, int64_t *n_out);
 void tui_genome_info_free(TuiGenomeInfo *info, int64_t n);
 
 /////////////////////////////////////////////////////////////////////////////

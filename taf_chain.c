@@ -454,7 +454,7 @@ int taf_chain_main(int argc, char *argv[]) {
 
     /* Load the genome roster from the source's g-records. */
     int64_t n_genomes = 0;
-    TuiGenomeInfo *roster = tui_genome_names(src_tui_path, &n_genomes);
+    TuiGenomeInfo *roster = tui_genome_names(src, &n_genomes);
     if (roster == NULL || n_genomes == 0) {
         fprintf(stderr,
                 "tui-chain: source .tui has no g-records "
@@ -465,7 +465,7 @@ int taf_chain_main(int argc, char *argv[]) {
     st_logInfo("tui-chain: %" PRIi64 " genomes from .tui g-records\n", n_genomes);
 
     /* Build the directory (name-sorted, same as source). */
-    stHash *seqlens = tui_sequence_lengths(src_tui_path);
+    stHash *seqlens = tui_sequence_lengths(src);
     if (seqlens == NULL) {
         fprintf(stderr, "tui-chain: tui_sequence_lengths failed\n");
         tui_genome_info_free(roster, n_genomes);

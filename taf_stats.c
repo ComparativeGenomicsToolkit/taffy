@@ -317,9 +317,19 @@ int taf_stats_main(int argc, char *argv[]) {
 
     // do the stats
     if (seq_lengths) {
-        stHash *seq_to_len = used_tui
-                             ? tui_sequence_lengths(tui_fn)
-                             : tai_sequence_lengths(tai, li);
+        stHash *seq_to_len = NULL;
+        if (used_tui) {
+            // tui_sequence_lengths now reuses a loaded handle's cursor; load
+            // one just for this.  Its output copies the keys and stores int
+            // lengths, so the handle can be freed right after.
+            Tui *stui = tui_load(tui_fn);
+            if (stui != NULL) {
+                seq_to_len = tui_sequence_lengths(stui);
+                tui_destruct(stui);
+            }
+        } else {
+            seq_to_len = tai_sequence_lengths(tai, li);
+        }
         if (seq_to_len == NULL) {
             fprintf(stderr, "Failed to read sequence directory from %s\n",
                     used_tui ? tui_fn : tai_fn);

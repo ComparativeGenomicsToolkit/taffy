@@ -425,7 +425,7 @@ static std::map<std::string, GenomeRow> enumerate_genomes(TaffyHandle *H) {
     std::map<std::string, GenomeRow> out;
 
     int64_t n_g = 0;
-    TuiGenomeInfo *roster = tui_genome_names(H->tui_path_str.c_str(), &n_g);
+    TuiGenomeInfo *roster = tui_genome_names(H->tui, &n_g);
     if (roster == nullptr || n_g <= 0) return out;
     for (int64_t i = 0; i < n_g; i++) {
         GenomeRow row;

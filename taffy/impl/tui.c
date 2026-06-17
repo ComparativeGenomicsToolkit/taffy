@@ -1986,15 +1986,13 @@ static int64_t tui_find_d_lower_bound(OneFile *of, int64_t n_d, const char *pref
     return lo;
 }
 
-stHash *tui_sequence_lengths(const char *tui_path) {
-    if (tui_path == NULL) return NULL;
-    OneFile *of = oneFileOpenRead(tui_path, NULL, "tui", 1);
-    if (of == NULL) return NULL;
-
-    // n_d is the d-line count; populated from the footer regardless of
-    // where the cursor is.
-    I64 n_d = 0;
-    oneStats(of, 'd', &n_d, NULL, NULL);
+stHash *tui_sequence_lengths(Tui *tui) {
+    if (tui == NULL || tui->of == NULL) return NULL;
+    // Reuse tui_load's cached handle -- a fresh oneFileOpenRead would re-read
+    // and re-parse the whole footer index for nothing.  Moves the shared
+    // cursor, so the caller must serialize on `tui` (same note as tui_query).
+    OneFile *of = tui->of;
+    int64_t n_d = tui->n_d;          // d-line count, cached at tui_load
 
     // Value field is the seq length, stored as a void* (cast via intptr_t).
     // Same convention tai_sequence_lengths uses.
@@ -2003,12 +2001,12 @@ stHash *tui_sequence_lengths(const char *tui_path) {
     // 8192 mirrors tui_find_d's buffer (and the writer's "%8191s" upper
     // bound) -- the two sides need to move together if either gets bumped.
     char buf[8192];
-    for (int64_t i = 1; i <= (int64_t)n_d; i++) {
-        if (!oneGoto(of, 'd', i)) { stHash_destruct(out); oneFileClose(of); return NULL; }
-        if (oneReadLine(of) != 'd') { stHash_destruct(out); oneFileClose(of); return NULL; }
+    for (int64_t i = 1; i <= n_d; i++) {
+        if (!oneGoto(of, 'd', i)) { stHash_destruct(out); return NULL; }
+        if (oneReadLine(of) != 'd') { stHash_destruct(out); return NULL; }
         int64_t n = oneLen(of);
         if (n < 0 || n >= (int64_t)sizeof(buf)) {
-            stHash_destruct(out); oneFileClose(of); return NULL;
+            stHash_destruct(out); return NULL;
         }
         memcpy(buf, oneString(of), (size_t)n);
         buf[n] = '\0';
@@ -2018,7 +2016,6 @@ stHash *tui_sequence_lengths(const char *tui_path) {
         // wouldn't free the old value anyway.
         stHash_insert(out, stString_copy(buf), (void *)(intptr_t)slen);
     }
-    oneFileClose(of);
     return out;
 }
 
@@ -2070,26 +2067,27 @@ stHash *tui_genome_seq_lengths(Tui *tui, const char *genome) {
     return out;
 }
 
-TuiGenomeInfo *tui_genome_names(const char *tui_path, int64_t *n_out) {
+TuiGenomeInfo *tui_genome_names(Tui *tui, int64_t *n_out) {
     if (n_out) *n_out = 0;
-    if (tui_path == NULL) return NULL;
-    OneFile *of = oneFileOpenRead(tui_path, NULL, "tui", 1);
-    if (of == NULL) return NULL;
+    if (tui == NULL || tui->of == NULL) return NULL;
+    // Reuse tui_load's cached handle (no re-open / footer re-parse).  Moves
+    // the shared cursor, so the caller must serialize on `tui`.
+    OneFile *of = tui->of;
     // Every .tui carries the 'g' roster; this guard is purely defensive
     // -- a truncated or hand-built file could omit the line type, leaving
     // of->info['g']==NULL, and the oneStats below would then deref it.
-    if (of->info[(int)'g'] == NULL) { oneFileClose(of); return NULL; }
+    if (of->info[(int)'g'] == NULL) return NULL;
     I64 n_g = 0;
     oneStats(of, 'g', &n_g, NULL, NULL);
-    if (n_g <= 0) { oneFileClose(of); return NULL; }
+    if (n_g <= 0) return NULL;
     TuiGenomeInfo *arr = (TuiGenomeInfo *) st_calloc((size_t)n_g, sizeof(TuiGenomeInfo));
     char buf[8192];
     for (int64_t i = 1; i <= (int64_t)n_g; i++) {
-        if (!oneGoto(of, 'g', i)) { tui_genome_info_free(arr, n_g); oneFileClose(of); return NULL; }
-        if (oneReadLine(of) != 'g') { tui_genome_info_free(arr, n_g); oneFileClose(of); return NULL; }
+        if (!oneGoto(of, 'g', i)) { tui_genome_info_free(arr, n_g); return NULL; }
+        if (oneReadLine(of) != 'g') { tui_genome_info_free(arr, n_g); return NULL; }
         int64_t nl = oneLen(of);
         if (nl < 0 || nl >= (int64_t)sizeof(buf)) {
-            tui_genome_info_free(arr, n_g); oneFileClose(of); return NULL;
+            tui_genome_info_free(arr, n_g); return NULL;
         }
         memcpy(buf, oneString(of), (size_t)nl);
         buf[nl] = '\0';
@@ -2097,7 +2095,6 @@ TuiGenomeInfo *tui_genome_names(const char *tui_path, int64_t *n_out) {
         arr[i - 1].total_bp = oneInt(of, 1);
         arr[i - 1].n_chroms = oneInt(of, 2);
     }
-    oneFileClose(of);
     if (n_out) *n_out = n_g;
     return arr;
 }
