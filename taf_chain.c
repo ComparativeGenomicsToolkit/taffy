@@ -27,9 +27,9 @@
  * the encoded length; queries at positions within an internal gap will
  * report a target position that doesn't reflect a real source alignment.
  * --maxGap is the user's lever -- 0 = lossless (only chain truly
- * contiguous runs), 1000 = axtChain-equivalent, 10000 = default
- * (browser-tuned: keeps ~95% of base coverage at split-second lift,
- * consistent across close and diverged clades).
+ * contiguous runs), 1000 = axtChain-equivalent.  The DEFAULT is auto-
+ * picked from the universal column count T (browser-tuned: ~1000 at apes
+ * scale, ~10000 at 577-way/vertebrate scale; clamped to [1000, 10000]).
  *
  *  Released under the MIT license, see LICENSE.txt
  */
@@ -44,6 +44,7 @@
 #include <getopt.h>
 #include <inttypes.h>
 #include <malloc.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -73,11 +74,11 @@ static void usage(void) {
         "                          merge contiguous runs); higher values\n"
         "                          give more aggressive compression at the\n"
         "                          cost of internal precision.  Typical\n"
-        "                          values: 0 (lossless), 1000 (conservative,\n"
-        "                          axtChain-equivalent), 10000 (browser\n"
-        "                          default -- keeps most base coverage at\n"
-        "                          split-second lift), 100000 (aggressive).\n"
-        "                          DEFAULT 10000.\n"
+        "                          values: 0 (lossless), 1000 (close clade),\n"
+        "                          10000 (vertebrate scale), 100000 (aggressive).\n"
+        "                          DEFAULT: auto from the universal column\n"
+        "                          count T -- ~1000 at apes scale .. ~10000 at\n"
+        "                          577-way scale, clamped [1000,10000].\n"
         "     --fromTui            Treat -i as the source .tui itself.\n"
         "  -l --logLevel STR       critical|info|debug.  DEFAULT critical.\n"
         "  -h --help               Print this help.\n");
@@ -362,7 +363,8 @@ int taf_chain_main(int argc, char *argv[]) {
 
     char    *input_file     = NULL;
     char    *output_file    = NULL;
-    int64_t  max_gap        = 10000;
+    int64_t  max_gap        = -1;   /* -1 until set: -G value, else auto from T */
+    int      g_given        = 0;    /* was -G supplied? */
     int      from_tui       = 0;
     char    *log_level      = NULL;
 
@@ -383,7 +385,7 @@ int taf_chain_main(int argc, char *argv[]) {
         switch (k) {
             case 'i': input_file  = optarg; break;
             case 'o': output_file = optarg; break;
-            case 'G': max_gap     = atoll(optarg); break;
+            case 'G': max_gap     = atoll(optarg); g_given = 1; break;
             case OPT_FROM_TUI:    from_tui = 1; break;
             case 'l': log_level   = optarg; break;
             case 'h': usage(); return 0;
@@ -394,7 +396,7 @@ int taf_chain_main(int argc, char *argv[]) {
         fprintf(stderr, "ERROR: -i required\n");
         usage(); return 1;
     }
-    if (max_gap < 0) {
+    if (g_given && max_gap < 0) {
         fprintf(stderr, "ERROR: --maxGap must be >= 0\n");
         return 1;
     }
@@ -433,8 +435,22 @@ int taf_chain_main(int argc, char *argv[]) {
         return 1;
     }
     int64_t T_src = tui_total_columns(src);
+    if (!g_given) {
+        /* Auto-pick maxGap from the universal column count T (browser-tuned
+         * for speed + general output).  Calibrated to two validated points --
+         * apes (T=3.27e9 -> 1000) and 577-way (T=72.5e9 -> 10000) -- as a
+         * sublinear power law G = 1000*(T/3.27e9)^0.743, clamped to that
+         * validated [1000, 10000] range.  More universal columns => broader /
+         * deeper / more-diverged alignment => larger inter-run gaps => larger
+         * G.  NOTE: a two-point fit; revisit if a mid-size alignment is added. */
+        double g = 1000.0 * pow((double) T_src / 3.27e9, 0.743);
+        max_gap = (int64_t) (g + 0.5);
+        if (max_gap < 1000)  max_gap = 1000;
+        if (max_gap > 10000) max_gap = 10000;
+    }
     st_logInfo("tui-chain: source .tui has T = %" PRIi64 " universal columns; "
-               "maxGap = %" PRIi64 "\n", T_src, max_gap);
+               "maxGap = %" PRIi64 "%s\n", T_src, max_gap,
+               g_given ? "" : " (auto from T)");
 
     /* Load the genome roster from the source's g-records. */
     int64_t n_genomes = 0;
