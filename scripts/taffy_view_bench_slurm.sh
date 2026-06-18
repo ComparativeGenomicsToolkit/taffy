@@ -285,16 +285,19 @@ if [[ "$STAGE_LOCAL" -eq 1 ]]; then
     STAGE_LIST+=( "$HG38" "${HG38}.tai" "$HAL" "$BB" )
     for f in "${STAGE_LIST[@]}"; do
         if [[ -f "$f" ]]; then
-            STAGE_BYTES=$(( STAGE_BYTES + $(stat -c %s "$f" 2>/dev/null || stat -f %z "$f") ))
+            STAGE_BYTES=$(( STAGE_BYTES + $(stat -Lc %s "$f" 2>/dev/null || stat -f %z "$f" 2>/dev/null || echo 0) ))
         fi
     done
     STAGE_GB=$(( STAGE_BYTES / (1024**3) ))
     echo ">> stage-in size: ~${STAGE_GB} GB total"
-    # Promote the stage hint to the actual --tmp default: request local
-    # scratch sized to what we stage (+50 GB headroom for the cells' own
-    # temp + FS slack).  An explicit --tmp still overrides.
-    TMP_GB=${TMP_GB:-$(( STAGE_GB + 50 ))}
-    echo ">> --tmp default: ${TMP_GB} GB per task (stage ~${STAGE_GB} GB + 50 GB headroom; override with --tmp)"
+    # --tmp is OPT-IN: most schedulers provision node-local scratch without an
+    # explicit request, and some reject --tmp outright.  Only pass --tmp when
+    # you set it; otherwise just report the size to request if you need to.
+    if [[ -n "$TMP_GB" ]]; then
+        echo ">> --tmp:         ${TMP_GB} GB per task (set explicitly)"
+    else
+        echo ">> --tmp:         not requested (pass --tmp $(( STAGE_GB + 50 )) only if your cluster enforces local-scratch requests)"
+    fi
 fi
 
 # --- Build the size ladder: 1, 10, ..., chr10_len.  Capped to MAX_SIZE

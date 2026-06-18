@@ -501,11 +501,14 @@ if [[ "$STAGE_LOCAL" -eq 1 ]]; then
     done
     STAGE_GB=$(( STAGE_BYTES / (1024**3) ))
     echo ">> stage-in size: ~${STAGE_GB} GB total"
-    # Promote the hint to the actual --tmp default: scratch sized to what we
-    # stage (+50 GB headroom for the cells' own temp + FS slack).  An
-    # explicit --tmp still overrides.
-    TMP_GB=${TMP_GB:-$(( STAGE_GB + 50 ))}
-    echo ">> --tmp default: ${TMP_GB} GB per task (stage ~${STAGE_GB} GB + 50 GB headroom; override with --tmp)"
+    # --tmp is OPT-IN: most schedulers provision node-local scratch without an
+    # explicit request, and some reject --tmp outright.  Only pass --tmp when
+    # you set it; otherwise just report the size to request if you need to.
+    if [[ -n "$TMP_GB" ]]; then
+        echo ">> --tmp:         ${TMP_GB} GB per task (set explicitly)"
+    else
+        echo ">> --tmp:         not requested (pass --tmp $(( STAGE_GB + 50 )) only if your cluster enforces local-scratch requests)"
+    fi
 elif [[ -n "$TMP_GB" ]]; then
     echo ">> --tmp request: ${TMP_GB} GB per task"
 fi
