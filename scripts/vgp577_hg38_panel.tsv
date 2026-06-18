@@ -1,0 +1,28 @@
+# vgp577_hg38_panel.tsv -- target-genome panel for the 577-way hg38-source
+# slide benchmark.  REF (source/display genome) = hg38 = GCA_000001405.15.
+#
+# These are the 13 hg38 -> target genomes we have UCSC liftOver chains for
+# (named <REF>_vs_<genome_id>.chain.gz in the chains dir).  One line per
+# target.  3 columns, TAB-separated (the `-L` panel format used by the
+# lift / lift-genome / blockViz bench scripts; default awk FS so
+# space-separated also parses):
+#
+#   <genome_id>            <scientific_name>            <english_common_name>
+#
+# Names resolved from the NCBI datasets v2 API (organism_name + common_name);
+# GCF_902713615.1 resolved via Ensembl/NCBI assembly record (sScyCan1.1).
+# All 13 accessions are present in /home/hickey/dev/work/paffy-comp/vgp-577way.nwk.
+#
+GCA_009914755.4	Homo_sapiens	Human_T2T_CHM13
+GCA_038501925.1	Xenopus_petersii	Peters_Clawed_Frog
+GCA_048771995.1	Taeniopygia_guttata	Zebra_Finch
+GCA_944039275.1	Danio_rerio	Zebrafish
+GCA_949316315.1	Mus_musculus	House_Mouse
+GCF_004115265.2	Rhinolophus_ferrumequinum	Greater_Horseshoe_Bat
+GCF_011100685.1	Canis_lupus_familiaris	Dog
+GCF_013347855.1	Anguilla_anguilla	European_Eel
+GCF_016700215.2	Gallus_gallus	Chicken
+GCF_036370855.1	Dromaius_novaehollandiae	Emu
+GCF_037176765.1	Anolis_sagrei	Brown_Anole
+GCF_040954835.1	Lepisosteus_oculatus	Spotted_Gar
+GCF_902713615.1	Scyliorhinus_canicula	Small_Spotted_Catshark

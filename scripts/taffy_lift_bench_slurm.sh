@@ -45,6 +45,14 @@ set -euo pipefail
 
 UNI=""
 UNI_TAF=""
+STATS_SRC=""                        # --statsSrc: readable TAF/MAF used ONLY for the
+                                    # `taffy stats -s` REF-chrom enumeration.  Needed when
+                                    # -u/--uniTaf points at a .tui whose source TAF/MAF is a
+                                    # 0-byte stub (e.g. a chained .tui with no MAF sibling):
+                                    # `taffy stats -s` reads the SOURCE header, not the .tui,
+                                    # so a stub crashes it.  Point this at a readable uni
+                                    # source covering the SAME REF chroms (the base uni works
+                                    # -- chained + base share the hg38 chrom set).
 HAL=""
 CHAINS_DIR=""
 TREE=""
@@ -107,6 +115,15 @@ Required (at least one of -u / --uniTaf must be set):
                 If set, generates a "taf.tui" cell per species (taffy lift
                 against the TAF-anchored .tui).  Both flags can be set
                 together to bench both .tui formats side by side.
+  --statsSrc FILE  Readable TAF/MAF used ONLY for the \`taffy stats -s\`
+                REF-chrom enumeration that seeds the random-interval beds.
+                Default = the -u/--uniTaf source itself.  Set this when the
+                -u/--uniTaf source is a 0-byte stub (e.g. a chained .tui with
+                no MAF sibling): \`taffy stats -s\` reads the SOURCE header,
+                not the .tui, so a stub would crash it.  Point --statsSrc at
+                any readable uni source covering the same REF chroms (the
+                base uni works -- chained + base share the hg38 chrom set).
+                \`taffy lift\` still runs against the -u/--uniTaf .tui.
   -H FILE       HAL file (for halLiftover)
   -c DIR        Directory of chain files named <REF>_vs_<GENOME_ID>.chain.gz
   -t FILE       Species tree (.nwk) -- used by the plot script for divergence
@@ -176,6 +193,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         -u)             UNI="$2"; shift 2;;
         --uniTaf)       UNI_TAF="$2"; shift 2;;
+        --statsSrc)     STATS_SRC="$2"; shift 2;;
         -H)             HAL="$2"; shift 2;;
         -c)             CHAINS_DIR="$2"; shift 2;;
         -t)             TREE="$2"; shift 2;;
@@ -227,6 +245,10 @@ if [[ -n "$UNI_TAF" ]]; then
     [[ -f "$UNI_TAF"        ]] || { echo "ERROR: $UNI_TAF not found" >&2; exit 1; }
     [[ -f "${UNI_TAF}.tui"  ]] || { echo "ERROR: $UNI_TAF has no .tui sibling" >&2; exit 1; }
 fi
+if [[ -n "$STATS_SRC" ]]; then
+    # Must be a non-empty readable TAF/MAF (taffy stats -s reads its header).
+    [[ -s "$STATS_SRC" ]] || { echo "ERROR: --statsSrc $STATS_SRC not found or empty (it must be a readable TAF/MAF, not a stub)" >&2; exit 1; }
+fi
 if [[ "$NO_HAL" -eq 0 ]]; then
     [[ -f "$HAL"     ]] || { echo "ERROR: $HAL not found" >&2; exit 1; }
 fi
@@ -276,8 +298,15 @@ REF_SIZES="$OUTDIR/ref.sizes"
 # Prefer the MAF.tui if available; the chrom list is identical from either
 # (both .tui files were built from the same alignment), but we only need
 # to query one.
-UNI_STATS_SRC="${UNI:-$UNI_TAF}"
-echo ">> querying .tui ($UNI_STATS_SRC) for ${REF}.* chroms via taffy stats -s ..." >&2
+#
+# --statsSrc override: `taffy stats -s` reads the SOURCE TAF/MAF header
+# (NOT the .tui), so when -u/--uniTaf is a 0-byte stub (chained .tui with
+# no MAF sibling) we must enumerate chroms from a readable source instead.
+# The base uni source covers the same hg38 chroms, so the chained-lift
+# bench passes --statsSrc <base uni> while taffy lift runs on the chained
+# .tui via -u/--uniTaf.
+UNI_STATS_SRC="${STATS_SRC:-${UNI:-$UNI_TAF}}"
+echo ">> querying source ($UNI_STATS_SRC) for ${REF}.* chroms via taffy stats -s ..." >&2
 "$TAFFY" stats -i "$UNI_STATS_SRC" -s \
     | awk -v p="${REF}." 'index($1, p) == 1 {sub(p, "", $1); print $1"\t"$2}' \
     | sort -k2,2nr > "$REF_SIZES"

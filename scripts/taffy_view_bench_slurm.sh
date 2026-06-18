@@ -67,6 +67,10 @@ START=1000000                 # start of the queried region; default 1 Mb to ski
                               # telomere-/repeat-dominated 0..1Mb prefix of chr10 that
                               # has near-zero universal-MAF coverage
 MAX_SIZE=""                   # cap of the size ladder; default = chr10's length - START
+HAL_MAX_SIZE=""               # --halMaxSize: skip (DO NOT LAUNCH) the hal2maf cell for
+                              # any ladder size > this (bp).  Empty = no cap (hal runs the
+                              # whole ladder).  The HAL has no LOD, so a whole-chrom hal2maf
+                              # would burn hours; capping skips it rather than run-then-timeout.
 TIME_BUDGET=1800              # per-cell wall seconds (timeout sends SIGKILL)
 HAL_TIME_BUDGET=""            # per-cell cap just for hal; defaults to TIME_BUDGET
 SBATCH_TIME=24
@@ -114,6 +118,12 @@ Optional:
   --maxSize INT     Cap on the size ladder (= max length N, not end).
                     Default = chrom_length - START pulled from
                     \`taffy stats -s\` on the .tai input.
+  --halMaxSize INT  Skip (DO NOT LAUNCH) the hal2maf cell for any ladder
+                    size > this (bp).  Default unset = hal runs the whole
+                    ladder.  Because the HAL has no LOD, a whole-chrom
+                    hal2maf can burn hours; capping skips those cells
+                    outright instead of run-then-timeout.  taffy / tai /
+                    bb cells always run the full ladder.
   --timeBudget SEC  Per-cell wall cap (timeout) (default $TIME_BUDGET)
   --halTimeBudget SEC  Tighter cap just for the hal2maf cell.  Useful
                     because hal2maf scales much worse than the other
@@ -157,6 +167,7 @@ while [[ $# -gt 0 ]]; do
         --bbChrom)      BB_CHROM="$2"; shift 2;;
         --start)        START="$2"; shift 2;;
         --maxSize)      MAX_SIZE="$2"; shift 2;;
+        --halMaxSize)   HAL_MAX_SIZE="$2"; shift 2;;
         --timeBudget)    TIME_BUDGET="$2"; shift 2;;
         --halTimeBudget) HAL_TIME_BUDGET="$2"; shift 2;;
         --time)             SBATCH_TIME="$2"; shift 2;;
@@ -213,6 +224,10 @@ if [[ -z "$MAX_SIZE" ]]; then
     MAX_SIZE=$(( CHROM_LEN - START ))
 fi
 
+if [[ -n "$HAL_MAX_SIZE" ]]; then
+    [[ "$HAL_MAX_SIZE" =~ ^[0-9]+$ ]] || { echo "ERROR: --halMaxSize must be a non-negative integer (got '$HAL_MAX_SIZE')" >&2; exit 1; }
+fi
+
 mkdir -p "$OUTDIR" "$OUTDIR/logs"
 echo ">> output dir:    $OUTDIR"
 echo ">> taffy:         $TAFFY"
@@ -226,6 +241,7 @@ echo ">> BigBed:        $BB"
 echo ">> ref chrom:     $REF_CHROM (hal $HAL_GENOME / $HAL_SEQ, bb $BB_CHROM)"
 echo ">> start:         $START bp"
 echo ">> max size:      $MAX_SIZE bp  (query range = [start, start+N))"
+echo ">> hal max size:  ${HAL_MAX_SIZE:-(none)} bp  (hal2maf cells skipped above this; taffy/tai/bb run full ladder)"
 echo ">> cpus/task:     $T_TOTAL (each taffy gets $((T_TOTAL / 4)) bgzf threads)"
 echo ">> time budget:   $TIME_BUDGET s per cell${HAL_TIME_BUDGET:+ (hal: ${HAL_TIME_BUDGET}s)}"
 echo ">> local-stage:   $([[ $STAGE_LOCAL -eq 1 ]] && echo "ON (copies to \$TMPDIR)" || echo "OFF (reads from network)")"
@@ -283,6 +299,7 @@ BB_CHROM="$BB_CHROM"
 START=$START
 TIME_BUDGET=$TIME_BUDGET
 HAL_TIME_BUDGET=${HAL_TIME_BUDGET:-$TIME_BUDGET}
+HAL_MAX_SIZE="$HAL_MAX_SIZE"
 STAGE_LOCAL=$STAGE_LOCAL
 TAFFY="$TAFFY"
 HAL2MAF="$HAL2MAF"
@@ -453,12 +470,18 @@ for N in "\${SIZES[@]}"; do
 
     # hal: hal2maf (if installed); uses HAL_TIME_BUDGET (defaults to
     # TIME_BUDGET) so the user can short-circuit it independently.
-    if [[ -n "\$HAL2MAF" ]]; then
+    # --halMaxSize cap: SKIP (do not launch) the hal cell when N exceeds it.
+    # The HAL has no LOD, so a whole-chrom hal2maf would burn hours; we skip
+    # it outright rather than run-then-timeout.  No hal row is emitted for
+    # capped sizes (the plot simply shows the hal line stopping at the cap).
+    if [[ -n "\$HAL2MAF" ]] && { [[ -z "\$HAL_MAX_SIZE" ]] || (( N <= HAL_MAX_SIZE )); }; then
         ( run_cell hal "\$N" "\$HAL_TIME_BUDGET" \\
             "\$HAL2MAF" --refGenome "\$HAL_GENOME" --refSequence "\$HAL_SEQ" \\
                        --start "\$START" --length "\$N" "\$HAL" /dev/stdout \\
           ) > "\${rowfiles[hal]}" &
         pids[hal]=\$!
+    elif [[ -n "\$HAL2MAF" ]]; then
+        echo "   (hal skipped at N=\$N > halMaxSize=\$HAL_MAX_SIZE)" >&2
     fi
 
     # bb: bigBedToBed (if installed).  Uses the flag-based CLI

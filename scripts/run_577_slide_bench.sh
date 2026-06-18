@@ -1,0 +1,431 @@
+#!/bin/bash
+#
+# run_577_slide_bench.sh -- one wrapper to drive all FOUR comparisons for
+# the 577-way / hg38-source conference slide.  Shared config block; invokes
+# the three existing bench drivers for #1/#2/#4 and the new blockViz driver
+# for #3.  NEVER submits sbatch itself -- it calls each driver with
+# --dry-run (default) or lets each driver submit (--submit).
+#
+# THE FOUR COMPARISONS (all full-577-way, hg38 source/reference):
+#   1. MAF extraction   : tui (view -U query) vs tai (view) vs hal (hal2maf)
+#                         vs bigmaf (bigBedToBed)   -> taffy_view_bench_slurm.sh
+#   2. base liftover    : taffy lift on the BASE .tui vs halLiftover
+#                                                    -> taffy_lift_bench_slurm.sh
+#   3. blockViz query   : taffyBlockViz vs halBlockViz
+#                                                    -> taffy_blockviz_bench_slurm.sh
+#   4. chained liftover : taffy lift on the CHAINED .tui vs UCSC liftOver
+#                                                    -> taffy_lift_bench_slurm.sh
+#
+# THE HAL CAP, applied to the existing (#1/#2) scripts
+# ----------------------------------------------------
+# #1 (view) builds its OWN internal log-decade ladder and has no --no-hal,
+# so a two-pass split is awkward (it would duplicate the taffy/tai/bb
+# cells).  Instead a small, targeted --halMaxSize knob was ADDED to
+# taffy_view_bench_slurm.sh: the hal2maf cell is simply not launched for
+# ladder sizes above the cap (no run-then-timeout), while taffy/tai/bb run
+# the full ladder.  One clean pass.  (The blockViz driver #3 has the same
+# native --halMaxSize knob.)
+#
+# #2 (base lift) is a size x species matrix taking an explicit -S ladder
+# and DOES have --no-hal.  So we cap halLiftover with the cleanest option
+# available WITHOUT editing the lift driver: run it TWICE into the SAME
+# OUTDIR --
+#   pass A: -S <sizes <= halMaxSize>           (halLiftover cells launched)
+#   pass B: -S <sizes >  halMaxSize>  --no-hal (halLiftover cells skipped)
+# Both append to the same bench.tsv (the runner writes the header only when
+# the file is empty), so the two passes concatenate into one table.  The
+# halLiftover cells thus exist only at <= halMaxSize, exactly the cap, with
+# zero edits to the lift driver.
+#
+# #4 (chained lift, vs UCSC liftOver) has NO hal tool (liftOver is
+# chain-based), so it needs no cap -- it runs the full ladder in one pass
+# with --no-hal.
+#
+# THE CHAINED-.tui RESOLUTION, for #4   (symlink + a tiny driver option)
+# ----------------------------------------------------------------------
+# taffy_lift_bench_slurm.sh resolves its .tui as the sibling of the
+# -u/--uniTaf path: it validates BOTH `-f "$UNI"` and `-f "$UNI.tui"`, and
+# at runtime it stubs `$UNI` to a 0-byte file + `taffy lift` reads only
+# `$UNI.tui`.  The chained .tui (..._g10000.tui) has no .uni.taf.gz sibling.
+# We satisfy the .tui resolution with a SYMLINK:
+#     : > $WORK/chained.uni.taf.gz                    # 0-byte stub
+#     ln -sf <CHAINED_TUI>  $WORK/chained.uni.taf.gz.tui
+#     --uniTaf $WORK/chained.uni.taf.gz
+#
+# BUT the symlink alone is NOT sufficient: before launching cells the lift
+# driver enumerates REF chroms with `taffy stats -s -i <source>`, and
+# `taffy stats -s` reads the SOURCE TAF/MAF HEADER (verified), not the .tui
+# -- so a 0-byte stub crashes it (taf.c check_input_format assertion).  We
+# therefore ALSO added a tiny `--statsSrc FILE` option to the lift driver:
+# a readable TAF/MAF used ONLY for that chrom enumeration, decoupled from
+# the -u/--uniTaf .tui that drives the actual lift.  The wrapper passes
+# `--statsSrc <base uni source>` for #4 (the base uni shares hg38's chrom
+# set with the chained .tui).  So #4 = symlink (for the .tui) + --statsSrc
+# (for chrom enumeration).  Chosen over a header-bearing fake stub because
+# that would require regenerating the exact chrom header from the source
+# anyway; --statsSrc is the minimal honest decoupling.  REPORTED in summary.
+#
+# Usage:
+#   run_577_slide_bench.sh [--test] [--submit] [config overrides...]
+# Default is DRY-RUN: prints the sbatch command each driver would submit.
+
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ======================================================================
+# SHARED CONFIG BLOCK -- edit these (or override via CLI flags) for the
+# real cluster run.  Everything big is a cluster-side path supplied here.
+# ======================================================================
+# -- Inputs (all cluster-side for the real run; locals shown as hints) --
+BASE_TUI_MAF=""        # base universal MAF whose .tui sibling drives #1 view + #2 base-lift
+                       #   (e.g. /path/vgp-577way-v1.uni.maf.gz, with .tui sibling)
+BASE_TUI_TAF=""        # OR the TAF-anchored universal (.uni.taf.gz + .tui); set whichever you have
+CHAINED_TUI=""         # chained .tui for #3 blockViz + #4 chained-lift
+                       #   (e.g. /path/vgp-577way-v1.uni.taf.gz.chained_g10000.tui)
+HAL=""                 # full 577-way .hal (hal2maf / halLiftover / blockVizBed)
+HG38_MAF=""            # hg38-anchored MAF (.maf.gz + .tai) for #1 view's tai cells
+BIGBED=""              # bigmaf bigBed for #1 view's bb cells
+CHAINS_DIR=""          # dir of UCSC chains named <REF>_vs_<genome_id>.chain.gz (#2 + #4)
+TREE=""                # species tree .nwk (plots' divergence x-axis)
+PANEL="$HERE/vgp577_hg38_panel.tsv"   # target-genome panel (-L)
+
+# -- Reference / query geometry --
+REF="GCA_000001405.15"          # hg38 genome id (matches the universal-MAF / chain prefix)
+VIEW_REF_CHROM="hg38.chr20"     # taffy view -r prefix for #1 (genome.seq)
+HAL_GENOME="hg38"               # hal2maf --refGenome / blockViz tSpecies
+HAL_SEQ="chr20"                 # hal2maf --refSequence / bare tChrom
+BB_CHROM="chr20"                # bigBedToBed chrom for #1
+BLOCKVIZ_CHROM="chr20"          # bare tChrom for #3 (both blockViz tools)
+VIEW_START=1000000              # #1 view window start (skip the chr20 telomere prefix)
+
+# -- Ladders / panel knobs --
+VIEW_MAX_SIZE=""                # #1 view --maxSize cap (empty = chrom end from .tai)
+BLOCKVIZ_SIZES="1000,10000,100000,1000000,10000000,64000000"   # #3 ladder (last ~= chr20 len)
+LIFT_SIZES="1000,100000,1000000"     # #2 + #4 interval-size ladder
+LIFT_N_INTERVALS=100            # #2 + #4 random intervals per (species,size) cell
+HAL_MAX_SIZE=1000000            # the cap: hal tools skipped above this (bp) in #1/#2/#3
+
+# -- SLURM / runtime --
+T_TOTAL=32
+TIME_BUDGET=3600
+HAL_TIME_BUDGET=""              # tighter per-cell cap just for hal2maf in #1 (empty = TIME_BUDGET)
+SBATCH_TIME=24
+SBATCH_MEM=128
+TMP_GB=""
+MAX_OUTPUT_BLOCKS=500           # #3 taffyBlockViz --maxOutputBlocks
+PARTITION=""
+ACCOUNT=""
+OUTROOT="$PWD/577_slide_bench"  # parent of the four per-comparison OUTDIRs
+
+# -- Which comparisons to run (all on by default) --
+DO_1=1; DO_2=1; DO_3=1; DO_4=1
+
+# -- Mode --
+SUBMIT=0                        # default DRY-RUN; --submit lets each driver actually sbatch
+TEST=0                          # --test: tiny smoke config (see below)
+NO_WAIT=0                       # pass --no-wait through to drivers when submitting
+
+# Tool/bin env passthroughs (each driver also honours these from env).
+TAFFY="${TAFFY:-$(command -v taffy || true)}"
+
+usage() {
+    cat >&2 <<EOF
+run_577_slide_bench.sh -- drive all four 577-way / hg38 slide comparisons
+
+  --test            Tiny smoke config: 1 chrom, 2 small sizes (1000,100000),
+                    2 species, short --timeBudget, small --maxOutputBlocks.
+                    Still DRY-RUN unless you also pass --submit.
+  --submit          Let each driver actually submit (default: --dry-run only,
+                    nothing is sent to SLURM).
+  --no-wait         Pass --no-wait to each driver (submit + detach).
+  --only LIST       Comma list of comparisons to run: 1,2,3,4 (default all).
+  -o DIR            Output root (default $OUTROOT); each comparison gets a
+                    subdir cmp1_view / cmp2_baselift / cmp3_blockviz /
+                    cmp4_chainlift under it.
+
+  Input paths (REQUIRED for the comparisons you run):
+    --baseTui FILE     base universal MAF (.uni.maf.gz + .tui)  [#1 #2 #4*]
+    --baseTuiTaf FILE  OR base universal TAF (.uni.taf.gz + .tui) [#1 #2 #4*]
+                       (*#4 uses it ONLY as the readable --statsSrc for
+                        chrom enumeration; the chained .tui drives the lift)
+    --chainedTui FILE  chained .tui (..._g10000.tui)            [#3 #4]
+    --hal FILE         full 577-way .hal                        [#1 #2 #3]
+    --hg38Maf FILE     hg38-anchored MAF (.maf.gz + .tai)       [#1]
+    --bigbed FILE      bigmaf bigBed                            [#1]
+    --chains DIR       UCSC chains dir                          [#2 #4]
+    --tree FILE        species tree .nwk                        [#1 #2 #4 plots]
+    --panel FILE       target panel -L (default $PANEL)
+
+  Geometry / ladder overrides (sensible defaults baked in):
+    --ref ID  --viewRefChrom NAME  --halGenome NAME  --halSeq NAME
+    --bbChrom NAME  --blockvizChrom NAME  --viewStart INT  --viewMaxSize INT
+    --blockvizSizes CSV  --liftSizes CSV  --nIntervals INT  --halMaxSize N
+    --T INT  --timeBudget SEC  --halTimeBudget SEC  --time HRS  --mem GB
+    --tmp GB  --maxOutputBlocks N  --partition X  --account X
+  -h / --help
+
+Every input path is cluster-side for the real run.  Known LOCAL hints
+(for --dry-run smoke only):
+  base .tui    /home/hickey/dev/work/unitaf/vgp-577way-v1.uni.taf.gz.tui
+               (sibling of vgp-577way-v1.uni.taf.gz)
+  chained .tui /home/hickey/dev/work/unitaf/vgp-577way-v1.uni.taf.gz.chained_g10000.tui
+  tree         /home/hickey/dev/work/paffy-comp/vgp-577way.nwk
+  subtree hals /home/hickey/dev/work/unitaf/vgp-577way-v1-MuridaeAnc3.hal
+               /home/hickey/dev/work/unitaf/8-t2t-apes-2023v2.hal
+EOF
+    exit "${1:-0}"
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --test)           TEST=1; shift;;
+        --submit)         SUBMIT=1; shift;;
+        --no-wait)        NO_WAIT=1; shift;;
+        --only)           ONLY="$2"; shift 2;;
+        -o)               OUTROOT="$2"; shift 2;;
+        --baseTui)        BASE_TUI_MAF="$2"; shift 2;;
+        --baseTuiTaf)     BASE_TUI_TAF="$2"; shift 2;;
+        --chainedTui)     CHAINED_TUI="$2"; shift 2;;
+        --hal)            HAL="$2"; shift 2;;
+        --hg38Maf)        HG38_MAF="$2"; shift 2;;
+        --bigbed)         BIGBED="$2"; shift 2;;
+        --chains)         CHAINS_DIR="$2"; shift 2;;
+        --tree)           TREE="$2"; shift 2;;
+        --panel)          PANEL="$2"; shift 2;;
+        --ref)            REF="$2"; shift 2;;
+        --viewRefChrom)   VIEW_REF_CHROM="$2"; shift 2;;
+        --halGenome)      HAL_GENOME="$2"; shift 2;;
+        --halSeq)         HAL_SEQ="$2"; shift 2;;
+        --bbChrom)        BB_CHROM="$2"; shift 2;;
+        --blockvizChrom)  BLOCKVIZ_CHROM="$2"; shift 2;;
+        --viewStart)      VIEW_START="$2"; shift 2;;
+        --viewMaxSize)    VIEW_MAX_SIZE="$2"; shift 2;;
+        --blockvizSizes)  BLOCKVIZ_SIZES="$2"; shift 2;;
+        --liftSizes)      LIFT_SIZES="$2"; shift 2;;
+        --nIntervals)     LIFT_N_INTERVALS="$2"; shift 2;;
+        --halMaxSize)     HAL_MAX_SIZE="$2"; shift 2;;
+        --T)              T_TOTAL="$2"; shift 2;;
+        --timeBudget)     TIME_BUDGET="$2"; shift 2;;
+        --halTimeBudget)  HAL_TIME_BUDGET="$2"; shift 2;;
+        --time)           SBATCH_TIME="$2"; shift 2;;
+        --mem)            SBATCH_MEM="$2"; shift 2;;
+        --tmp)            TMP_GB="$2"; shift 2;;
+        --maxOutputBlocks) MAX_OUTPUT_BLOCKS="$2"; shift 2;;
+        --partition)      PARTITION="$2"; shift 2;;
+        --account)        ACCOUNT="$2"; shift 2;;
+        -h|--help)        usage 0;;
+        *)                echo "unknown arg: $1" >&2; usage 1;;
+    esac
+done
+
+# --only N,M,... selects which comparisons run.
+if [[ -n "${ONLY:-}" ]]; then
+    DO_1=0; DO_2=0; DO_3=0; DO_4=0
+    IFS=',' read -r -a _only <<< "$ONLY"
+    for c in "${_only[@]}"; do
+        case "$c" in
+            1) DO_1=1;; 2) DO_2=1;; 3) DO_3=1;; 4) DO_4=1;;
+            *) echo "ERROR: --only takes 1..4 (got '$c')" >&2; exit 1;;
+        esac
+    done
+fi
+
+# --test: shrink everything to a 1-chrom, 2-size, 2-species smoke run.
+if [[ "$TEST" -eq 1 ]]; then
+    echo ">> --test mode: tiny smoke config" >&2
+    BLOCKVIZ_SIZES="1000,100000"
+    LIFT_SIZES="1000,100000"
+    LIFT_N_INTERVALS=5
+    HAL_MAX_SIZE=100000
+    TIME_BUDGET=300
+    HAL_TIME_BUDGET=120
+    MAX_OUTPUT_BLOCKS=50
+    T_TOTAL=8
+    SBATCH_MEM=32
+    # 2-species panel written to a temp file used as -L.
+    TEST_PANEL="$OUTROOT/test_panel.tsv"
+fi
+
+mkdir -p "$OUTROOT"
+
+# Two small target species for --test (must have chains + be in the tree).
+if [[ "$TEST" -eq 1 ]]; then
+    cat > "$TEST_PANEL" <<'EOF'
+GCF_011100685.1	Canis_lupus_familiaris	Dog
+GCF_016700215.2	Gallus_gallus	Chicken
+EOF
+    PANEL="$TEST_PANEL"
+fi
+
+# Driver paths.
+VIEW_DRV="$HERE/taffy_view_bench_slurm.sh"
+LIFT_DRV="$HERE/taffy_lift_bench_slurm.sh"
+BLOCKVIZ_DRV="$HERE/taffy_blockviz_bench_slurm.sh"
+for d in "$VIEW_DRV" "$LIFT_DRV" "$BLOCKVIZ_DRV"; do
+    [[ -f "$d" ]] || { echo "ERROR: driver not found: $d" >&2; exit 1; }
+done
+
+# Common flags appended to every driver invocation.
+COMMON_FLAGS=()
+[[ "$SUBMIT" -eq 0 ]] && COMMON_FLAGS+=( --dry-run )
+[[ "$NO_WAIT" -eq 1 ]] && COMMON_FLAGS+=( --no-wait )
+[[ -n "$PARTITION" ]]  && COMMON_FLAGS+=( --partition "$PARTITION" )
+[[ -n "$ACCOUNT"   ]]  && COMMON_FLAGS+=( --account "$ACCOUNT" )
+[[ -n "$TMP_GB"    ]]  && COMMON_FLAGS+=( --tmp "$TMP_GB" )
+
+# Resolve the base universal source flag (-u MAF or --uniTaf TAF).
+BASE_SRC_FLAG=()
+if   [[ -n "$BASE_TUI_MAF" ]]; then BASE_SRC_FLAG=( -u "$BASE_TUI_MAF" )
+elif [[ -n "$BASE_TUI_TAF" ]]; then BASE_SRC_FLAG=( --uniTaf "$BASE_TUI_TAF" )
+fi
+
+# Split the size ladder around the cap (for the two-pass hal-cap trick).
+# le_sizes = sizes <= halMaxSize ; gt_sizes = sizes > halMaxSize.
+split_sizes() {
+    local csv="$1" cap="$2" le="" gt="" s
+    IFS=',' read -r -a _arr <<< "$csv"
+    for s in "${_arr[@]}"; do
+        if (( s <= cap )); then le="${le:+$le,}$s"; else gt="${gt:+$gt,}$s"; fi
+    done
+    LE_SIZES="$le"; GT_SIZES="$gt"
+}
+
+echo "================================================================"
+echo " 577-way / hg38 slide benchmark wrapper"
+echo "   mode:        $([[ $SUBMIT -eq 1 ]] && echo SUBMIT || echo 'DRY-RUN (no sbatch)')$([[ $TEST -eq 1 ]] && echo ' [--test]')"
+echo "   out root:    $OUTROOT"
+echo "   panel:       $PANEL"
+echo "   halMaxSize:  $HAL_MAX_SIZE bp"
+echo "   run:         #1=$DO_1 #2=$DO_2 #3=$DO_3 #4=$DO_4"
+echo "================================================================"
+
+# Helper: echo + run a driver invocation (array-safe).
+run_driver() {
+    echo
+    echo ">>> $*"
+    "$@"
+}
+
+# ======================================================================
+# #1 -- MAF extraction (view): tui vs tai vs hal vs bigmaf.  Size ladder.
+#       The view driver builds its OWN log-decade ladder internally and
+#       runs every tool per size; taffy/tai/bb run the FULL ladder.  The
+#       hal2maf cell is capped natively by --halMaxSize (added to the view
+#       driver): sizes above the cap simply DON'T launch hal2maf -- no
+#       run-then-timeout.  Single clean pass.
+# ======================================================================
+if [[ "$DO_1" -eq 1 ]]; then
+    O1="$OUTROOT/cmp1_view"
+    [[ ${#BASE_SRC_FLAG[@]} -gt 0 ]] || { echo "ERROR(#1): need --baseTui or --baseTuiTaf" >&2; exit 1; }
+    for v in HG38_MAF HAL BIGBED; do
+        [[ -n "${!v}" ]] || { echo "ERROR(#1): missing --$(echo "$v" | tr 'A-Z_' 'a-z')" >&2; exit 1; }
+    done
+    V1_FLAGS=( "${BASE_SRC_FLAG[@]}"
+        -m "$HG38_MAF" -H "$HAL" -b "$BIGBED" -o "$O1"
+        --refChrom "$VIEW_REF_CHROM" --halGenome "$HAL_GENOME"
+        --halSeq "$HAL_SEQ" --bbChrom "$BB_CHROM" --start "$VIEW_START"
+        --halMaxSize "$HAL_MAX_SIZE"
+        -T "$T_TOTAL" --timeBudget "$TIME_BUDGET"
+        --time "$SBATCH_TIME" --mem "$SBATCH_MEM" )
+    [[ -n "$HAL_TIME_BUDGET" ]] && V1_FLAGS+=( --halTimeBudget "$HAL_TIME_BUDGET" )
+    [[ -n "$VIEW_MAX_SIZE"   ]] && V1_FLAGS+=( --maxSize "$VIEW_MAX_SIZE" )
+    run_driver env TAFFY="$TAFFY" bash "$VIEW_DRV" "${V1_FLAGS[@]}" "${COMMON_FLAGS[@]}"
+    echo ">> #1 hal cap: hal2maf skipped above --halMaxSize=$HAL_MAX_SIZE bp (native view-driver cap; taffy/tai/bb run full ladder)" >&2
+fi
+
+# ======================================================================
+# #2 -- base liftover: taffy lift on the BASE .tui vs halLiftover.
+#       size x species matrix; halLiftover is per (species,size).
+#       Two-pass hal cap into ONE OUTDIR:
+#         pass A: -S <sizes<=cap>   (hal on)
+#         pass B: -S <sizes>cap>    --no-hal
+#       Both append to the same bench.tsv (runner writes header once).
+# ======================================================================
+if [[ "$DO_2" -eq 1 ]]; then
+    O2="$OUTROOT/cmp2_baselift"
+    [[ ${#BASE_SRC_FLAG[@]} -gt 0 ]] || { echo "ERROR(#2): need --baseTui or --baseTuiTaf" >&2; exit 1; }
+    for v in HAL CHAINS_DIR TREE; do
+        [[ -n "${!v}" ]] || { echo "ERROR(#2): missing input for \$$v" >&2; exit 1; }
+    done
+    split_sizes "$LIFT_SIZES" "$HAL_MAX_SIZE"
+    L2_COMMON=( "${BASE_SRC_FLAG[@]}"
+        -H "$HAL" -c "$CHAINS_DIR" -t "$TREE" -o "$O2"
+        -r "$REF" -L "$PANEL" -N "$LIFT_N_INTERVALS"
+        -T "$T_TOTAL" --timeBudget "$TIME_BUDGET"
+        --time "$SBATCH_TIME" --mem "$SBATCH_MEM" )
+    if [[ -n "$LE_SIZES" ]]; then
+        run_driver env TAFFY="$TAFFY" bash "$LIFT_DRV" "${L2_COMMON[@]}" -S "$LE_SIZES" "${COMMON_FLAGS[@]}"
+    else
+        echo ">> #2 pass A skipped: no sizes <= halMaxSize" >&2
+    fi
+    if [[ -n "$GT_SIZES" ]]; then
+        run_driver env TAFFY="$TAFFY" bash "$LIFT_DRV" "${L2_COMMON[@]}" -S "$GT_SIZES" --no-hal "${COMMON_FLAGS[@]}"
+    else
+        echo ">> #2 pass B skipped: no sizes > halMaxSize" >&2
+    fi
+    echo ">> #2 hal cap: two passes into $O2 (A: -S '$LE_SIZES' +hal ; B: -S '$GT_SIZES' --no-hal); bench.tsv concatenates" >&2
+fi
+
+# ======================================================================
+# #3 -- blockViz: taffyBlockViz vs halBlockViz.  NEW driver does the
+#       per-size hal cap natively (--halMaxSize) -- single invocation.
+# ======================================================================
+if [[ "$DO_3" -eq 1 ]]; then
+    O3="$OUTROOT/cmp3_blockviz"
+    for v in CHAINED_TUI HAL; do
+        [[ -n "${!v}" ]] || { echo "ERROR(#3): missing input for \$$v" >&2; exit 1; }
+    done
+    run_driver bash "$BLOCKVIZ_DRV" \
+        -u "$CHAINED_TUI" -H "$HAL" -L "$PANEL" -S "$BLOCKVIZ_SIZES" \
+        --halMaxSize "$HAL_MAX_SIZE" -r "$BLOCKVIZ_CHROM" --tSpecies "$HAL_GENOME" \
+        --start 0 --maxOutputBlocks "$MAX_OUTPUT_BLOCKS" \
+        -o "$O3" -T "$T_TOTAL" --timeBudget "$TIME_BUDGET" \
+        --time "$SBATCH_TIME" --mem "$SBATCH_MEM" "${COMMON_FLAGS[@]}"
+fi
+
+# ======================================================================
+# #4 -- chained liftover: taffy lift on the CHAINED .tui vs UCSC liftOver.
+#       NO hal tool (liftOver is chain-based) -> --no-hal, full ladder,
+#       one pass.  Chained .tui resolved via the symlink trick (see header).
+# ======================================================================
+if [[ "$DO_4" -eq 1 ]]; then
+    O4="$OUTROOT/cmp4_chainlift"
+    for v in CHAINED_TUI CHAINS_DIR TREE; do
+        [[ -n "${!v}" ]] || { echo "ERROR(#4): missing input for \$$v" >&2; exit 1; }
+    done
+    [[ -f "$CHAINED_TUI" ]] || { echo "ERROR(#4): chained .tui not found: $CHAINED_TUI" >&2; exit 1; }
+    # #4 needs a readable uni SOURCE for the lift driver's `taffy stats -s`
+    # chrom enumeration (the chained-.tui stub is 0-byte and would crash it).
+    # The base uni shares hg38's chrom set, so reuse it via --statsSrc.
+    STATS_SRC=""
+    if   [[ -n "$BASE_TUI_MAF" ]]; then STATS_SRC="$BASE_TUI_MAF"
+    elif [[ -n "$BASE_TUI_TAF" ]]; then STATS_SRC="$BASE_TUI_TAF"
+    fi
+    [[ -n "$STATS_SRC" ]] || { echo "ERROR(#4): need --baseTui or --baseTuiTaf as the readable --statsSrc for chrom enumeration (the chained .tui has no readable source)" >&2; exit 1; }
+    # Symlink so the lift driver's .tui-sibling resolution finds the chained
+    # .tui without a MAF.  WORK dir holds the stub + symlink.
+    WORK="$O4/_tui_link"
+    mkdir -p "$WORK"
+    CHAINED_STUB="$WORK/chained.uni.taf.gz"
+    : > "$CHAINED_STUB"                       # 0-byte stub; taffy lift reads only the .tui
+    ln -sf "$(readlink -f "$CHAINED_TUI")" "${CHAINED_STUB}.tui"
+    echo ">> #4 chained-.tui resolution: stub $CHAINED_STUB + symlink ${CHAINED_STUB}.tui -> $CHAINED_TUI" >&2
+    echo ">> #4 chrom enumeration via --statsSrc $STATS_SRC (readable; shares hg38 chroms)" >&2
+    # --uniTaf so cells are labelled 'taf.tui' (the chained .tui is
+    # TAF-anchored).  --statsSrc points chrom enumeration at the readable
+    # base source.  --no-hal because #4's baseline is UCSC liftOver, not
+    # halLiftover; -H is then optional.
+    run_driver env TAFFY="$TAFFY" bash "$LIFT_DRV" \
+        --uniTaf "$CHAINED_STUB" --statsSrc "$STATS_SRC" \
+        -c "$CHAINS_DIR" -t "$TREE" -o "$O4" \
+        -r "$REF" -L "$PANEL" -S "$LIFT_SIZES" -N "$LIFT_N_INTERVALS" \
+        --no-hal -T "$T_TOTAL" --timeBudget "$TIME_BUDGET" \
+        --time "$SBATCH_TIME" --mem "$SBATCH_MEM" "${COMMON_FLAGS[@]}"
+fi
+
+echo
+echo "================================================================"
+echo " wrapper done ($([[ $SUBMIT -eq 1 ]] && echo 'submitted' || echo 'dry-run only -- nothing submitted'))."
+echo " per-comparison outputs under: $OUTROOT"
+echo "================================================================"
