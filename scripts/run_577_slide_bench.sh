@@ -124,7 +124,15 @@ TEST=0                          # --test: tiny smoke config (see below)
 NO_WAIT=0                       # pass --no-wait through to drivers when submitting
 
 # Tool/bin env passthroughs (each driver also honours these from env).
+# Resolved once here on the submit host and threaded into the jobs as
+# absolute paths (the compute node shares the filesystem).  Set $TAFFY (or
+# put the freshly-built taffy first on PATH) to control which binary runs.
 TAFFY="${TAFFY:-$(command -v taffy || true)}"
+# taffyBlockVizTest is built alongside taffy (same bin/), so derive it from
+# the resolved taffy; blockVizBed comes from PATH (the hal bin dir).  No
+# hardcoded absolute path -- that only ever matched one machine.
+TAFFYBLOCKVIZ="${TAFFYBLOCKVIZ:-$([[ -n "$TAFFY" ]] && echo "${TAFFY%/*}/taffyBlockVizTest" || command -v taffyBlockVizTest 2>/dev/null || true)}"
+BLOCKVIZBED="${BLOCKVIZBED:-$(command -v blockVizBed 2>/dev/null || true)}"
 
 usage() {
     cat >&2 <<EOF
@@ -360,7 +368,7 @@ if [[ "$DO_3" -eq 1 ]]; then
     for v in CHAINED_TUI HAL; do
         [[ -n "${!v}" ]] || { echo "ERROR(#3): missing input for \$$v" >&2; exit 1; }
     done
-    run_driver bash "$BLOCKVIZ_DRV" \
+    run_driver env TAFFYBLOCKVIZ="$TAFFYBLOCKVIZ" BLOCKVIZBED="$BLOCKVIZBED" bash "$BLOCKVIZ_DRV" \
         -u "$CHAINED_TUI" -H "$HAL" -L "$PANEL" -S "$BLOCKVIZ_SIZES" \
         --halMaxSize "$HAL_MAX_SIZE" -r "$BLOCKVIZ_CHROM" --tSpecies "$HAL_GENOME" \
         --start 0 --maxOutputBlocks "$MAX_OUTPUT_BLOCKS" \

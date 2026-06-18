@@ -60,8 +60,10 @@ PARTITION=""
 ACCOUNT=""
 DRY_RUN=0
 WAIT=1
-TAFFYBLOCKVIZ="${TAFFYBLOCKVIZ:-/home/hickey/dev/taffy/bin/taffyBlockVizTest}"
-BLOCKVIZBED="${BLOCKVIZBED:-/home/hickey/dev/hal/bin/blockVizBed}"
+# Resolve from env, else PATH, else next to the `taffy` binary
+# (taffyBlockVizTest is built in the same bin/).  No hardcoded absolute path.
+TAFFYBLOCKVIZ="${TAFFYBLOCKVIZ:-$(command -v taffyBlockVizTest 2>/dev/null || { _t=$(command -v taffy 2>/dev/null) && echo "${_t%/*}/taffyBlockVizTest"; } || true)}"
+BLOCKVIZBED="${BLOCKVIZBED:-$(command -v blockVizBed 2>/dev/null || true)}"
 
 # Default panel, baked here so the script is one-file portable.  3 cols
 # tab-separated: <genome_id>\t<scientific>\t<english>.  Override with -L.
