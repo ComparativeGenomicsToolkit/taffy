@@ -724,11 +724,13 @@ for N in "\${SIZES[@]}"; do
         rowfiles[\$stem_lo]="\$LOGDIR/row_\${stem_lo}.tsv"
         out_lo="\$LOGDIR/mapped_\${stem_lo}.bed"
         unm_lo="\$LOGDIR/unmapped_\${stem_lo}.bed"
-        # -minMatch=0: liftOver's default 0.95 rejects any interval where
+        # -minMatch=0.1: liftOver's default 0.95 rejects any interval where
         # fewer than 95% of bases can be mapped.  At cross-species + multi-
         # megabase scale that drops EVERY interval at sizes >= 100 kb.
         # taffy/halLiftover have no analogous threshold (they preserve any
-        # mapping, even partial).
+        # mapping, even partial).  NOT -minMatch=0: that trips a liftOver
+        # internal "Chain mapping error" and exits 255 after only a handful
+        # of mappings on multi-Mb input; 0.1 is the lowest value that behaves.
         # -multiple: keep all output regions when an interval maps to more
         # than one place in the target (paralogs / chain duplicates).
         # Default rejects the whole interval as "Duplicated in new" -- a
@@ -738,7 +740,7 @@ for N in "\${SIZES[@]}"; do
         # -multiple aligns liftover's semantics with theirs.
         acquire_slot 1
         ( run_cell liftover "\$sid" "\$sci" "\$common" "\$N" "\$TIME_BUDGET" \\
-            "\$LIFTOVER" -minMatch=0 -multiple "\$BED_NATIVE" "\$chain" "\$out_lo" "\$unm_lo" \\
+            "\$LIFTOVER" -minMatch=0.1 -multiple "\$BED_NATIVE" "\$chain" "\$out_lo" "\$unm_lo" \\
           ) > "\${rowfiles[\$stem_lo]}" &
         pids[\$stem_lo]=\$!; register_pid \$! 1
 

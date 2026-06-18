@@ -171,6 +171,13 @@ done
 [[ -n "$BLOCKVIZBED"  && -x "$BLOCKVIZBED"  ]] || { echo "ERROR: blockVizBed not executable: $BLOCKVIZBED (set \$BLOCKVIZBED)" >&2; exit 1; }
 [[ -f "$CHAINED_TUI" ]] || { echo "ERROR: chained .tui not found: $CHAINED_TUI" >&2; exit 1; }
 [[ -f "$HAL"         ]] || { echo "ERROR: HAL not found: $HAL" >&2; exit 1; }
+# Resolve to ABSOLUTE paths.  Each cell runs blockVizBed in a per-cell scratch
+# CWD (so its hardcoded hg38.bed/<qSp>.bed don't collide across parallel cells);
+# a RELATIVE input path is unresolvable from inside that cd -- exactly how both
+# tools failed under --no-stage-local with relative -u/-H.  (With staging the
+# paths become $TMPDIR-absolute anyway, so this only matters when not staging.)
+CHAINED_TUI="$(readlink -f "$CHAINED_TUI")"
+HAL="$(readlink -f "$HAL")"
 [[ "$HAL_MAX_SIZE" =~ ^[0-9]+$ ]] || { echo "ERROR: --halMaxSize must be a non-negative integer (got '$HAL_MAX_SIZE')" >&2; exit 1; }
 [[ "$START" =~ ^[0-9]+$ ]] || { echo "ERROR: --start must be a non-negative integer (got '$START')" >&2; exit 1; }
 
