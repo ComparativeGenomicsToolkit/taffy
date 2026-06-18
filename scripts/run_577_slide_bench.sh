@@ -26,16 +26,13 @@
 # the full ladder.  One clean pass.  (The blockViz driver #3 has the same
 # native --halMaxSize knob.)
 #
-# #2 (base lift) is a size x species matrix taking an explicit -S ladder
-# and DOES have --no-hal.  So we cap halLiftover with the cleanest option
-# available WITHOUT editing the lift driver: run it TWICE into the SAME
-# OUTDIR --
-#   pass A: -S <sizes <= halMaxSize>           (halLiftover cells launched)
-#   pass B: -S <sizes >  halMaxSize>  --no-hal (halLiftover cells skipped)
-# Both append to the same bench.tsv (the runner writes the header only when
-# the file is empty), so the two passes concatenate into one table.  The
-# halLiftover cells thus exist only at <= halMaxSize, exactly the cap, with
-# zero edits to the lift driver.
+# #2 (base lift) is a size x species matrix taking an explicit -S ladder.
+# The lift driver has its OWN native --halMaxSize knob (same pattern as the
+# view / blockViz drivers): the halLiftover cell is simply NOT launched for
+# any (species,size) where size > the cap, while the taffy/liftOver cells
+# run the full ladder.  So #2 is ONE clean pass over the full LIFT_SIZES
+# ladder with --halMaxSize -- no two-pass split (the old split re-copied
+# the 98 GB .tui for the second pass for nothing).
 #
 # #4 (chained lift, vs UCSC liftOver) has NO hal tool (liftOver is
 # chain-based), so it needs no cap -- it runs the full ladder in one pass
@@ -104,14 +101,14 @@ VIEW_MAX_SIZE=""                # #1 view --maxSize cap (empty = chrom end from 
 BLOCKVIZ_SIZES="1000,10000,100000,1000000,10000000,64000000"   # #3 ladder (last ~= chr20 len)
 LIFT_SIZES="1000,100000,1000000"     # #2 + #4 interval-size ladder
 LIFT_N_INTERVALS=100            # #2 + #4 random intervals per (species,size) cell
-HAL_MAX_SIZE=1000000            # the cap: hal tools skipped above this (bp) in #1/#2/#3
+HAL_MAX_SIZE=100000             # the cap: hal tools skipped above this (bp) in #1/#2/#3
 
 # -- SLURM / runtime --
 T_TOTAL=32
 TIME_BUDGET=3600
-HAL_TIME_BUDGET=""              # tighter per-cell cap just for hal2maf in #1 (empty = TIME_BUDGET)
+HAL_TIME_BUDGET=600            # tighter per-cell cap just for hal2maf in #1 (empty = TIME_BUDGET)
 SBATCH_TIME=24
-SBATCH_MEM=128
+SBATCH_MEM=48
 TMP_GB=""
 MAX_OUTPUT_BLOCKS=500           # #3 taffyBlockViz --maxOutputBlocks
 PARTITION=""
@@ -243,6 +240,7 @@ if [[ "$TEST" -eq 1 ]]; then
     MAX_OUTPUT_BLOCKS=50
     T_TOTAL=8
     SBATCH_MEM=32
+    SBATCH_TIME=1               # a smoke run must not request 24 h
     # 2-species panel written to a temp file used as -L.
     TEST_PANEL="$OUTROOT/test_panel.tsv"
 fi
@@ -280,17 +278,6 @@ if   [[ -n "$BASE_TUI_MAF" ]]; then BASE_SRC_FLAG=( -u "$BASE_TUI_MAF" )
 elif [[ -n "$BASE_TUI_TAF" ]]; then BASE_SRC_FLAG=( --uniTaf "$BASE_TUI_TAF" )
 fi
 
-# Split the size ladder around the cap (for the two-pass hal-cap trick).
-# le_sizes = sizes <= halMaxSize ; gt_sizes = sizes > halMaxSize.
-split_sizes() {
-    local csv="$1" cap="$2" le="" gt="" s
-    IFS=',' read -r -a _arr <<< "$csv"
-    for s in "${_arr[@]}"; do
-        if (( s <= cap )); then le="${le:+$le,}$s"; else gt="${gt:+$gt,}$s"; fi
-    done
-    LE_SIZES="$le"; GT_SIZES="$gt"
-}
-
 echo "================================================================"
 echo " 577-way / hg38 slide benchmark wrapper"
 echo "   mode:        $([[ $SUBMIT -eq 1 ]] && echo SUBMIT || echo 'DRY-RUN (no sbatch)')$([[ $TEST -eq 1 ]] && echo ' [--test]')"
@@ -317,30 +304,37 @@ run_driver() {
 # ======================================================================
 if [[ "$DO_1" -eq 1 ]]; then
     O1="$OUTROOT/cmp1_view"
-    [[ ${#BASE_SRC_FLAG[@]} -gt 0 ]] || { echo "ERROR(#1): need --baseTui or --baseTuiTaf" >&2; exit 1; }
+    # MAF extraction: feed BOTH tui sources (maf- and taf-anchored) when
+    # supplied, and force MAF output from every tool (--mafOnly) so the
+    # comparison is apples-to-apples on MAF (drops the _taf / tai_taf cells).
+    V1_SRC=()
+    [[ -n "$BASE_TUI_MAF" ]] && V1_SRC+=( -u "$BASE_TUI_MAF" )
+    [[ -n "$BASE_TUI_TAF" ]] && V1_SRC+=( --uniTaf "$BASE_TUI_TAF" )
+    [[ ${#V1_SRC[@]} -gt 0 ]] || { echo "ERROR(#1): need --baseTui and/or --baseTuiTaf" >&2; exit 1; }
     for v in HG38_MAF HAL BIGBED; do
         [[ -n "${!v}" ]] || { echo "ERROR(#1): missing --$(echo "$v" | tr 'A-Z_' 'a-z')" >&2; exit 1; }
     done
-    V1_FLAGS=( "${BASE_SRC_FLAG[@]}"
+    V1_FLAGS=( "${V1_SRC[@]}"
         -m "$HG38_MAF" -H "$HAL" -b "$BIGBED" -o "$O1"
         --refChrom "$VIEW_REF_CHROM" --halGenome "$HAL_GENOME"
         --halSeq "$HAL_SEQ" --bbChrom "$BB_CHROM" --start "$VIEW_START"
-        --halMaxSize "$HAL_MAX_SIZE"
+        --halMaxSize "$HAL_MAX_SIZE" --mafOnly
         -T "$T_TOTAL" --timeBudget "$TIME_BUDGET"
         --time "$SBATCH_TIME" --mem "$SBATCH_MEM" )
     [[ -n "$HAL_TIME_BUDGET" ]] && V1_FLAGS+=( --halTimeBudget "$HAL_TIME_BUDGET" )
     [[ -n "$VIEW_MAX_SIZE"   ]] && V1_FLAGS+=( --maxSize "$VIEW_MAX_SIZE" )
     run_driver env TAFFY="$TAFFY" bash "$VIEW_DRV" "${V1_FLAGS[@]}" "${COMMON_FLAGS[@]}"
-    echo ">> #1 hal cap: hal2maf skipped above --halMaxSize=$HAL_MAX_SIZE bp (native view-driver cap; taffy/tai/bb run full ladder)" >&2
+    echo ">> #1: ${#V1_SRC[@]}-source MAF extraction (maf.tui${BASE_TUI_TAF:+ + taf.tui}) all -> MAF; hal2maf capped at --halMaxSize=$HAL_MAX_SIZE; taffy/tai/bb full ladder" >&2
 fi
 
 # ======================================================================
 # #2 -- base liftover: taffy lift on the BASE .tui vs halLiftover.
 #       size x species matrix; halLiftover is per (species,size).
-#       Two-pass hal cap into ONE OUTDIR:
-#         pass A: -S <sizes<=cap>   (hal on)
-#         pass B: -S <sizes>cap>    --no-hal
-#       Both append to the same bench.tsv (runner writes header once).
+#       ONE pass over the full LIFT_SIZES ladder; the lift driver caps
+#       halLiftover NATIVELY via --halMaxSize (the halLiftover cell is
+#       simply not launched for sizes above the cap, taffy/liftOver run
+#       the full ladder).  No two-pass split -- the old split re-copied
+#       the 98 GB .tui for nothing.
 # ======================================================================
 if [[ "$DO_2" -eq 1 ]]; then
     O2="$OUTROOT/cmp2_baselift"
@@ -348,23 +342,13 @@ if [[ "$DO_2" -eq 1 ]]; then
     for v in HAL CHAINS_DIR TREE; do
         [[ -n "${!v}" ]] || { echo "ERROR(#2): missing input for \$$v" >&2; exit 1; }
     done
-    split_sizes "$LIFT_SIZES" "$HAL_MAX_SIZE"
-    L2_COMMON=( "${BASE_SRC_FLAG[@]}"
-        -H "$HAL" -c "$CHAINS_DIR" -t "$TREE" -o "$O2"
-        -r "$REF" -L "$PANEL" -N "$LIFT_N_INTERVALS"
-        -T "$T_TOTAL" --timeBudget "$TIME_BUDGET"
-        --time "$SBATCH_TIME" --mem "$SBATCH_MEM" )
-    if [[ -n "$LE_SIZES" ]]; then
-        run_driver env TAFFY="$TAFFY" bash "$LIFT_DRV" "${L2_COMMON[@]}" -S "$LE_SIZES" "${COMMON_FLAGS[@]}"
-    else
-        echo ">> #2 pass A skipped: no sizes <= halMaxSize" >&2
-    fi
-    if [[ -n "$GT_SIZES" ]]; then
-        run_driver env TAFFY="$TAFFY" bash "$LIFT_DRV" "${L2_COMMON[@]}" -S "$GT_SIZES" --no-hal "${COMMON_FLAGS[@]}"
-    else
-        echo ">> #2 pass B skipped: no sizes > halMaxSize" >&2
-    fi
-    echo ">> #2 hal cap: two passes into $O2 (A: -S '$LE_SIZES' +hal ; B: -S '$GT_SIZES' --no-hal); bench.tsv concatenates" >&2
+    run_driver env TAFFY="$TAFFY" bash "$LIFT_DRV" "${BASE_SRC_FLAG[@]}" \
+        -H "$HAL" -c "$CHAINS_DIR" -t "$TREE" -o "$O2" \
+        -r "$REF" -L "$PANEL" -S "$LIFT_SIZES" -N "$LIFT_N_INTERVALS" \
+        --halMaxSize "$HAL_MAX_SIZE" \
+        -T "$T_TOTAL" --timeBudget "$TIME_BUDGET" \
+        --time "$SBATCH_TIME" --mem "$SBATCH_MEM" "${COMMON_FLAGS[@]}"
+    echo ">> #2 single pass into $O2 (-S '$LIFT_SIZES'); halLiftover capped natively at --halMaxSize=$HAL_MAX_SIZE; taffy/liftOver full ladder" >&2
 fi
 
 # ======================================================================

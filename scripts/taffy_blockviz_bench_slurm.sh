@@ -116,7 +116,8 @@ Optional:
   --time HRS    sbatch wall (default $SBATCH_TIME)
   --mem GB      sbatch mem (default $SBATCH_MEM)
   --tmp GB      Per-task local scratch requirement (sbatch --tmp=N).
-                Default unset.  Size to ~(.tui + HAL + 10%).
+                Default = (staged .tui + HAL size) + 50 GB when local-stage
+                is on; unset under --no-stage-local.
   --no-stage-local
                 Skip the cp of .tui + HAL to \$TMPDIR (read from network).
   --partition X --account X
@@ -220,7 +221,27 @@ echo ">> cpus/task:     $T_TOTAL  (one core per concurrent cell; ~$TOTAL_CELLS c
 (( T_TOTAL >= 1 )) || { echo "ERROR: -T must be >= 1" >&2; exit 1; }
 echo ">> time budget:   $TIME_BUDGET s per cell"
 echo ">> local-stage:   $([[ $STAGE_LOCAL -eq 1 ]] && echo "ON (copies to \$TMPDIR)" || echo "OFF (reads from network)")"
-[[ -n "$TMP_GB" ]] && echo ">> --tmp request: ${TMP_GB} GB per task"
+
+# --- Per-job --tmp sizing hint (when local-stage is on). ---------------
+# Roll up the bytes the runner actually stages: the chained .tui + the HAL.
+# Both blockViz tools open their input file directly, so both are copied to
+# local scratch -- request scratch sized to them.
+if [[ "$STAGE_LOCAL" -eq 1 ]]; then
+    STAGE_BYTES=0
+    for f in "$CHAINED_TUI" "$HAL"; do
+        if [[ -e "$f" ]]; then
+            STAGE_BYTES=$(( STAGE_BYTES + $(stat -Lc %s "$f" 2>/dev/null || stat -f %z "$f" 2>/dev/null || echo 0) ))
+        fi
+    done
+    STAGE_GB=$(( STAGE_BYTES / (1024**3) ))
+    echo ">> stage-in size: ~${STAGE_GB} GB total"
+    # Promote the hint to the actual --tmp default: scratch sized to what we
+    # stage (+50 GB headroom).  An explicit --tmp still overrides.
+    TMP_GB=${TMP_GB:-$(( STAGE_GB + 50 ))}
+    echo ">> --tmp default: ${TMP_GB} GB per task (stage ~${STAGE_GB} GB + 50 GB headroom; override with --tmp)"
+elif [[ -n "$TMP_GB" ]]; then
+    echo ">> --tmp request: ${TMP_GB} GB per task"
+fi
 
 # --- Generate the runner script (the thing sbatch executes). -----------
 RUNNER="$OUTDIR/bench.sh"

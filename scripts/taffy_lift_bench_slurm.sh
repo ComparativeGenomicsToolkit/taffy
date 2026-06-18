@@ -62,6 +62,12 @@ REF="GCF_016700215.2"               # chicken
 MAX_GAPS_CSV=""                     # --maxGap CSV: e.g. "0,1000,10000".  Empty = single taffy cell (K=0).
 FAST_MODE=0                         # --fast: add a --fast variant cell next to each taffy cell.
 NO_HAL=0                            # --no-hal: skip halLiftover cells (taffy + liftOver only)
+HAL_MAX_SIZE=""                     # --halMaxSize: skip (DO NOT LAUNCH) the halLiftover cell
+                                    # for any (species,size) where size > this (bp).  Empty =
+                                    # no cap (halLiftover runs the full ladder).  The HAL has
+                                    # no LOD, so a whole-chrom halLiftover would burn hours;
+                                    # capping skips those cells rather than run-then-timeout.
+                                    # taffy/liftOver cells always run the full ladder.
 BIN_SIZES_CSV=""                    # --bin CSV: e.g. "100000,1000000".  Empty = no binned variants.
                                     # Non-empty implies --fast (the binned mode requires it at the taffy CLI).
 THREADS_PER_CELL_CSV="1"            # OMP_NUM_THREADS values for taffy cells, comma-separated.
@@ -173,12 +179,19 @@ Optional:
   --time HRS    sbatch wall (default $SBATCH_TIME)
   --mem GB      sbatch mem (default $SBATCH_MEM)
   --tmp GB      Per-task local scratch requirement (sbatch --tmp=N).
-                Default unset.
+                Default = (staged .tui + HAL + chains size) + 50 GB when
+                local-stage is on; unset under --no-stage-local.
   --no-stage-local
                 Skip the copy of .tui + chains to \$TMPDIR (read straight
                 from the network paths).  Only sensible for small tests.
   --no-hal      Skip halLiftover cells (taffy + liftOver only).  Also
                 skips the HAL staging step.  -H becomes optional.
+  --halMaxSize N  Skip (DO NOT LAUNCH) the halLiftover cell for any
+                (species,size) where size > N (bp).  Default unset =
+                halLiftover runs the whole ladder.  Because the HAL has no
+                LOD, a whole-chrom halLiftover can burn hours; capping skips
+                those cells outright instead of run-then-timeout.  taffy /
+                liftOver cells always run the full ladder.
   --partition X --account X
   --no-wait     Submit and detach (default: driver blocks until SLURM done)
   --dry-run     Print sbatch; do not submit
@@ -207,6 +220,7 @@ while [[ $# -gt 0 ]]; do
         --maxGap)       MAX_GAPS_CSV="$2"; shift 2;;
         --fast)         FAST_MODE=1; shift;;
         --no-hal)       NO_HAL=1; shift;;
+        --halMaxSize)   HAL_MAX_SIZE="$2"; shift 2;;
         --bin)          BIN_SIZES_CSV="$2"; shift 2;;
         --threadsPerCell) THREADS_PER_CELL_CSV="$2"; shift 2;;
         --timeBudget)   TIME_BUDGET="$2"; shift 2;;
@@ -254,6 +268,9 @@ if [[ "$NO_HAL" -eq 0 ]]; then
 fi
 [[ -d "$CHAINS_DIR" ]] || { echo "ERROR: $CHAINS_DIR not found" >&2; exit 1; }
 [[ -f "$TREE"     ]] || { echo "ERROR: $TREE not found" >&2; exit 1; }
+if [[ -n "$HAL_MAX_SIZE" ]]; then
+    [[ "$HAL_MAX_SIZE" =~ ^[0-9]+$ ]] || { echo "ERROR: --halMaxSize must be a non-negative integer (got '$HAL_MAX_SIZE')" >&2; exit 1; }
+fi
 
 mkdir -p "$OUTDIR" "$OUTDIR/logs" "$OUTDIR/beds"
 echo ">> driver starting (output dir: $OUTDIR)" >&2
@@ -438,6 +455,7 @@ echo ">> output dir:    $OUTDIR"
 echo ">> taffy:         $TAFFY"
 echo ">> liftOver:      $LIFTOVER"
 echo ">> halLiftover:   $([[ "$NO_HAL" -eq 1 ]] && echo "(skipped via --no-hal)" || echo "$HALLIFTOVER")"
+[[ "$NO_HAL" -eq 0 && -n "$HAL_MAX_SIZE" ]] && echo ">> hal max size:  $HAL_MAX_SIZE bp  (halLiftover cells skipped above this; taffy/liftOver run full ladder)"
 echo ">> uni:           $UNI  (using \$UNI.tui only)"
 echo ">> hal:           $HAL"
 echo ">> chains dir:    $CHAINS_DIR"
@@ -463,7 +481,34 @@ _THREADS_NEEDED=$(( N_SPECIES * _N_SRC * _N_TAFFY_VARIANTS * _T_SUM / ${#THREADS
 echo ">> cpus/task:     $T_TOTAL  (one core per concurrent cell)"
 echo ">> time budget:   $TIME_BUDGET s per cell"
 echo ">> local-stage:   $([[ $STAGE_LOCAL -eq 1 ]] && echo "ON (copies to \$TMPDIR)" || echo "OFF (reads from network)")"
-[[ -n "$TMP_GB" ]] && echo ">> --tmp request: ${TMP_GB} GB per task"
+
+# --- Per-job --tmp sizing hint (when local-stage is on). ---------------
+# Roll up the bytes the runner actually stages: the .tui SIDECARS (taffy
+# lift never reads the source MAF/TAF -- only its .tui), the HAL (unless
+# --no-hal), and every panel chain.gz.  We deliberately do NOT count the
+# .uni.maf.gz / .uni.taf.gz source (lift correctly does not stage it).
+if [[ "$STAGE_LOCAL" -eq 1 ]]; then
+    STAGE_BYTES=0
+    STAGE_LIST=()
+    [[ -n "$UNI"     ]] && STAGE_LIST+=( "${UNI}.tui" )
+    [[ -n "$UNI_TAF" ]] && STAGE_LIST+=( "${UNI_TAF}.tui" )
+    [[ "$NO_HAL" -eq 0 ]] && STAGE_LIST+=( "$HAL" )
+    for ch in "${CHAIN_OF[@]}"; do STAGE_LIST+=( "$ch" ); done
+    for f in "${STAGE_LIST[@]}"; do
+        if [[ -e "$f" ]]; then
+            STAGE_BYTES=$(( STAGE_BYTES + $(stat -Lc %s "$f" 2>/dev/null || stat -f %z "$f" 2>/dev/null || echo 0) ))
+        fi
+    done
+    STAGE_GB=$(( STAGE_BYTES / (1024**3) ))
+    echo ">> stage-in size: ~${STAGE_GB} GB total"
+    # Promote the hint to the actual --tmp default: scratch sized to what we
+    # stage (+50 GB headroom for the cells' own temp + FS slack).  An
+    # explicit --tmp still overrides.
+    TMP_GB=${TMP_GB:-$(( STAGE_GB + 50 ))}
+    echo ">> --tmp default: ${TMP_GB} GB per task (stage ~${STAGE_GB} GB + 50 GB headroom; override with --tmp)"
+elif [[ -n "$TMP_GB" ]]; then
+    echo ">> --tmp request: ${TMP_GB} GB per task"
+fi
 
 # --- Generate the runner script (the thing sbatch executes). -----------
 RUNNER="$OUTDIR/bench.sh"
@@ -489,6 +534,7 @@ SIZES=( ${SIZE_ARR[*]} )
 MAX_GAPS=( ${MAX_GAPS_ARR[*]} )
 FAST_MODE=$FAST_MODE
 NO_HAL=$NO_HAL
+HAL_MAX_SIZE="$HAL_MAX_SIZE"
 BIN_SIZES=( ${BIN_SIZES_ARR[*]:-} )
 THREADS_PER_CELL=( ${THREADS_PER_CELL_ARR[*]} )
 
@@ -696,8 +742,12 @@ for N in "\${SIZES[@]}"; do
           ) > "\${rowfiles[\$stem_lo]}" &
         pids[\$stem_lo]=\$!; register_pid \$! 1
 
-        # ---- halLiftover cell ---- (skipped when --no-hal)
-        if [[ "\$NO_HAL" -eq 0 ]]; then
+        # ---- halLiftover cell ---- (skipped when --no-hal, or when the
+        # --halMaxSize cap is set and N exceeds it).  The HAL has no LOD,
+        # so a whole-chrom halLiftover would burn hours; above the cap we
+        # do NOT launch the cell (no run-then-timeout).  No hal row is
+        # emitted for capped sizes; taffy/liftOver still run the full ladder.
+        if [[ "\$NO_HAL" -eq 0 ]] && { [[ -z "\$HAL_MAX_SIZE" ]] || (( N <= HAL_MAX_SIZE )); }; then
             # halLiftover's input bed uses chain-native chrom names (no
             # <REF>. prefix), same as UCSC liftOver.  Argument order:
             # halLiftover HAL SRC_GENOME SRC_BED TGT_GENOME TGT_BED.
@@ -709,6 +759,8 @@ for N in "\${SIZES[@]}"; do
                 "\$HALLIFTOVER" "\$HAL" "\$REF" "\$BED_NATIVE" "\$sid" "\$out_hl" \\
               ) > "\${rowfiles[\$stem_hl]}" &
             pids[\$stem_hl]=\$!; register_pid \$! 1
+        elif [[ "\$NO_HAL" -eq 0 && -n "\$HAL_MAX_SIZE" ]]; then
+            echo "   (halLiftover skipped for \$sid at N=\$N > halMaxSize=\$HAL_MAX_SIZE)" >&2
         fi
 
         # ---- taffy lift cells: one per (.tui source) x (--maxGap K) x (mode) -

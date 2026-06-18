@@ -33,7 +33,9 @@
 # Run model: one SLURM job; within it, each of the 10 sizes runs all four
 # cells concurrently (so timings are comparable -- same FS load on every
 # tool at a given N) and waves are sequential.  Sub-tool threading: each
-# taffy gets T_TOTAL / 4 bgzf threads; the other two are single-threaded.
+# taffy cell gets TAFFY_T bgzf threads (fixed default 4); the other two are
+# single-threaded.  A per-wave concurrency throttle bounds the SUM of live
+# thread-slots by T_TOTAL so a wave of taffy cells doesn't oversubscribe.
 #
 # Local-stage mode (default ON)
 # -----------------------------
@@ -59,6 +61,11 @@ HAL=""
 BB=""
 OUTDIR=""
 T_TOTAL=48
+TAFFY_T=""                    # bgzf threads per taffy cell; default 4 (floored at 1).
+                              # A wave fires several taffy cells concurrently, so a
+                              # fixed small count + the concurrency throttle (<= T_TOTAL
+                              # thread-slots) avoids oversubscription.  Override with -T-ish
+                              # tuning via --taffyT.
 REF_CHROM="hg38.chr10"        # taffy view -r prefix (genome.seq for universal MAF)
 HAL_GENOME="hg38"             # hal2maf --refGenome
 HAL_SEQ="chr10"               # hal2maf --refSequence
@@ -71,6 +78,9 @@ HAL_MAX_SIZE=""               # --halMaxSize: skip (DO NOT LAUNCH) the hal2maf c
                               # any ladder size > this (bp).  Empty = no cap (hal runs the
                               # whole ladder).  The HAL has no LOD, so a whole-chrom hal2maf
                               # would burn hours; capping skips it rather than run-then-timeout.
+MAF_ONLY=0                    # --mafOnly: emit MAF from every tool -- skip the TAF-output
+                              # cells (_taf, _taf_norm, tai_taf), keep tui _maf / _maf_norm,
+                              # tai_maf, hal2maf, bb.  Apples-to-apples MAF-extraction compare.
 TIME_BUDGET=1800              # per-cell wall seconds (timeout sends SIGKILL)
 HAL_TIME_BUDGET=""            # per-cell cap just for hal; defaults to TIME_BUDGET
 SBATCH_TIME=24
@@ -103,8 +113,13 @@ Required (at least one of -u / --uniTaf must be set):
   -o DIR        Output directory
 
 Optional:
-  -T INT        Total CPUs (cpus-per-task).  Each taffy gets T/4 bgzf
-                threads (default 48 -> 12 per taffy)
+  -T INT        Total CPUs (cpus-per-task) = the concurrency thread-slot
+                budget (default 48).  A wave fires several taffy cells in
+                parallel; the throttle bounds the SUM of live thread-slots
+                by this.
+  --taffyT INT  bgzf threads per taffy cell (default 4, floored at 1).
+                Fixed -- NOT T/4 -- because a wave runs several taffy cells
+                concurrently; the throttle keeps the total within -T.
   --refChrom NAME   taffy view -r prefix (default $REF_CHROM)
   --halGenome NAME  hal2maf --refGenome (default $HAL_GENOME)
   --halSeq NAME     hal2maf --refSequence (default $HAL_SEQ)
@@ -124,6 +139,9 @@ Optional:
                     hal2maf can burn hours; capping skips those cells
                     outright instead of run-then-timeout.  taffy / tai /
                     bb cells always run the full ladder.
+  --mafOnly         Emit MAF from every tool: skip the TAF-output cells
+                    (_taf, _taf_norm, tai_taf); keep tui _maf / _maf_norm,
+                    tai_maf, hal2maf and bb.  Apples-to-apples MAF compare.
   --timeBudget SEC  Per-cell wall cap (timeout) (default $TIME_BUDGET)
   --halTimeBudget SEC  Tighter cap just for the hal2maf cell.  Useful
                     because hal2maf scales much worse than the other
@@ -161,6 +179,7 @@ while [[ $# -gt 0 ]]; do
         -b)             BB="$2"; shift 2;;
         -o)             OUTDIR="$2"; shift 2;;
         -T)             T_TOTAL="$2"; shift 2;;
+        --taffyT)       TAFFY_T="$2"; shift 2;;
         --refChrom)     REF_CHROM="$2"; shift 2;;
         --halGenome)    HAL_GENOME="$2"; shift 2;;
         --halSeq)       HAL_SEQ="$2"; shift 2;;
@@ -168,6 +187,7 @@ while [[ $# -gt 0 ]]; do
         --start)        START="$2"; shift 2;;
         --maxSize)      MAX_SIZE="$2"; shift 2;;
         --halMaxSize)   HAL_MAX_SIZE="$2"; shift 2;;
+        --mafOnly)      MAF_ONLY=1; shift;;
         --timeBudget)    TIME_BUDGET="$2"; shift 2;;
         --halTimeBudget) HAL_TIME_BUDGET="$2"; shift 2;;
         --time)             SBATCH_TIME="$2"; shift 2;;
@@ -228,6 +248,15 @@ if [[ -n "$HAL_MAX_SIZE" ]]; then
     [[ "$HAL_MAX_SIZE" =~ ^[0-9]+$ ]] || { echo "ERROR: --halMaxSize must be a non-negative integer (got '$HAL_MAX_SIZE')" >&2; exit 1; }
 fi
 
+# Per-cell taffy bgzf thread count: fixed default 4, floored at 1 (NOT
+# T_TOTAL/4 -- a wave runs several taffy cells in parallel, and the
+# concurrency throttle bounds the SUM of thread-slots by T_TOTAL).
+if [[ -z "$TAFFY_T" ]]; then
+    TAFFY_T=4
+fi
+[[ "$TAFFY_T" =~ ^[0-9]+$ ]] || { echo "ERROR: --taffyT must be a non-negative integer (got '$TAFFY_T')" >&2; exit 1; }
+(( TAFFY_T >= 1 )) || TAFFY_T=1
+
 mkdir -p "$OUTDIR" "$OUTDIR/logs"
 echo ">> output dir:    $OUTDIR"
 echo ">> taffy:         $TAFFY"
@@ -242,7 +271,7 @@ echo ">> ref chrom:     $REF_CHROM (hal $HAL_GENOME / $HAL_SEQ, bb $BB_CHROM)"
 echo ">> start:         $START bp"
 echo ">> max size:      $MAX_SIZE bp  (query range = [start, start+N))"
 echo ">> hal max size:  ${HAL_MAX_SIZE:-(none)} bp  (hal2maf cells skipped above this; taffy/tai/bb run full ladder)"
-echo ">> cpus/task:     $T_TOTAL (each taffy gets $((T_TOTAL / 4)) bgzf threads)"
+echo ">> cpus/task:     $T_TOTAL (each taffy cell gets $TAFFY_T bgzf threads; concurrency throttle <= $T_TOTAL thread-slots)"
 echo ">> time budget:   $TIME_BUDGET s per cell${HAL_TIME_BUDGET:+ (hal: ${HAL_TIME_BUDGET}s)}"
 echo ">> local-stage:   $([[ $STAGE_LOCAL -eq 1 ]] && echo "ON (copies to \$TMPDIR)" || echo "OFF (reads from network)")"
 [[ -n "$TMP_GB" ]] && echo ">> --tmp request: ${TMP_GB} GB per task"
@@ -261,9 +290,11 @@ if [[ "$STAGE_LOCAL" -eq 1 ]]; then
     done
     STAGE_GB=$(( STAGE_BYTES / (1024**3) ))
     echo ">> stage-in size: ~${STAGE_GB} GB total"
-    if [[ -z "$TMP_GB" ]]; then
-        echo ">> hint:          if your cluster advertises --tmp, consider --tmp $(( STAGE_GB + 50 )); otherwise omit"
-    fi
+    # Promote the stage hint to the actual --tmp default: request local
+    # scratch sized to what we stage (+50 GB headroom for the cells' own
+    # temp + FS slack).  An explicit --tmp still overrides.
+    TMP_GB=${TMP_GB:-$(( STAGE_GB + 50 ))}
+    echo ">> --tmp default: ${TMP_GB} GB per task (stage ~${STAGE_GB} GB + 50 GB headroom; override with --tmp)"
 fi
 
 # --- Build the size ladder: 1, 10, ..., chr10_len.  Capped to MAX_SIZE
@@ -291,7 +322,11 @@ HAL="$HAL"
 BB="$BB"
 OUTDIR="$OUTDIR"
 T_TOTAL=$T_TOTAL
-TAFFY_T=\$(( T_TOTAL / 4 ))
+# Fixed default bgzf-thread count per taffy cell (NOT T_TOTAL/4): a wave
+# fires several taffy cells in parallel, so sizing each at T/4 oversubscribed
+# the alloc.  The concurrency throttle below bounds the SUM of live thread
+# slots by T_TOTAL.  Floor at 1.
+TAFFY_T=$TAFFY_T
 REF_CHROM="$REF_CHROM"
 HAL_GENOME="$HAL_GENOME"
 HAL_SEQ="$HAL_SEQ"
@@ -300,6 +335,7 @@ START=$START
 TIME_BUDGET=$TIME_BUDGET
 HAL_TIME_BUDGET=${HAL_TIME_BUDGET:-$TIME_BUDGET}
 HAL_MAX_SIZE="$HAL_MAX_SIZE"
+MAF_ONLY=$MAF_ONLY
 STAGE_LOCAL=$STAGE_LOCAL
 TAFFY="$TAFFY"
 HAL2MAF="$HAL2MAF"
@@ -401,7 +437,51 @@ run_cell() {
         "\$tool" "\$N" "\$wall" "\$rss" "\$rc" "\$timed_out" "\$out_bytes"
 }
 
-# Per-size wave: fire 4 tools in parallel, wait, append rows in cell order.
+# --- Concurrency throttle ----------------------------------------------
+# Bound the SUM of running-cell thread-slots by T_TOTAL so a wave of taffy
+# cells doesn't oversubscribe the SLURM alloc.  Before this, a wave fired
+# ~5 \`taffy view\` cells at TAFFY_T threads each on a 32-core alloc, so the
+# cells fought for cores and the marquee timings were corrupted.
+#
+# Each cell charges its thread-slot cost: taffy view = TAFFY_T, a _norm
+# pipe = TAFFY_T+1 (view | norm), tai = TAFFY_T, hal2maf = 1, bb = 1.
+#
+# acquire_slot N : block until \`launched + N <= THREAD_BUDGET\`, then
+#                  increment \`launched\`.  Uses \`wait -n\` to sleep on any
+#                  child completion, then reaps every dead tracked pid.
+# register_pid PID N : record a backgrounded cell's pid + thread count so
+#                  the next acquire_slot can decrement \`launched\` when it
+#                  finishes.
+# The view runner runs per-size WAVES (it \`wait\`s for all cells at the end
+# of each wave), so \`launched\` + \`pid_threads\` are reset at the START of
+# each wave -- no live children carry across a wave boundary.
+THREAD_BUDGET=\$T_TOTAL
+launched=0
+declare -A pid_threads
+
+acquire_slot() {
+    local threads=\$1
+    # A single cell that asks for more than the whole budget would never
+    # fit; clamp so we just wait for the alloc to drain to empty instead
+    # of spinning forever.
+    (( threads > THREAD_BUDGET )) && threads=\$THREAD_BUDGET
+    while (( launched > 0 && launched + threads > THREAD_BUDGET )); do
+        wait -n 2>/dev/null || true   # block until any child finishes
+        local p
+        for p in "\${!pid_threads[@]}"; do
+            if ! kill -0 \$p 2>/dev/null; then
+                launched=\$(( launched - pid_threads[\$p] ))
+                unset pid_threads[\$p]
+            fi
+        done
+    done
+    launched=\$(( launched + threads ))
+}
+register_pid() {
+    pid_threads[\$1]=\$2
+}
+
+# Per-size wave: fire all tools in parallel (throttled), wait, append rows.
 for N in "\${SIZES[@]}"; do
     END=\$((START + N))
     echo "=== wave N=\$N  range=\${REF_CHROM}:\${START}-\${END} ==="
@@ -409,6 +489,12 @@ for N in "\${SIZES[@]}"; do
 
     declare -A pids
     declare -A rowfiles
+    # Reset the throttle at the start of each wave: the previous wave's
+    # \`wait\` reaped every child, so no live pid_threads entries carry over.
+    launched=0
+    unset pid_threads; declare -A pid_threads
+    # Thread-slot charges for acquire_slot / register_pid (see throttle above).
+    TAFFY_NORM_T=\$(( TAFFY_T + 1 ))
     # Cells per wave: 4 per provided .tui source (1 or 2 sources) +
     # 2 tai (taf / maf) + hal + bb.  With both .tui sources set this is
     # up to 12 cells; with one source it's 8 (same as before this flag
@@ -425,28 +511,37 @@ for N in "\${SIZES[@]}"; do
     # prefix = "maf.tui" or "taf.tui" (matches the .tui source format).
     launch_tui_cells() {
         local prefix="\$1" input="\$2"
-        local cells=( "\${prefix}_taf" "\${prefix}_maf" "\${prefix}_taf_norm" "\${prefix}_maf_norm" )
-        for tool in "\${cells[@]}"; do
-            rowfiles[\$tool]="\$LOGDIR/row_\${tool}_\${N}.tsv"
-        done
-        ( run_cell "\${prefix}_taf"      "\$N" "\$TIME_BUDGET" \\
-            "\$TAFFY" view -i "\$input" -r "\${REF_CHROM}:\${START}-\${END}" -U query    -T "\$TAFFY_T" \\
-          ) > "\${rowfiles[\${prefix}_taf]}" &
-        pids[\${prefix}_taf]=\$!
+        local region="\${REF_CHROM}:\${START}-\${END}"
+        # MAF-output cells (always run): _maf + _maf_norm.
+        rowfiles["\${prefix}_maf"]="\$LOGDIR/row_\${prefix}_maf_\${N}.tsv"
+        rowfiles["\${prefix}_maf_norm"]="\$LOGDIR/row_\${prefix}_maf_norm_\${N}.tsv"
+        acquire_slot \$TAFFY_T
         ( run_cell "\${prefix}_maf"      "\$N" "\$TIME_BUDGET" \\
-            "\$TAFFY" view -i "\$input" -r "\${REF_CHROM}:\${START}-\${END}" -U query -m -T "\$TAFFY_T" \\
+            "\$TAFFY" view -i "\$input" -r "\$region" -U query -m -T "\$TAFFY_T" \\
           ) > "\${rowfiles[\${prefix}_maf]}" &
-        pids[\${prefix}_maf]=\$!
-        ( run_cell "\${prefix}_taf_norm" "\$N" "\$TIME_BUDGET" \\
-            sh -c '"\$1" view -i "\$2" -r "\$3" -U query -T "\$4" | "\$1" norm' \\
-            _ "\$TAFFY" "\$input" "\${REF_CHROM}:\${START}-\${END}" "\$TAFFY_T" \\
-          ) > "\${rowfiles[\${prefix}_taf_norm]}" &
-        pids[\${prefix}_taf_norm]=\$!
+        pids[\${prefix}_maf]=\$!; register_pid \$! \$TAFFY_T
+        acquire_slot \$TAFFY_NORM_T
         ( run_cell "\${prefix}_maf_norm" "\$N" "\$TIME_BUDGET" \\
             sh -c '"\$1" view -i "\$2" -r "\$3" -U query -T "\$4" | "\$1" norm -k' \\
-            _ "\$TAFFY" "\$input" "\${REF_CHROM}:\${START}-\${END}" "\$TAFFY_T" \\
+            _ "\$TAFFY" "\$input" "\$region" "\$TAFFY_T" \\
           ) > "\${rowfiles[\${prefix}_maf_norm]}" &
-        pids[\${prefix}_maf_norm]=\$!
+        pids[\${prefix}_maf_norm]=\$!; register_pid \$! \$TAFFY_NORM_T
+        # TAF-output cells: skipped under --mafOnly.
+        if [[ "\$MAF_ONLY" -eq 0 ]]; then
+            rowfiles["\${prefix}_taf"]="\$LOGDIR/row_\${prefix}_taf_\${N}.tsv"
+            rowfiles["\${prefix}_taf_norm"]="\$LOGDIR/row_\${prefix}_taf_norm_\${N}.tsv"
+            acquire_slot \$TAFFY_T
+            ( run_cell "\${prefix}_taf"      "\$N" "\$TIME_BUDGET" \\
+                "\$TAFFY" view -i "\$input" -r "\$region" -U query -T "\$TAFFY_T" \\
+              ) > "\${rowfiles[\${prefix}_taf]}" &
+            pids[\${prefix}_taf]=\$!; register_pid \$! \$TAFFY_T
+            acquire_slot \$TAFFY_NORM_T
+            ( run_cell "\${prefix}_taf_norm" "\$N" "\$TIME_BUDGET" \\
+                sh -c '"\$1" view -i "\$2" -r "\$3" -U query -T "\$4" | "\$1" norm' \\
+                _ "\$TAFFY" "\$input" "\$region" "\$TAFFY_T" \\
+              ) > "\${rowfiles[\${prefix}_taf_norm]}" &
+            pids[\${prefix}_taf_norm]=\$!; register_pid \$! \$TAFFY_NORM_T
+        fi
     }
 
     # Pre-allocate non-tui cell rowfiles too.
@@ -457,16 +552,21 @@ for N in "\${SIZES[@]}"; do
     [[ -n "\$UNI"     ]] && launch_tui_cells "maf.tui" "\$UNI"
     [[ -n "\$UNI_TAF" ]] && launch_tui_cells "taf.tui" "\$UNI_TAF"
 
-    # tai_taf / tai_maf: hg38-anchored MAF via .tai.
-    ( run_cell tai_taf "\$N" "\$TIME_BUDGET" \\
-        "\$TAFFY" view -i "\$HG38" -r "\${REF_CHROM}:\${START}-\${END}"    -T "\$TAFFY_T" \\
-      ) > "\${rowfiles[tai_taf]}" &
-    pids[tai_taf]=\$!
+    # tai_maf: hg38-anchored MAF via .tai.  tai_taf (TAF output) is skipped
+    # under --mafOnly.
+    if [[ "\$MAF_ONLY" -eq 0 ]]; then
+        acquire_slot \$TAFFY_T
+        ( run_cell tai_taf "\$N" "\$TIME_BUDGET" \\
+            "\$TAFFY" view -i "\$HG38" -r "\${REF_CHROM}:\${START}-\${END}"    -T "\$TAFFY_T" \\
+          ) > "\${rowfiles[tai_taf]}" &
+        pids[tai_taf]=\$!; register_pid \$! \$TAFFY_T
+    fi
 
+    acquire_slot \$TAFFY_T
     ( run_cell tai_maf "\$N" "\$TIME_BUDGET" \\
         "\$TAFFY" view -i "\$HG38" -r "\${REF_CHROM}:\${START}-\${END}" -m -T "\$TAFFY_T" \\
       ) > "\${rowfiles[tai_maf]}" &
-    pids[tai_maf]=\$!
+    pids[tai_maf]=\$!; register_pid \$! \$TAFFY_T
 
     # hal: hal2maf (if installed); uses HAL_TIME_BUDGET (defaults to
     # TIME_BUDGET) so the user can short-circuit it independently.
@@ -475,11 +575,12 @@ for N in "\${SIZES[@]}"; do
     # it outright rather than run-then-timeout.  No hal row is emitted for
     # capped sizes (the plot simply shows the hal line stopping at the cap).
     if [[ -n "\$HAL2MAF" ]] && { [[ -z "\$HAL_MAX_SIZE" ]] || (( N <= HAL_MAX_SIZE )); }; then
+        acquire_slot 1
         ( run_cell hal "\$N" "\$HAL_TIME_BUDGET" \\
             "\$HAL2MAF" --refGenome "\$HAL_GENOME" --refSequence "\$HAL_SEQ" \\
                        --start "\$START" --length "\$N" "\$HAL" /dev/stdout \\
           ) > "\${rowfiles[hal]}" &
-        pids[hal]=\$!
+        pids[hal]=\$!; register_pid \$! 1
     elif [[ -n "\$HAL2MAF" ]]; then
         echo "   (hal skipped at N=\$N > halMaxSize=\$HAL_MAX_SIZE)" >&2
     fi
@@ -489,10 +590,11 @@ for N in "\${SIZES[@]}"; do
     # has shipped; the positional "chrom start end" form some older
     # builds had isn't there in v1 (kent/src/utils/bigBedToBed.c).
     if [[ -n "\$BIGBED2BED" ]]; then
+        acquire_slot 1
         ( run_cell bb "\$N" "\$TIME_BUDGET" \\
             "\$BIGBED2BED" -chrom="\$BB_CHROM" -start="\$START" -end="\$END" "\$BB" stdout \\
           ) > "\${rowfiles[bb]}" &
-        pids[bb]=\$!
+        pids[bb]=\$!; register_pid \$! 1
     fi
 
     # Wait for each cell and append its row.  Iterate the pids set we
