@@ -125,6 +125,8 @@ DO_1=1; DO_2=1; DO_3=1; DO_4=1
 SUBMIT=0                        # default DRY-RUN; --submit lets each driver actually sbatch
 TEST=0                          # --test: tiny smoke config (see below)
 NO_WAIT=0                       # pass --no-wait through to drivers when submitting
+NO_STAGE=0                      # --no-stage-local: pass through to every driver (read
+                                # inputs from network instead of copying to local scratch)
 
 # Tool/bin env passthroughs (each driver also honours these from env).
 # Resolved once here on the submit host and threaded into the jobs as
@@ -147,6 +149,10 @@ run_577_slide_bench.sh -- drive all four 577-way / hg38 slide comparisons
   --submit          Let each driver actually submit (default: --dry-run only,
                     nothing is sent to SLURM).
   --no-wait         Pass --no-wait to each driver (submit + detach).
+  --no-stage-local  Pass --no-stage-local to every driver: read inputs from
+                    the network instead of copying them to local scratch.
+                    Skips the big stage-in (fast functional smoke), but the
+                    timings go disk-bound -- not for the real measurement run.
   --only LIST       Comma list of comparisons to run: 1,2,3,4 (default all).
   -o DIR            Output root (default $OUTROOT); each comparison gets a
                     subdir cmp1_view / cmp2_baselift / cmp3_blockviz /
@@ -190,6 +196,7 @@ while [[ $# -gt 0 ]]; do
         --test)           TEST=1; shift;;
         --submit)         SUBMIT=1; shift;;
         --no-wait)        NO_WAIT=1; shift;;
+        --no-stage-local) NO_STAGE=1; shift;;
         --only)           ONLY="$2"; shift 2;;
         -o)               OUTROOT="$2"; shift 2;;
         --baseTui)        BASE_TUI_MAF="$2"; shift 2;;
@@ -281,6 +288,7 @@ done
 COMMON_FLAGS=()
 [[ "$SUBMIT" -eq 0 ]] && COMMON_FLAGS+=( --dry-run )
 [[ "$NO_WAIT" -eq 1 ]] && COMMON_FLAGS+=( --no-wait )
+[[ "$NO_STAGE" -eq 1 ]] && COMMON_FLAGS+=( --no-stage-local )
 [[ -n "$PARTITION" ]]  && COMMON_FLAGS+=( --partition "$PARTITION" )
 [[ -n "$ACCOUNT"   ]]  && COMMON_FLAGS+=( --account "$ACCOUNT" )
 [[ -n "$TMP_GB"    ]]  && COMMON_FLAGS+=( --tmp "$TMP_GB" )
