@@ -89,10 +89,13 @@ PANEL="$HERE/vgp577_hg38_panel.tsv"   # target-genome panel (-L)
 
 # -- Reference / query geometry --
 REF="GCA_000001405.15"          # hg38 genome id (matches the universal-MAF / chain prefix)
-VIEW_REF_CHROM="hg38.chr20"     # taffy view -r prefix for #1 (genome.seq)
-HAL_GENOME="hg38"               # hal2maf --refGenome / blockViz tSpecies
+# Naming: hg38 is the accession GCA_000001405.15 in the universal MAF, the
+# hg38-anchored MAF, the HAL and the chained tui -- EXCEPT the bigBed, whose
+# chrom is the bare UCSC name (chr20).
+VIEW_REF_CHROM="GCA_000001405.15.chr20"   # taffy view -r (genome.seq) for #1 tui+tai cells
+HAL_GENOME="GCA_000001405.15"   # hal2maf --refGenome / blockViz tSpecies
 HAL_SEQ="chr20"                 # hal2maf --refSequence / bare tChrom
-BB_CHROM="chr20"                # bigBedToBed chrom for #1
+BB_CHROM="chr20"                # bigBedToBed chrom for #1 (the bigBed = bare UCSC name)
 BLOCKVIZ_CHROM="chr20"          # bare tChrom for #3 (both blockViz tools)
 VIEW_START=1000000              # #1 view window start (skip the chr20 telomere prefix)
 
@@ -241,6 +244,8 @@ if [[ "$TEST" -eq 1 ]]; then
     echo ">> --test mode: tiny smoke config" >&2
     BLOCKVIZ_SIZES="1000,100000"
     LIFT_SIZES="1000,100000"
+    VIEW_MAX_SIZE=100000        # cap #1's view ladder for the smoke (else it runs the
+                                # whole-chrom log-decade ladder + needs the chrom length)
     LIFT_N_INTERVALS=5
     HAL_MAX_SIZE=100000
     TIME_BUDGET=300
