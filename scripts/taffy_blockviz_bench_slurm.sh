@@ -304,10 +304,10 @@ if [[ "\$STAGE_LOCAL" -eq 1 ]]; then
     echo "stage: all inputs staged to \$STAGE_DIR" >&2
 fi
 
-# Write header if file is empty / fresh.
-if [[ ! -s "\$BENCH_TSV" ]]; then
-    printf "tool\tgenome_id\tsci_name\tcommon_name\tsize_bp\twall_s\tpeak_rss_kb\texit\ttimed_out\tout_bytes\n" > "\$BENCH_TSV"
-fi
+# Truncate + write the header fresh at the start of each run (one job -> one
+# bench.tsv; the cells append below).  Avoids mixing rows from an earlier run
+# that reused the same OUTDIR.
+printf "tool\tgenome_id\tsci_name\tcommon_name\tsize_bp\twall_s\tpeak_rss_kb\texit\ttimed_out\tout_bytes\n" > "\$BENCH_TSV"
 
 # run_cell tool species_id sci common size cmd...
 # Writes a single TSV row to stdout.  out_bytes = size of the tool's
