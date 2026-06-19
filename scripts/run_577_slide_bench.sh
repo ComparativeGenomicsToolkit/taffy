@@ -104,7 +104,7 @@ VIEW_NORM=0                     # #1 _norm cells (view|taffy norm): 0=OFF this r
 VIEW_MAX_SIZE=""                # #1 view --maxSize cap (empty = chrom end from .tai)
 BLOCKVIZ_SIZES="1000,100000,500000,1000000,10000000,64000000"   # #3 ladder: 1k 100k 500k 1M 10M whole-chr20
 LIFT_SIZES="1000,100000,1000000,10000000"   # #4 (chained tui --fast vs liftOver) ladder (1k 100k 1M 10M)
-LIFT_PERCOL_SIZES="1000,100000,500000"      # #2 (full tui per-column: hal vs tui) small base-level ladder (<=500kb)
+LIFT_PERCOL_SIZES="1000,100000,1000000"     # #2 (full tui per-column: hal vs tui) base-level ladder (1k 100k 1M)
 LIFT_N_INTERVALS=100            # #2 + #4 random intervals per (species,size) cell
 HAL_MAX_SIZE=500000             # the cap: hal tools skipped above this (bp) in #1/#2/#3
 
@@ -370,7 +370,7 @@ if [[ "$DO_2" -eq 1 ]]; then
     run_driver env TAFFY="$TAFFY" bash "$LIFT_DRV" "${BASE_SRC_FLAG[@]}" \
         -H "$HAL" -c "$CHAINS_DIR" -t "$TREE" -o "$O2" \
         -r "$REF" -L "$PANEL" -S "$LIFT_PERCOL_SIZES" -N "$LIFT_N_INTERVALS" \
-        --column-walk --no-liftover --halMaxSize "$HAL_MAX_SIZE" \
+        --column-walk --no-liftover --halMaxSize "${LIFT_PERCOL_SIZES##*,}" \
         -T "$T_TOTAL" --timeBudget "$TIME_BUDGET" \
         --time "$SBATCH_TIME" --mem "$SBATCH_MEM" "${COMMON_FLAGS[@]}"
     echo ">> #2 base-level: hal vs tui (full tui, per-column) into $O2 (-S '$LIFT_PERCOL_SIZES'); no liftOver; halLiftover <= --halMaxSize=$HAL_MAX_SIZE" >&2

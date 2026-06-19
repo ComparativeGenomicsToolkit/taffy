@@ -990,6 +990,7 @@ with open(os.path.join(bench_dir, "bench.tsv")) as f:
             r["peak_rss_kb"] = float(r["peak_rss_kb"]) if r["peak_rss_kb"] != "NA" else None
             r["timed_out"] = int(r["timed_out"])
             r["n_intervals"] = int(r["n_intervals"])
+            r["n_mapped"] = int(r["n_mapped"])
             rows.append(r)
         except (ValueError, KeyError):
             continue
@@ -1017,9 +1018,12 @@ rows = [r for r in rows if r["dist"] is not None]
 # Distinct sizes & order species by distance.
 sizes  = sorted({r["size_bp"] for r in rows})
 species_order = sorted({(r["dist"], r["genome_id"], r["common_name"]) for r in rows})
+# Evenly-spaced x: map each species to its ordinal rank (ordered by divergence)
+# so close-divergence species don't overlap their labels.
+xpos = {gid: i for i, (d, gid, c) in enumerate(species_order)}
 
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
-fig.subplots_adjust(left=0.08, right=0.97, top=0.90, bottom=0.20, wspace=0.27)
+fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(21, 6))
+fig.subplots_adjust(left=0.06, right=0.98, top=0.90, bottom=0.22, wspace=0.27)
 
 # Base palette per tool family.  --maxGap variants (maf.tui_gK / taf.tui_gK)
 # inherit the family colour but shift hue/lightness by K so K=0 is the
@@ -1089,8 +1093,10 @@ def tool_sort_key(t):
 tools = sorted({r["tool"] for r in rows}, key=tool_sort_key)
 
 def by_tool_size(tool, size):
-    # Wall-time data point = mean per-interval seconds (wall_s / n_intervals).
-    out = [(r["dist"], r["wall_s"] / max(r["n_intervals"], 1), r["peak_rss_kb"])
+    # x = evenly-spaced species rank; wall = per-interval seconds; rss in kb;
+    # mapped = per-interval intervals mapped (coverage).
+    out = [(xpos[r["genome_id"]], r["wall_s"] / max(r["n_intervals"], 1),
+            r["peak_rss_kb"], r["n_mapped"] / max(r["n_intervals"], 1))
            for r in rows
            if r["tool"] == tool and r["size_bp"] == size
            and not r["timed_out"] and r["wall_s"] is not None]
@@ -1112,26 +1118,31 @@ for tool in tools:
         xs = [p[0] for p in pts]
         wt = [p[1] for p in pts]
         rs = [p[2] / 1024.0 for p in pts]  # MB
+        mp = [p[3] for p in pts]           # intervals mapped per input interval
         label = f"{tool} N={sz:,}"
         kw = dict(marker=size_marker[sz], linestyle=linestyle, color=color, label=label)
         if markerfacecolor is not None:
             kw["markerfacecolor"] = markerfacecolor
         ax1.plot(xs, wt, **kw)
-        ax2.plot(xs, rs, **kw)
+        ax2.plot(xs, mp, **kw)
+        ax3.plot(xs, rs, **kw)
 
-# X-axis labels = species common names at their divergence positions.
-xticks = [d for d, _, _ in species_order]
+# Evenly-spaced ordinal x; labels = species common name (+ divergence).
+xticks = list(range(len(species_order)))
 xlabels = [f"{c}\n({d:.2f})" for d, _, c in species_order]
-for ax, title, ylab in [(ax1, "mean lift time per interval", "seconds / interval"),
-                         (ax2, "peak RSS", "MB")]:
+_b = os.path.basename(bench_dir)
+LIFT = "base " if "baselift" in _b else ("chained " if "chainlift" in _b else "")
+for ax, title, ylab in [(ax1, f"{LIFT}lift: wall / interval", "seconds / interval"),
+                         (ax2, f"{LIFT}lift: mapped / interval", "intervals mapped"),
+                         (ax3, "peak RSS", "MB")]:
     ax.set_yscale("log")
-    ax.set_xlabel(f"divergence from {ref} (subs/site)")
+    ax.set_xlabel(f"target (ordered by divergence from {ref})")
     ax.set_ylabel(ylab)
     ax.set_title(title)
     ax.set_xticks(xticks)
     ax.set_xticklabels(xlabels, rotation=45, ha="right", fontsize=8)
     ax.grid(True, which="both", axis="y", alpha=0.3)
-    ax.legend(fontsize=8, loc="best")
+    ax.legend(fontsize=7, loc="best")
 
 out = os.path.join(bench_dir, "bench.png")
 fig.savefig(out, dpi=140)
