@@ -147,7 +147,9 @@ run_577_slide_bench.sh -- drive all four 577-way / hg38 slide comparisons
 
   --test            Tiny smoke config: 1 chrom, 2 small sizes (1000,100000),
                     2 species, short --timeBudget, small --maxOutputBlocks.
-                    Still DRY-RUN unless you also pass --submit.
+                    Implies --no-stage-local (reads inputs in place; a smoke
+                    must not spend ~2h staging 4TB).  Still DRY-RUN unless you
+                    also pass --submit.
   --submit          Let each driver actually submit (default: --dry-run only,
                     nothing is sent to SLURM).
   --no-wait         Pass --no-wait to each driver (submit + detach).
@@ -251,7 +253,9 @@ fi
 
 # --test: shrink everything to a 1-chrom, 2-size, 2-species smoke run.
 if [[ "$TEST" -eq 1 ]]; then
-    echo ">> --test mode: tiny smoke config" >&2
+    echo ">> --test mode: tiny smoke config (reads inputs in place -- no 4TB stage-in)" >&2
+    NO_STAGE=1                  # a smoke must not spend ~2h staging 4TB; its tiny
+                                # 1-100kb queries read fine straight off the shared FS
     BLOCKVIZ_SIZES="1000,100000"
     LIFT_SIZES="1000,100000"
     VIEW_MAX_SIZE=100000        # cap #1's view ladder for the smoke (else it runs the
