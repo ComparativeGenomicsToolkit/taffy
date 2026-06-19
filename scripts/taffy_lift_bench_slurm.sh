@@ -60,7 +60,8 @@ OUTDIR=""
 T_TOTAL=24                          # cpus-per-task; one core per concurrent cell
 REF="GCF_016700215.2"               # chicken
 MAX_GAPS_CSV=""                     # --maxGap CSV: e.g. "0,1000,10000".  Empty = single taffy cell (K=0).
-FAST_MODE=0                         # --fast: add a --fast variant cell next to each taffy cell.
+FAST_MODE=0                         # default lift is --fast (chunk-iteration); --fast flag now only
+                                    # adds a redundant explicit _fast variant + enables --bin cells.
 NO_HAL=0                            # --no-hal: skip halLiftover cells (taffy + liftOver only)
 HAL_MAX_SIZE=""                     # --halMaxSize: skip (DO NOT LAUNCH) the halLiftover cell
                                     # for any (species,size) where size > this (bp).  Empty =
@@ -151,12 +152,11 @@ Optional:
                 K=0 (preserves existing names); 'maf.tui_g<K>' /
                 'taf.tui_g<K>' for K > 0.  Example: --maxGap 0,1000,10000
                 runs 3 taffy variants per cell.
-  --fast        For each taffy cell (default + per-K variant if --maxGap is
-                set), also launch a --fast variant using the chunk-iteration
-                lift path (10-50x faster on multi-Mb queries).  Tool name
-                in bench.tsv gets a '_fast' suffix: e.g. 'maf.tui_fast',
-                'maf.tui_g1000_fast'.  Lets you compare default-vs-fast
-                wall + verify output parity in one job.
+  --fast        The default lift path is ALREADY --fast (chunk-iteration,
+                O(runs); 10-1000x faster than per-column, same output modulo
+                merge order).  This flag now only adds a redundant explicit
+                '_fast'-suffixed duplicate (kept for back-compat; --bin
+                auto-enables it).  You normally do not need it.
   --bin CSV     taffy lift --bin sizes (bedGraph, coarse-grained browser
                 tracks) to bench side-by-side.  Each value adds a
                 --fast --bin <N> variant cell PER SPECIES PER SIZE (only
@@ -465,7 +465,7 @@ echo ">> species:       $N_SPECIES"
 awk -F'\t' '{printf("                  %-18s %-30s %s\n", $1, $2, $3)}' "$SPECIES_TSV"
 echo ">> sizes:         ${SIZE_ARR[*]}  ($N_INTERVALS intervals each, seed=$SEED)"
 echo ">> --maxGap vals: ${MAX_GAPS_ARR[*]}  (taffy cells per source per (species, size))"
-echo ">> --fast mode:   $([[ $FAST_MODE -eq 1 ]] && echo "ON (adds _fast variant per taffy cell)" || echo "OFF (default column-walk only)")"
+echo ">> lift path:     taffy lift --fast (chunk-iteration, O(runs))$([[ $FAST_MODE -eq 1 ]] && echo " + redundant explicit _fast variant")"
 echo ">> --bin sizes:   $([[ ${#BIN_SIZES_ARR[@]} -gt 0 ]] && echo "${BIN_SIZES_ARR[*]}  (adds 1 fast+bin cell per size at K=0)" || echo "OFF")"
 echo ">> --threadsPerCell: ${THREADS_PER_CELL_ARR[*]}  (OMP_NUM_THREADS per taffy cell; N>1 cells get _t<N> suffix)"
 # Oversubscription check: concurrent taffy cells = N_SPECIES * N_TAFFY_TOOLS;
@@ -769,9 +769,9 @@ for N in "\${SIZES[@]}"; do
         fi
 
         # ---- taffy lift cells: one per (.tui source) x (--maxGap K) x (mode) -
-        # Mode loop: 'default' = column-walk, 'fast' = chunk-walk (--fast).
-        # When FAST_MODE=0 we only run 'default'; when 1 we run both so the
-        # bench can compare side-by-side.  Tool name suffix:
+        # Mode loop: 'default' is now --fast (chunk-walk).  FAST_MODE=1 adds a
+        # redundant explicit '_fast' variant (same path) + enables --bin cells.
+        # Tool name suffix:
         #   K=0, default      : "maf.tui"                  (existing name)
         #   K>0, default      : "maf.tui_g<K>"
         #   K=0, fast         : "maf.tui_fast"
@@ -790,7 +790,10 @@ for N in "\${SIZES[@]}"; do
                 if [[ "\$mode" == "fast" ]]; then
                     ftag="_fast"; ffl=( --fast )
                 else
-                    ftag=""; ffl=()
+                    # Default lift is --fast (chunk-iteration, O(runs); 10-1000x
+                    # faster than per-column, output equiv. modulo merge order).
+                    # Matches lift-chicken-quail (which used taffy lift -F).
+                    ftag=""; ffl=( --fast )
                 fi
                 for THREADS in "\${THREADS_PER_CELL[@]}"; do
                     tt="\$(ttag \$THREADS)"
