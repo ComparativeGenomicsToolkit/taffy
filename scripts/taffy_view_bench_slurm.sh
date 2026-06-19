@@ -413,8 +413,8 @@ run_cell() {
     # -q suppresses /usr/bin/time's "Command exited with non-zero status N"
     # line on failure (which would otherwise occupy the time_file's first
     # row and break our read).
-    # Pipe stdout through `wc -c` rather than writing it to a file: we measure
-    # the bytes the tool *produces*, NOT the cost of writing a ~80 GB whole-
+    # Pipe stdout through wc -c rather than writing it to a file: we measure
+    # the bytes the tool produces, NOT the cost of writing a ~80 GB whole-
     # chrom MAF to the (network) OUTDIR, which would dominate + distort the
     # timing.  /usr/bin/time still measures only the left side (the tool);
     # PIPESTATUS[0] is its real exit, wc just drains the stream.
@@ -437,7 +437,7 @@ run_cell() {
     fi
     if (( rc == 137 || rc == 124 )); then timed_out=1; fi
     out_bytes=\$(tr -dc '0-9' < "\$out_file" 2>/dev/null); [[ -n "\$out_bytes" ]] || out_bytes=0
-    # \$out_file now holds only the \`wc -c\` byte count, so nothing large ever
+    # \$out_file now holds only the wc -c byte count, so nothing large ever
     # lands in OUTDIR.  Keep the err log for failure debugging.
     rm -f "\$out_file"
 
