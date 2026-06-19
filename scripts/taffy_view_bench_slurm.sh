@@ -350,9 +350,11 @@ LOGDIR="\$OUTDIR/logs"
 mkdir -p "\$LOGDIR"
 
 # --- Stage inputs to local scratch (\$TMPDIR or /tmp fallback). -----
-# Copy UNI + .tui, HG38 + .tai, HAL, and BB up front so the 6 parallel
-# cells per wave don't fight each other for network-FS bandwidth.
-# Sequential cp: friendlier to the source FS than parallel pulls.
+# Copy UNI + .tui, HG38 + .tai, HAL, and BB up front so the parallel cells
+# per wave don't fight each other for network-FS bandwidth.  PARALLEL cp:
+# all copies launch at once and we wait for the lot, so the wall time is the
+# single largest file (the ~965 GB HAL), not the sum of all inputs -- relies
+# on the source being a parallel FS where concurrent streams add bandwidth.
 # Trap-cleanup so an aborted job doesn't leave TB of leftover scratch.
 if [[ "\$STAGE_LOCAL" -eq 1 ]]; then
     SCRATCH="\${TMPDIR:-/tmp/taffy_view_bench_\${SLURM_JOB_ID:-\$\$}}"
@@ -365,33 +367,38 @@ if [[ "\$STAGE_LOCAL" -eq 1 ]]; then
     # stage_one prints the destination path on stdout (for command
     # substitution capture) and status to stderr so the dst doesn't get
     # polluted by the progress messages.
-    stage_one() {
+    # stage_bg: launch ONE background cp (src -> STAGE_DIR/basename) and
+    # record its PID so we can reap + error-check each below.  Skips
+    # empty/missing sources; cp dereferences the symlinked inputs.
+    stage_pids=()
+    stage_bg() {
         local src="\$1"
+        [[ -n "\$src" && -f "\$src" ]] || return 0
         local dst="\$STAGE_DIR/\$(basename "\$src")"
-        echo "stage: \$src -> \$dst (\$(stat -c %s "\$src" 2>/dev/null || echo ?) bytes)" >&2
-        local t0=\$SECONDS
-        cp "\$src" "\$dst"
-        echo "       done in \$((SECONDS - t0)) s" >&2
-        echo "\$dst"
+        echo "stage: \$src -> \$dst (\$(stat -Lc %s "\$src" 2>/dev/null || echo ?) bytes)" >&2
+        ( t0=\$SECONDS; cp "\$src" "\$dst"; \\
+          echo "       done: \$(basename "\$src") in \$((SECONDS - t0)) s" >&2 ) &
+        stage_pids+=( \$! )
     }
-    # Universal MAF/.tui: each provided source is staged (source file +
-    # its .tui sidecar).  taffy view DOES open the source file (unlike
-    # taffy lift) to extract bases, so for view-bench we need the source
-    # itself staged.
-    if [[ -n "\$UNI" ]]; then
-        LOCAL_UNI=\$(stage_one "\$UNI");        stage_one "\$UNI.tui"  > /dev/null
-        UNI="\$LOCAL_UNI"
-    fi
-    if [[ -n "\$UNI_TAF" ]]; then
-        LOCAL_UNI_TAF=\$(stage_one "\$UNI_TAF");  stage_one "\$UNI_TAF.tui" > /dev/null
-        UNI_TAF="\$LOCAL_UNI_TAF"
-    fi
-    LOCAL_HG38=\$(stage_one "\$HG38");      stage_one "\$HG38.tai" > /dev/null
-    LOCAL_HAL=\$(stage_one "\$HAL")
-    LOCAL_BB=\$(stage_one "\$BB")
-    HG38="\$LOCAL_HG38"
-    HAL="\$LOCAL_HAL"
-    BB="\$LOCAL_BB"
+    # taffy view DOES open the source file (unlike taffy lift) to extract
+    # bases, so stage each source + its .tui sidecar.  All copies run
+    # concurrently; wall time is the single largest file, not the sum.
+    [[ -n "\$UNI"     ]] && { stage_bg "\$UNI";     stage_bg "\$UNI.tui"; }
+    [[ -n "\$UNI_TAF" ]] && { stage_bg "\$UNI_TAF"; stage_bg "\$UNI_TAF.tui"; }
+    stage_bg "\$HG38";  stage_bg "\$HG38.tai"
+    stage_bg "\$HAL"
+    stage_bg "\$BB"
+    # Reap every copy; abort if any failed (else a half-staged input would
+    # silently corrupt the run).
+    stage_rc=0
+    for p in "\${stage_pids[@]}"; do wait "\$p" || stage_rc=1; done
+    [[ "\$stage_rc" -eq 0 ]] || { echo "ERROR: a stage-in copy failed" >&2; exit 1; }
+    # Repoint each input at its staged copy (deterministic dst path).
+    [[ -n "\$UNI"     ]] && UNI="\$STAGE_DIR/\$(basename "\$UNI")"
+    [[ -n "\$UNI_TAF" ]] && UNI_TAF="\$STAGE_DIR/\$(basename "\$UNI_TAF")"
+    HG38="\$STAGE_DIR/\$(basename "\$HG38")"
+    HAL="\$STAGE_DIR/\$(basename "\$HAL")"
+    BB="\$STAGE_DIR/\$(basename "\$BB")"
     echo "stage: all inputs staged to \$STAGE_DIR" >&2
 fi
 
