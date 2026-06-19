@@ -626,6 +626,7 @@ for ax, title, ylab in [(ax1, "browser-query wall time (mean over panel)", "seco
     # decades) is readable.
     ax.yaxis.set_minor_locator(LogLocator(base=10.0, subs=(2, 3, 5), numticks=20))
     ax.yaxis.set_minor_formatter(FuncFormatter(lambda y, _: f"{y:g}"))
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _: f"{y:g}"))  # 10^0 -> 1, 10^-1 -> 0.1
     ax.tick_params(axis="y", which="minor", labelsize=7)
     ax.legend(fontsize=9)
 
