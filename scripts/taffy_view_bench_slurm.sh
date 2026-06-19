@@ -8,8 +8,8 @@
 # Tools (each gets one cell per N, run in parallel within a size wave):
 #   tui_taf       view -U query                                  (universal -> TAF)
 #   tui_maf       view -U query -m                               (universal -> MAF)
-#   tui_taf_norm  view -U query        | taffy norm              (universal -> TAF + merge)
-#   tui_maf_norm  view -U query        | taffy norm -k           (universal -> MAF + merge)
+#   tui_taf_norm  view -U query -m     | taffy norm              (MAF -> norm -> TAF + merge)
+#   tui_maf_norm  view -U query -m     | taffy norm -k           (MAF -> norm -> MAF + merge)
 #   tai_taf       view                                           (hg38-anchored -> TAF)
 #   tai_maf       view -m                                        (hg38-anchored -> MAF)
 #   hal           hal2maf                                        (HAL baseline)
@@ -520,7 +520,11 @@ for N in "\${SIZES[@]}"; do
     # Without -U query the default is \`-U ancestor\` which emits every
     # overlapping universal-column block (~12x larger, conflates bench
     # question).  -m forces MAF, absence => TAF.  The _norm variants
-    # pipe through \`taffy norm\` to merge fragmented universal output;
+    # pipe through \`taffy norm\` to merge fragmented universal output; the
+    # view side emits -m (MAF) into norm ON PURPOSE -- TAF is compact but
+    # SLOW to parse (per-column delta decode, the super-linear cost at
+    # 577-wide); MAF is verbose but cheap, so view -m | norm is much faster
+    # for identical output.
     # \`sh -c\` captures the pipe's RSS via wait4.
     #
     # prefix = "maf.tui" or "taf.tui" (matches the .tui source format).
@@ -537,7 +541,7 @@ for N in "\${SIZES[@]}"; do
         pids[\${prefix}_maf]=\$!; register_pid \$! \$TAFFY_T
         acquire_slot \$TAFFY_NORM_T
         ( run_cell "\${prefix}_maf_norm" "\$N" "\$TIME_BUDGET" \\
-            sh -c '"\$1" view -i "\$2" -r "\$3" -U query -T "\$4" | "\$1" norm -k' \\
+            sh -c '"\$1" view -i "\$2" -r "\$3" -U query -T "\$4" -m | "\$1" norm -k' \\
             _ "\$TAFFY" "\$input" "\$region" "\$TAFFY_T" \\
           ) > "\${rowfiles[\${prefix}_maf_norm]}" &
         pids[\${prefix}_maf_norm]=\$!; register_pid \$! \$TAFFY_NORM_T
@@ -552,7 +556,7 @@ for N in "\${SIZES[@]}"; do
             pids[\${prefix}_taf]=\$!; register_pid \$! \$TAFFY_T
             acquire_slot \$TAFFY_NORM_T
             ( run_cell "\${prefix}_taf_norm" "\$N" "\$TIME_BUDGET" \\
-                sh -c '"\$1" view -i "\$2" -r "\$3" -U query -T "\$4" | "\$1" norm' \\
+                sh -c '"\$1" view -i "\$2" -r "\$3" -U query -T "\$4" -m | "\$1" norm' \\
                 _ "\$TAFFY" "\$input" "\$region" "\$TAFFY_T" \\
               ) > "\${rowfiles[\${prefix}_taf_norm]}" &
             pids[\${prefix}_taf_norm]=\$!; register_pid \$! \$TAFFY_NORM_T
