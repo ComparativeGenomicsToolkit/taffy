@@ -7,8 +7,8 @@
 # --dry-run (default) or lets each driver submit (--submit).
 #
 # THE FOUR COMPARISONS (all full-577-way, hg38 source/reference):
-#   1. MAF extraction   : tui (view -U query) vs tai (view) vs hal (hal2maf)
-#                         vs bigmaf (bigBedToBed)   -> taffy_view_bench_slurm.sh
+#   1. MAF extraction   : tui (view -U query --noAncestors) vs tai (view) vs hal (hal2maf)
+#                         vs bigmaf (bigMafToMaf)   -> taffy_view_bench_slurm.sh  [all -> hg38 leaf MAF]
 #   2. base liftover    : taffy lift on the BASE .tui vs halLiftover
 #                                                    -> taffy_lift_bench_slurm.sh
 #   3. blockViz query   : taffyBlockViz vs halBlockViz
@@ -95,7 +95,7 @@ REF="GCA_000001405.15"          # hg38 genome id (matches the universal-MAF / ch
 VIEW_REF_CHROM="GCA_000001405.15.chr20"   # taffy view -r (genome.seq) for #1 tui+tai cells
 HAL_GENOME="GCA_000001405.15"   # hal2maf --refGenome / blockViz tSpecies
 HAL_SEQ="chr20"                 # hal2maf --refSequence / bare tChrom
-BB_CHROM="chr20"                # bigBedToBed chrom for #1 (the bigBed = bare UCSC name)
+BB_CHROM="chr20"                # bigMafToMaf chrom for #1 (the bigMaf = bare UCSC name)
 BLOCKVIZ_CHROM="chr20"          # bare tChrom for #3 (both blockViz tools)
 VIEW_START=1000000              # #1 view window start (skip the chr20 telomere prefix)
 VIEW_NORM=0                     # #1 _norm cells (view|taffy norm): 0=OFF this run, set 1 to re-enable

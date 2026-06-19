@@ -6,19 +6,22 @@
 # query at a log-decade ladder of N values: 1, 10, 100, 1k, ..., chr10_len.
 #
 # Tools (each gets one cell per N, run in parallel within a size wave):
-#   tui_taf       view -U query                                  (universal -> TAF)
-#   tui_maf       view -U query -m                               (universal -> MAF)
-#   tui_taf_norm  view -U query -m     | taffy norm              (MAF -> norm -> TAF + merge)
-#   tui_maf_norm  view -U query -m     | taffy norm -k           (MAF -> norm -> MAF + merge)
+#   tui_taf       view -U query --noAncestors                    (universal -> leaf TAF)
+#   tui_maf       view -U query --noAncestors -m                 (universal -> leaf hg38 MAF)
+#   tui_taf_norm  view -U query --noAncestors -m | taffy norm    (MAF -> norm -> TAF + merge)
+#   tui_maf_norm  view -U query --noAncestors -m | taffy norm -k (MAF -> norm -> MAF + merge)
 #   tai_taf       view                                           (hg38-anchored -> TAF)
 #   tai_maf       view -m                                        (hg38-anchored -> MAF)
-#   hal           hal2maf                                        (HAL baseline)
-#   bb            bigBedToBed                                    (bigbed floor)
+#   hal           hal2maf                                        (HAL baseline -> hg38 MAF)
+#   bb            bigMafToMaf                                     (bigMaf -> hg38 MAF)
 #
-# -U query reorients .tui-extracted blocks onto the queried genome so
-# the output is hg38-anchored (comparable to the .tai path).  Without
-# it the universal lift's default `-U ancestor` keeps blocks in their
-# native ancestor anchor and emits ~12x more data.
+# Every cell emits hg38-anchored, leaf-only MAF so the comparison is
+# apples-to-apples.  -U query reorients .tui-extracted blocks onto the
+# queried genome and --noAncestors drops the internal-node (ancestor) rows,
+# so the tui output is leaf-only hg38-anchored -- comparable to the .tai /
+# hal2maf paths.  Without -U query the default `-U ancestor` keeps blocks in
+# their native ancestor anchor and emits ~12x more data; without
+# --noAncestors the universal also carries every ancestor row.
 #
 # The _norm variants pipe through `taffy norm`, which merges adjacent
 # blocks with compatible row sets.  The raw -U query output is highly
@@ -69,7 +72,7 @@ TAFFY_T=""                    # bgzf threads per taffy cell; default 4 (floored 
 REF_CHROM="hg38.chr10"        # taffy view -r prefix (genome.seq for universal MAF)
 HAL_GENOME="hg38"             # hal2maf --refGenome
 HAL_SEQ="chr10"               # hal2maf --refSequence
-BB_CHROM="chr10"              # bigBedToBed positional chrom name
+BB_CHROM="chr10"              # bigMafToMaf -chrom region name
 START=1000000                 # start of the queried region; default 1 Mb to skip the
                               # telomere-/repeat-dominated 0..1Mb prefix of chr10 that
                               # has near-zero universal-MAF coverage
@@ -94,7 +97,7 @@ DRY_RUN=0
 WAIT=1                        # block driver until SLURM finishes; --no-wait to detach
 TAFFY="${TAFFY:-$(command -v taffy || true)}"
 HAL2MAF="${HAL2MAF:-$(command -v hal2maf || true)}"
-BIGBED2BED="${BIGBED2BED:-$(command -v bigBedToBed || true)}"
+BIGMAF2MAF="${BIGMAF2MAF:-$(command -v bigMafToMaf || true)}"
 
 usage() {
     cat >&2 <<EOF
@@ -110,7 +113,7 @@ Required (at least one of -u / --uniTaf must be set):
                 be combined to bench both .tui formats side by side.
   -m FILE       hg38-anchored MAF (.maf.gz with .tai sibling)
   -H FILE       HAL file (for hal2maf)
-  -b FILE       BigBed (for bigBedToBed)
+  -b FILE       bigMaf .bb (for bigMafToMaf)
   -o DIR        Output directory
 
 Optional:
@@ -124,7 +127,7 @@ Optional:
   --refChrom NAME   taffy view -r prefix (default $REF_CHROM)
   --halGenome NAME  hal2maf --refGenome (default $HAL_GENOME)
   --halSeq NAME     hal2maf --refSequence (default $HAL_SEQ)
-  --bbChrom NAME    bigBedToBed chrom (default $BB_CHROM)
+  --bbChrom NAME    bigMafToMaf chrom (default $BB_CHROM)
   --start INT       Start coord of the queried region (default $START).
                     Each ladder cell N becomes \`REF_CHROM:START-(START+N)\`.
                     Default 1 Mb skips the 0..1Mb chr10 prefix which is
@@ -166,7 +169,7 @@ Optional:
   --dry-run     Print sbatch; do not submit
   -h            Help
 
-Override binary paths via env: TAFFY, HAL2MAF, BIGBED2BED
+Override binary paths via env: TAFFY, HAL2MAF, BIGMAF2MAF
 EOF
     exit "${1:-0}"
 }
@@ -213,7 +216,7 @@ done
 }
 [[ -n "$TAFFY"      ]] || { echo "ERROR: taffy not on PATH (set \$TAFFY)" >&2; exit 1; }
 [[ -n "$HAL2MAF"    ]] || { echo "WARN: hal2maf not found; that tool will be skipped" >&2; }
-[[ -n "$BIGBED2BED" ]] || { echo "WARN: bigBedToBed not found; that tool will be skipped" >&2; }
+[[ -n "$BIGMAF2MAF" ]] || { echo "WARN: bigMafToMaf not found; that tool will be skipped" >&2; }
 if [[ -n "$UNI" ]]; then
     [[ -f "$UNI"        ]] || { echo "ERROR: $UNI not found" >&2; exit 1; }
     [[ -f "${UNI}.tui"  ]] || { echo "ERROR: $UNI has no .tui sibling" >&2; exit 1; }
@@ -263,12 +266,12 @@ mkdir -p "$OUTDIR" "$OUTDIR/logs"
 echo ">> output dir:    $OUTDIR"
 echo ">> taffy:         $TAFFY"
 echo ">> hal2maf:       ${HAL2MAF:-(skip)}"
-echo ">> bigBedToBed:   ${BIGBED2BED:-(skip)}"
+echo ">> bigMafToMaf:   ${BIGMAF2MAF:-(skip)}"
 [[ -n "$UNI"     ]] && echo ">> uni MAF:       $UNI  (+.tui)"
 [[ -n "$UNI_TAF" ]] && echo ">> uni TAF:       $UNI_TAF  (+.tui)"
 echo ">> hg38 MAF:      $HG38 (+.tai)"
 echo ">> HAL:           $HAL"
-echo ">> BigBed:        $BB"
+echo ">> bigMaf:        $BB"
 echo ">> ref chrom:     $REF_CHROM (hal $HAL_GENOME / $HAL_SEQ, bb $BB_CHROM)"
 echo ">> start:         $START bp"
 echo ">> max size:      $MAX_SIZE bp  (query range = [start, start+N))"
@@ -345,7 +348,7 @@ NO_NORM=$NO_NORM
 STAGE_LOCAL=$STAGE_LOCAL
 TAFFY="$TAFFY"
 HAL2MAF="$HAL2MAF"
-BIGBED2BED="$BIGBED2BED"
+BIGMAF2MAF="$BIGMAF2MAF"
 SIZES=( ${SIZES[*]} )
 
 BENCH_TSV="\$OUTDIR/bench.tsv"
@@ -539,13 +542,13 @@ for N in "\${SIZES[@]}"; do
         rowfiles["\${prefix}_maf_norm"]="\$LOGDIR/row_\${prefix}_maf_norm_\${N}.tsv"
         acquire_slot \$TAFFY_T
         ( run_cell "\${prefix}_maf"      "\$N" "\$TIME_BUDGET" \\
-            "\$TAFFY" view -i "\$input" -r "\$region" -U query -m -T "\$TAFFY_T" \\
+            "\$TAFFY" view -i "\$input" -r "\$region" -U query --noAncestors -m -T "\$TAFFY_T" \\
           ) > "\${rowfiles[\${prefix}_maf]}" &
         pids[\${prefix}_maf]=\$!; register_pid \$! \$TAFFY_T
         if [[ "\$NO_NORM" -eq 0 ]]; then
         acquire_slot \$TAFFY_NORM_T
         ( run_cell "\${prefix}_maf_norm" "\$N" "\$TIME_BUDGET" \\
-            sh -c '"\$1" view -i "\$2" -r "\$3" -U query -T "\$4" -m | "\$1" norm -k' \\
+            sh -c '"\$1" view -i "\$2" -r "\$3" -U query --noAncestors -T "\$4" -m | "\$1" norm -k' \\
             _ "\$TAFFY" "\$input" "\$region" "\$TAFFY_T" \\
           ) > "\${rowfiles[\${prefix}_maf_norm]}" &
         pids[\${prefix}_maf_norm]=\$!; register_pid \$! \$TAFFY_NORM_T
@@ -556,13 +559,13 @@ for N in "\${SIZES[@]}"; do
             rowfiles["\${prefix}_taf_norm"]="\$LOGDIR/row_\${prefix}_taf_norm_\${N}.tsv"
             acquire_slot \$TAFFY_T
             ( run_cell "\${prefix}_taf"      "\$N" "\$TIME_BUDGET" \\
-                "\$TAFFY" view -i "\$input" -r "\$region" -U query -T "\$TAFFY_T" \\
+                "\$TAFFY" view -i "\$input" -r "\$region" -U query --noAncestors -T "\$TAFFY_T" \\
               ) > "\${rowfiles[\${prefix}_taf]}" &
             pids[\${prefix}_taf]=\$!; register_pid \$! \$TAFFY_T
             if [[ "\$NO_NORM" -eq 0 ]]; then
             acquire_slot \$TAFFY_NORM_T
             ( run_cell "\${prefix}_taf_norm" "\$N" "\$TIME_BUDGET" \\
-                sh -c '"\$1" view -i "\$2" -r "\$3" -U query -T "\$4" -m | "\$1" norm' \\
+                sh -c '"\$1" view -i "\$2" -r "\$3" -U query --noAncestors -T "\$4" -m | "\$1" norm' \\
                 _ "\$TAFFY" "\$input" "\$region" "\$TAFFY_T" \\
               ) > "\${rowfiles[\${prefix}_taf_norm]}" &
             pids[\${prefix}_taf_norm]=\$!; register_pid \$! \$TAFFY_NORM_T
@@ -611,14 +614,14 @@ for N in "\${SIZES[@]}"; do
         echo "   (hal skipped at N=\$N > halMaxSize=\$HAL_MAX_SIZE)" >&2
     fi
 
-    # bb: bigBedToBed (if installed).  Uses the flag-based CLI
-    # (-chrom=/-start=/-end=) which is what every UCSC build since ~2015
-    # has shipped; the positional "chrom start end" form some older
-    # builds had isn't there in v1 (kent/src/utils/bigBedToBed.c).
-    if [[ -n "\$BIGBED2BED" ]]; then
+    # bb: bigMafToMaf (if installed) -- reconstructs MAF from the bigMaf so it
+    # emits hg38-anchored MAF like every other cell (not bigBed-BED).  Same
+    # flag-based region CLI as bigBedToBed (-chrom=/-start=/-end=, 0-based);
+    # writes MAF to "stdout" (UCSC mustOpen special-cases the name).
+    if [[ -n "\$BIGMAF2MAF" ]]; then
         acquire_slot 1
         ( run_cell bb "\$N" "\$TIME_BUDGET" \\
-            "\$BIGBED2BED" -chrom="\$BB_CHROM" -start="\$START" -end="\$END" "\$BB" stdout \\
+            "\$BIGMAF2MAF" -chrom="\$BB_CHROM" -start="\$START" -end="\$END" "\$BB" stdout \\
           ) > "\${rowfiles[bb]}" &
         pids[bb]=\$!; register_pid \$! 1
     fi
@@ -647,7 +650,7 @@ cat > "$PLOT" <<'PY'
 
 Timed-out cells get a hollow 'X' at the budget value -- communicates
 "killed at budget" instead of silently dropping the point.  Cells with
-non-zero exit and zero output (bigBedToBed range failures at large N)
+non-zero exit and zero output (bigMafToMaf range failures at large N)
 are dropped: they are not real measurements.
 """
 import csv, sys, os
@@ -704,7 +707,7 @@ for tool in tools:
         if r["timed_out"]:
             to_x.append(x); to_w.append(w)
         elif r["exit"] != 0 or (r["out_bytes"] == 0 and x > 0):
-            # bigBedToBed range fail / other no-output -- not a measurement.
+            # bigMafToMaf range fail / other no-output -- not a measurement.
             continue
         else:
             ok_x.append(x); ok_w.append(w); ok_r.append(m)
