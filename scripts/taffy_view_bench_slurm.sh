@@ -78,6 +78,7 @@ HAL_MAX_SIZE=""               # --halMaxSize: skip (DO NOT LAUNCH) the hal2maf c
                               # any ladder size > this (bp).  Empty = no cap (hal runs the
                               # whole ladder).  The HAL has no LOD, so a whole-chrom hal2maf
                               # would burn hours; capping skips it rather than run-then-timeout.
+NO_NORM=0                     # --no-norm: skip the _norm cells (taffy view | taffy norm merge)
 MAF_ONLY=0                    # --mafOnly: emit MAF from every tool -- skip the TAF-output
                               # cells (_taf, _taf_norm, tai_taf), keep tui _maf / _maf_norm,
                               # tai_maf, hal2maf, bb.  Apples-to-apples MAF-extraction compare.
@@ -188,6 +189,7 @@ while [[ $# -gt 0 ]]; do
         --maxSize)      MAX_SIZE="$2"; shift 2;;
         --halMaxSize)   HAL_MAX_SIZE="$2"; shift 2;;
         --mafOnly)      MAF_ONLY=1; shift;;
+        --no-norm)      NO_NORM=1; shift;;
         --timeBudget)    TIME_BUDGET="$2"; shift 2;;
         --halTimeBudget) HAL_TIME_BUDGET="$2"; shift 2;;
         --time)             SBATCH_TIME="$2"; shift 2;;
@@ -339,6 +341,7 @@ TIME_BUDGET=$TIME_BUDGET
 HAL_TIME_BUDGET=${HAL_TIME_BUDGET:-$TIME_BUDGET}
 HAL_MAX_SIZE="$HAL_MAX_SIZE"
 MAF_ONLY=$MAF_ONLY
+NO_NORM=$NO_NORM
 STAGE_LOCAL=$STAGE_LOCAL
 TAFFY="$TAFFY"
 HAL2MAF="$HAL2MAF"
@@ -539,12 +542,14 @@ for N in "\${SIZES[@]}"; do
             "\$TAFFY" view -i "\$input" -r "\$region" -U query -m -T "\$TAFFY_T" \\
           ) > "\${rowfiles[\${prefix}_maf]}" &
         pids[\${prefix}_maf]=\$!; register_pid \$! \$TAFFY_T
+        if [[ "\$NO_NORM" -eq 0 ]]; then
         acquire_slot \$TAFFY_NORM_T
         ( run_cell "\${prefix}_maf_norm" "\$N" "\$TIME_BUDGET" \\
             sh -c '"\$1" view -i "\$2" -r "\$3" -U query -T "\$4" -m | "\$1" norm -k' \\
             _ "\$TAFFY" "\$input" "\$region" "\$TAFFY_T" \\
           ) > "\${rowfiles[\${prefix}_maf_norm]}" &
         pids[\${prefix}_maf_norm]=\$!; register_pid \$! \$TAFFY_NORM_T
+        fi
         # TAF-output cells: skipped under --mafOnly.
         if [[ "\$MAF_ONLY" -eq 0 ]]; then
             rowfiles["\${prefix}_taf"]="\$LOGDIR/row_\${prefix}_taf_\${N}.tsv"
@@ -554,12 +559,14 @@ for N in "\${SIZES[@]}"; do
                 "\$TAFFY" view -i "\$input" -r "\$region" -U query -T "\$TAFFY_T" \\
               ) > "\${rowfiles[\${prefix}_taf]}" &
             pids[\${prefix}_taf]=\$!; register_pid \$! \$TAFFY_T
+            if [[ "\$NO_NORM" -eq 0 ]]; then
             acquire_slot \$TAFFY_NORM_T
             ( run_cell "\${prefix}_taf_norm" "\$N" "\$TIME_BUDGET" \\
                 sh -c '"\$1" view -i "\$2" -r "\$3" -U query -T "\$4" -m | "\$1" norm' \\
                 _ "\$TAFFY" "\$input" "\$region" "\$TAFFY_T" \\
               ) > "\${rowfiles[\${prefix}_taf_norm]}" &
             pids[\${prefix}_taf_norm]=\$!; register_pid \$! \$TAFFY_NORM_T
+            fi
         fi
     }
 

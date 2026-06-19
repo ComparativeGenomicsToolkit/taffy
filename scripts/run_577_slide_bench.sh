@@ -98,6 +98,7 @@ HAL_SEQ="chr20"                 # hal2maf --refSequence / bare tChrom
 BB_CHROM="chr20"                # bigBedToBed chrom for #1 (the bigBed = bare UCSC name)
 BLOCKVIZ_CHROM="chr20"          # bare tChrom for #3 (both blockViz tools)
 VIEW_START=1000000              # #1 view window start (skip the chr20 telomere prefix)
+VIEW_NORM=0                     # #1 _norm cells (view|taffy norm): 0=OFF this run, set 1 to re-enable
 
 # -- Ladders / panel knobs --
 VIEW_MAX_SIZE=""                # #1 view --maxSize cap (empty = chrom end from .tai)
@@ -216,6 +217,7 @@ while [[ $# -gt 0 ]]; do
         --bbChrom)        BB_CHROM="$2"; shift 2;;
         --blockvizChrom)  BLOCKVIZ_CHROM="$2"; shift 2;;
         --viewStart)      VIEW_START="$2"; shift 2;;
+        --viewNorm)       VIEW_NORM="$2"; shift 2;;
         --viewMaxSize)    VIEW_MAX_SIZE="$2"; shift 2;;
         --blockvizSizes)  BLOCKVIZ_SIZES="$2"; shift 2;;
         --liftSizes)      LIFT_SIZES="$2"; shift 2;;
@@ -345,6 +347,7 @@ if [[ "$DO_1" -eq 1 ]]; then
         --time "$SBATCH_TIME" --mem "$SBATCH_MEM" )
     [[ -n "$HAL_TIME_BUDGET" ]] && V1_FLAGS+=( --halTimeBudget "$HAL_TIME_BUDGET" )
     [[ -n "$VIEW_MAX_SIZE"   ]] && V1_FLAGS+=( --maxSize "$VIEW_MAX_SIZE" )
+    [[ "$VIEW_NORM" -eq 0    ]] && V1_FLAGS+=( --no-norm )   # _norm cells deactivated this run
     run_driver env TAFFY="$TAFFY" bash "$VIEW_DRV" "${V1_FLAGS[@]}" "${COMMON_FLAGS[@]}"
     echo ">> #1: ${#V1_SRC[@]}-source MAF extraction (maf.tui${BASE_TUI_TAF:+ + taf.tui}) all -> MAF; hal2maf capped at --halMaxSize=$HAL_MAX_SIZE; taffy/tai/bb full ladder" >&2
 fi
