@@ -102,7 +102,7 @@ VIEW_START=1000000              # #1 view window start (skip the chr20 telomere 
 # -- Ladders / panel knobs --
 VIEW_MAX_SIZE=""                # #1 view --maxSize cap (empty = chrom end from .tai)
 BLOCKVIZ_SIZES="1000,100000,500000,1000000,10000000,64000000"   # #3 ladder: 1k 100k 500k 1M 10M whole-chr20
-LIFT_SIZES="1000,100000,1000000"     # #2 + #4 interval-size ladder
+LIFT_SIZES="1000,100000,1000000,10000000"   # #2 + #4 interval-size ladder (1k 100k 1M 10M; --fast makes 10M tractable)
 LIFT_N_INTERVALS=100            # #2 + #4 random intervals per (species,size) cell
 HAL_MAX_SIZE=500000             # the cap: hal tools skipped above this (bp) in #1/#2/#3
 
