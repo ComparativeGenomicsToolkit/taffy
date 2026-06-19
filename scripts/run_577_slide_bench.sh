@@ -102,7 +102,8 @@ VIEW_START=1000000              # #1 view window start (skip the chr20 telomere 
 # -- Ladders / panel knobs --
 VIEW_MAX_SIZE=""                # #1 view --maxSize cap (empty = chrom end from .tai)
 BLOCKVIZ_SIZES="1000,100000,500000,1000000,10000000,64000000"   # #3 ladder: 1k 100k 500k 1M 10M whole-chr20
-LIFT_SIZES="1000,100000,1000000,10000000"   # #2 + #4 interval-size ladder (1k 100k 1M 10M; --fast makes 10M tractable)
+LIFT_SIZES="1000,100000,1000000,10000000"   # #4 (chained tui --fast vs liftOver) ladder (1k 100k 1M 10M)
+LIFT_PERCOL_SIZES="1000,100000,500000"      # #2 (full tui per-column: hal vs tui) small base-level ladder (<=500kb)
 LIFT_N_INTERVALS=100            # #2 + #4 random intervals per (species,size) cell
 HAL_MAX_SIZE=500000             # the cap: hal tools skipped above this (bp) in #1/#2/#3
 
@@ -349,13 +350,13 @@ if [[ "$DO_1" -eq 1 ]]; then
 fi
 
 # ======================================================================
-# #2 -- base liftover: taffy lift on the BASE .tui vs halLiftover.
-#       size x species matrix; halLiftover is per (species,size).
-#       ONE pass over the full LIFT_SIZES ladder; the lift driver caps
-#       halLiftover NATIVELY via --halMaxSize (the halLiftover cell is
-#       simply not launched for sizes above the cap, taffy/liftOver run
-#       the full ladder).  No two-pass split -- the old split re-copied
-#       the 98 GB .tui for nothing.
+# #2 -- base-level lift: hal vs tui (FULL .tui, PER-COLUMN path), no liftOver.
+#       The apples-to-apples base-resolution head-to-head -- halLiftover and
+#       taffy lift both emit every aligned segment.  --column-walk runs the
+#       per-column O(columns) path (the analog of hal's per-base walk);
+#       --no-liftover drops the chain-block tool (that's the broad #4 baseline,
+#       not base-level).  Small ladder (LIFT_PERCOL_SIZES, <=500kb) where both
+#       per-column taffy and halLiftover are feasible; hal capped via --halMaxSize.
 # ======================================================================
 if [[ "$DO_2" -eq 1 ]]; then
     O2="$OUTROOT/cmp2_baselift"
@@ -365,11 +366,11 @@ if [[ "$DO_2" -eq 1 ]]; then
     done
     run_driver env TAFFY="$TAFFY" bash "$LIFT_DRV" "${BASE_SRC_FLAG[@]}" \
         -H "$HAL" -c "$CHAINS_DIR" -t "$TREE" -o "$O2" \
-        -r "$REF" -L "$PANEL" -S "$LIFT_SIZES" -N "$LIFT_N_INTERVALS" \
-        --halMaxSize "$HAL_MAX_SIZE" \
+        -r "$REF" -L "$PANEL" -S "$LIFT_PERCOL_SIZES" -N "$LIFT_N_INTERVALS" \
+        --column-walk --no-liftover --halMaxSize "$HAL_MAX_SIZE" \
         -T "$T_TOTAL" --timeBudget "$TIME_BUDGET" \
         --time "$SBATCH_TIME" --mem "$SBATCH_MEM" "${COMMON_FLAGS[@]}"
-    echo ">> #2 single pass into $O2 (-S '$LIFT_SIZES'); halLiftover capped natively at --halMaxSize=$HAL_MAX_SIZE; taffy/liftOver full ladder" >&2
+    echo ">> #2 base-level: hal vs tui (full tui, per-column) into $O2 (-S '$LIFT_PERCOL_SIZES'); no liftOver; halLiftover <= --halMaxSize=$HAL_MAX_SIZE" >&2
 fi
 
 # ======================================================================

@@ -63,6 +63,9 @@ MAX_GAPS_CSV=""                     # --maxGap CSV: e.g. "0,1000,10000".  Empty 
 FAST_MODE=0                         # default lift is --fast (chunk-iteration); --fast flag now only
                                     # adds a redundant explicit _fast variant + enables --bin cells.
 NO_HAL=0                            # --no-hal: skip halLiftover cells (taffy + liftOver only)
+NO_LIFTOVER=0                       # --no-liftover: skip UCSC liftOver cells (taffy + hal only)
+COL_WALK=0                          # --column-walk: taffy lift via per-column O(columns) path
+                                    # (not --fast); for the base-level hal-vs-tui comparison
 HAL_MAX_SIZE=""                     # --halMaxSize: skip (DO NOT LAUNCH) the halLiftover cell
                                     # for any (species,size) where size > this (bp).  Empty =
                                     # no cap (halLiftover runs the full ladder).  The HAL has
@@ -220,6 +223,8 @@ while [[ $# -gt 0 ]]; do
         --maxGap)       MAX_GAPS_CSV="$2"; shift 2;;
         --fast)         FAST_MODE=1; shift;;
         --no-hal)       NO_HAL=1; shift;;
+        --no-liftover)  NO_LIFTOVER=1; shift;;
+        --column-walk)  COL_WALK=1; shift;;
         --halMaxSize)   HAL_MAX_SIZE="$2"; shift 2;;
         --bin)          BIN_SIZES_CSV="$2"; shift 2;;
         --threadsPerCell) THREADS_PER_CELL_CSV="$2"; shift 2;;
@@ -247,7 +252,9 @@ fi
     echo "ERROR: at least one of -u / --uniTaf must be set" >&2; usage 1;
 }
 [[ -n "$TAFFY"       ]] || { echo "ERROR: taffy not on PATH (set \$TAFFY)" >&2; exit 1; }
-[[ -n "$LIFTOVER"    ]] || { echo "ERROR: liftOver not on PATH (set \$LIFTOVER)" >&2; exit 1; }
+if [[ "$NO_LIFTOVER" -eq 0 ]]; then
+    [[ -n "$LIFTOVER"    ]] || { echo "ERROR: liftOver not on PATH (set \$LIFTOVER, or pass --no-liftover)" >&2; exit 1; }
+fi
 if [[ "$NO_HAL" -eq 0 ]]; then
     [[ -n "$HALLIFTOVER" ]] || { echo "ERROR: halLiftover not on PATH (set \$HALLIFTOVER, or pass --no-hal)" >&2; exit 1; }
 fi
@@ -537,6 +544,8 @@ SIZES=( ${SIZE_ARR[*]} )
 MAX_GAPS=( ${MAX_GAPS_ARR[*]} )
 FAST_MODE=$FAST_MODE
 NO_HAL=$NO_HAL
+NO_LIFTOVER=$NO_LIFTOVER
+COL_WALK=$COL_WALK
 HAL_MAX_SIZE="$HAL_MAX_SIZE"
 BIN_SIZES=( ${BIN_SIZES_ARR[*]:-} )
 THREADS_PER_CELL=( ${THREADS_PER_CELL_ARR[*]} )
@@ -722,7 +731,8 @@ for N in "\${SIZES[@]}"; do
         [[ -n "\$sid" ]] || continue
         chain="\$CHAINS_DIR/\${REF}_vs_\${sid}.chain.gz"
 
-        # ---- liftover cell ----
+        # ---- liftover cell (skipped under --no-liftover) ----
+        if [[ "\$NO_LIFTOVER" -eq 0 ]]; then
         stem_lo="liftover_\${sid}_\${N}"
         rowfiles[\$stem_lo]="\$LOGDIR/row_\${stem_lo}.tsv"
         out_lo="\$LOGDIR/mapped_\${stem_lo}.bed"
@@ -746,6 +756,7 @@ for N in "\${SIZES[@]}"; do
             "\$LIFTOVER" -minMatch=0.1 -multiple "\$BED_NATIVE" "\$chain" "\$out_lo" "\$unm_lo" \\
           ) > "\${rowfiles[\$stem_lo]}" &
         pids[\$stem_lo]=\$!; register_pid \$! 1
+        fi
 
         # ---- halLiftover cell ---- (skipped when --no-hal, or when the
         # --halMaxSize cap is set and N exceeds it).  The HAL has no LOD,
@@ -791,9 +802,11 @@ for N in "\${SIZES[@]}"; do
                     ftag="_fast"; ffl=( --fast )
                 else
                     # Default lift is --fast (chunk-iteration, O(runs); 10-1000x
-                    # faster than per-column, output equiv. modulo merge order).
-                    # Matches lift-chicken-quail (which used taffy lift -F).
-                    ftag=""; ffl=( --fast )
+                    # faster than per-column, output equiv. modulo merge order),
+                    # UNLESS --column-walk: then the per-column O(columns) path
+                    # (base-level hal-vs-tui comparison; same output, slower).
+                    ftag=""
+                    if [[ "\$COL_WALK" -eq 1 ]]; then ffl=(); else ffl=( --fast ); fi
                 fi
                 for THREADS in "\${THREADS_PER_CELL[@]}"; do
                     tt="\$(ttag \$THREADS)"
