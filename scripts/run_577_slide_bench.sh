@@ -391,6 +391,11 @@ if [[ "$DO_3" -eq 1 ]]; then
         --start 0 --maxOutputBlocks "$MAX_OUTPUT_BLOCKS" \
         -o "$O3" -T "$T_TOTAL" --timeBudget "$TIME_BUDGET" \
         --time "$SBATCH_TIME" --mem "$SBATCH_MEM" "${COMMON_FLAGS[@]}"
+    # blockViz has no --tree of its own; drop the tree into the cmp3 dir so
+    # plot.py can label the panel's nearest/most-distant target (else it just
+    # prints the genome count).
+    [[ -n "$TREE" && -r "$TREE" ]] && cp -f "$TREE" "$O3/tree.nwk" 2>/dev/null \
+        && echo ">> #3 tree -> $O3/tree.nwk (for plot.py panel annotation)" >&2
 fi
 
 # ======================================================================

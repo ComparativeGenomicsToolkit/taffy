@@ -495,7 +495,73 @@ present = {r["tool"] for r in rows}
 tools = [t for t in order if t in present] + sorted(present - set(order))
 
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
-fig.subplots_adjust(left=0.06, right=0.97, top=0.90, bottom=0.12, wspace=0.22)
+fig.subplots_adjust(left=0.06, right=0.97, top=0.85, bottom=0.12, wspace=0.22)
+
+# --- Panel annotation: N genomes (+ nearest/most-distant by divergence if a
+# tree is available via TREE= in bench.sh, $TREE_NWK, or ./tree.nwk). ---
+panel = {(r["genome_id"], r["common_name"]) for r in rows}
+n_genomes = len({g for g, _ in panel})
+panel_note = f"panel: {n_genomes} genomes"
+try:
+    import re
+    tref, tpath = None, None
+    with open(os.path.join(bench_dir, "bench.sh")) as _f:
+        for _l in _f:
+            m = re.match(r'^TSPECIES="([^"]+)"', _l.strip())
+            if m: tref = m.group(1)
+            m = re.match(r'^TREE="([^"]+)"', _l.strip())
+            if m: tpath = m.group(1)
+    tpath = tpath or os.environ.get("TREE_NWK") or os.path.join(bench_dir, "tree.nwk")
+    if tref and tpath and os.path.exists(tpath):
+        _t = open(tpath).read().strip().rstrip(';'); _i = [0]
+        def _clade():
+            ch = []
+            if _t[_i[0]] == '(':
+                _i[0] += 1
+                while True:
+                    ch.append(_clade())
+                    if _t[_i[0]] == ',': _i[0] += 1
+                    elif _t[_i[0]] == ')': _i[0] += 1; break
+            j = _i[0]
+            while j < len(_t) and _t[j] not in '(),:;': j += 1
+            nm = _t[_i[0]:j]; _i[0] = j; bl = 0.0
+            if _i[0] < len(_t) and _t[_i[0]] == ':':
+                _i[0] += 1; k = _i[0]
+                while k < len(_t) and _t[k] not in '(),;': k += 1
+                bl = float(_t[_i[0]:k]); _i[0] = k
+            return (nm, bl, ch)
+        _root = _clade(); _par = {}; _name2id = {}; _nid = [0]
+        def _ann(nd, p=None):
+            n = _nid[0]; _nid[0] += 1; nm, bl, ch = nd; _par[n] = (p, bl)
+            if not ch: _name2id[nm] = n
+            for c in ch: _ann(c, n)
+        _ann(_root)
+        def _rp(x):
+            o = []; cur = x; cum = 0.0
+            while True:
+                o.append((cur, cum)); p, bl = _par[cur]
+                if p is None: break
+                cur = p; cum += bl
+            return o
+        def _dist(a, b):
+            pa = {n: c for n, c in _rp(a)}
+            for n, c in _rp(b):
+                if n in pa: return pa[n] + c
+            return None
+        if tref in _name2id:
+            divs = []
+            for g, cn in panel:
+                if g in _name2id:
+                    d = _dist(_name2id[tref], _name2id[g])
+                    if d is not None: divs.append((d, cn))
+            divs.sort()
+            if divs:
+                panel_note = (f"{n_genomes} genomes, ref {tref}    |    "
+                              f"nearest: {divs[0][1]} ({divs[0][0]:.3f})    |    "
+                              f"most distant: {divs[-1][1]} ({divs[-1][0]:.3f})  subs/site")
+except Exception:
+    pass
+fig.suptitle(panel_note, fontsize=11, y=0.965)
 
 def agg(tool, field):
     """size -> (mean, lo, hi) over species for completed (non-timed-out,
@@ -547,6 +613,7 @@ if hal_max_run > 0:
         ax.text(hal_max_run, ymax, " halBlockViz cap\n (no LOD)",
                 color="#d62728", fontsize=8, va="top", ha="left")
 
+from matplotlib.ticker import LogLocator, FuncFormatter
 for ax, title, ylab in [(ax1, "browser-query wall time (mean over panel)", "seconds"),
                         (ax2, "peak RSS (mean over panel)", "MB")]:
     ax.set_xscale("log")
@@ -555,6 +622,11 @@ for ax, title, ylab in [(ax1, "browser-query wall time (mean over panel)", "seco
     ax.set_ylabel(ylab)
     ax.set_title(title)
     ax.grid(True, which="both", alpha=0.3)
+    # Label the 2/3/5 minor ticks so the top of the range (peaks land between
+    # decades) is readable.
+    ax.yaxis.set_minor_locator(LogLocator(base=10.0, subs=(2, 3, 5), numticks=20))
+    ax.yaxis.set_minor_formatter(FuncFormatter(lambda y, _: f"{y:g}"))
+    ax.tick_params(axis="y", which="minor", labelsize=7)
     ax.legend(fontsize=9)
 
 out = os.path.join(bench_dir, "bench.png")
