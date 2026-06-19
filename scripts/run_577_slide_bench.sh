@@ -110,11 +110,11 @@ HAL_MAX_SIZE=100000             # the cap: hal tools skipped above this (bp) in 
 T_TOTAL=32
 TIME_BUDGET=3600
 HAL_TIME_BUDGET=600            # tighter per-cell cap just for hal2maf in #1 (empty = TIME_BUDGET)
-SBATCH_TIME=24
-SBATCH_MEM=48
+SBATCH_TIME=240               # 10 days (240h -> --time=240:00:00); long unattended run
+SBATCH_MEM=512                # generous headroom: 32 concurrent cells, liftOver ~2-4 GB ea
 TMP_GB=""
 MAX_OUTPUT_BLOCKS=500           # #3 taffyBlockViz --maxOutputBlocks
-PARTITION=""
+PARTITION="long"
 ACCOUNT=""
 OUTROOT="$PWD/577_slide_bench"  # parent of the four per-comparison OUTDIRs
 
