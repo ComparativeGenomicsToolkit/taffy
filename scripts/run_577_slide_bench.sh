@@ -106,12 +106,19 @@ BLOCKVIZ_SIZES="1000,100000,500000,1000000,10000000,64000000"   # #3 ladder: 1k 
 LIFT_SIZES="1000,100000,1000000,10000000"   # #4 (chained tui --fast vs liftOver) ladder (1k 100k 1M 10M)
 LIFT_PERCOL_SIZES="1000,100000,1000000"     # #2 (full tui per-column: hal vs tui) base-level ladder (1k 100k 1M)
 LIFT_N_INTERVALS=100            # #2 + #4 random intervals per (species,size) cell
-HAL_MAX_SIZE=500000             # the cap: hal tools skipped above this (bp) in #1/#2/#3
+HAL_MAX_SIZE=10000000           # the cap: hal tools skipped above this (bp) in #1/#3/#5.  Raised
+                                # 500k -> 10M so hal2maf reaches 1M/10M (a few more data points);
+                                # HAL_TIME_BUDGET governs whether the big ones complete vs time out.
+# -- #5 random-sample view bench --
+VIEW_SAMPLE_SIZES="1000,100000,1000000,5000000,10000000"  # #5 sizes (bp)
+VIEW_SAMPLE_N=10                # #5 random genome-wide regions per size
+VIEW_SAMPLE_SEED=20260620       # #5 RNG seed (reproducible; same regions for every tool)
 
 # -- SLURM / runtime --
 T_TOTAL=32
 TIME_BUDGET=3600
-HAL_TIME_BUDGET=600            # tighter per-cell cap just for hal2maf in #1 (empty = TIME_BUDGET)
+HAL_TIME_BUDGET=3000          # per-cell cap for hal2maf in #1/#5 (was 600).  Raised so hal2maf
+                              # at 1M (~4min) and 10M (~40min) can complete; bigger ones time out.
 SBATCH_TIME=240               # 10 days (240h -> --time=240:00:00); long unattended run
 SBATCH_MEM=512                # generous headroom: 32 concurrent cells, liftOver ~2-4 GB ea
 TMP_GB=""
@@ -121,7 +128,7 @@ ACCOUNT=""
 OUTROOT="$PWD/577_slide_bench"  # parent of the four per-comparison OUTDIRs
 
 # -- Which comparisons to run (all on by default) --
-DO_1=1; DO_2=1; DO_3=1; DO_4=1
+DO_1=1; DO_2=1; DO_3=1; DO_4=1; DO_5=1
 
 # -- Mode --
 SUBMIT=0                        # default DRY-RUN; --submit lets each driver actually sbatch
@@ -157,7 +164,8 @@ run_577_slide_bench.sh -- drive all four 577-way / hg38 slide comparisons
                     the network instead of copying them to local scratch.
                     Skips the big stage-in (fast functional smoke), but the
                     timings go disk-bound -- not for the real measurement run.
-  --only LIST       Comma list of comparisons to run: 1,2,3,4 (default all).
+  --only LIST       Comma list of comparisons to run: 1,2,3,4,5 (default all).
+                    5 = cmp5_view_sample (random genome-wide view bench).
   -o DIR            Output root (default $OUTROOT); each comparison gets a
                     subdir cmp1_view / cmp2_baselift / cmp3_blockviz /
                     cmp4_chainlift under it.
@@ -241,12 +249,12 @@ done
 
 # --only N,M,... selects which comparisons run.
 if [[ -n "${ONLY:-}" ]]; then
-    DO_1=0; DO_2=0; DO_3=0; DO_4=0
+    DO_1=0; DO_2=0; DO_3=0; DO_4=0; DO_5=0
     IFS=',' read -r -a _only <<< "$ONLY"
     for c in "${_only[@]}"; do
         case "$c" in
-            1) DO_1=1;; 2) DO_2=1;; 3) DO_3=1;; 4) DO_4=1;;
-            *) echo "ERROR: --only takes 1..4 (got '$c')" >&2; exit 1;;
+            1) DO_1=1;; 2) DO_2=1;; 3) DO_3=1;; 4) DO_4=1;; 5) DO_5=1;;
+            *) echo "ERROR: --only takes 1..5 (got '$c')" >&2; exit 1;;
         esac
     done
 fi
@@ -258,6 +266,8 @@ if [[ "$TEST" -eq 1 ]]; then
                                 # 1-100kb queries read fine straight off the shared FS
     BLOCKVIZ_SIZES="1000,100000"
     LIFT_SIZES="1000,100000"
+    VIEW_SAMPLE_SIZES="1000,100000"   # #5 smoke: 2 small sizes
+    VIEW_SAMPLE_N=2                    # #5 smoke: 2 random regions per size
     VIEW_MAX_SIZE=100000        # cap #1's view ladder for the smoke (else it runs the
                                 # whole-chrom log-decade ladder + needs the chrom length)
     LIFT_N_INTERVALS=5
@@ -287,7 +297,8 @@ fi
 VIEW_DRV="$HERE/taffy_view_bench_slurm.sh"
 LIFT_DRV="$HERE/taffy_lift_bench_slurm.sh"
 BLOCKVIZ_DRV="$HERE/taffy_blockviz_bench_slurm.sh"
-for d in "$VIEW_DRV" "$LIFT_DRV" "$BLOCKVIZ_DRV"; do
+SAMPLE_DRV="$HERE/taffy_view_sample_bench_slurm.sh"
+for d in "$VIEW_DRV" "$LIFT_DRV" "$BLOCKVIZ_DRV" "$SAMPLE_DRV"; do
     [[ -f "$d" ]] || { echo "ERROR: driver not found: $d" >&2; exit 1; }
 done
 
@@ -440,6 +451,37 @@ if [[ "$DO_4" -eq 1 ]]; then
         -r "$REF" -L "$PANEL" -S "$LIFT_SIZES" -N "$LIFT_N_INTERVALS" \
         --no-hal -T "$T_TOTAL" --timeBudget "$TIME_BUDGET" \
         --time "$SBATCH_TIME" --mem "$SBATCH_MEM" "${COMMON_FLAGS[@]}"
+fi
+
+# ======================================================================
+# #5 -- random-sample view bench: N random genome-wide hg38 regions per size,
+#       mean+range over the samples (blockViz-style).  Four tools, SAME regions,
+#       all -> hg38-anchored leaf MAF: taf.tui / tai / hal2maf / bigMafToMaf.
+#       Complements #1 (fixed-location log-decade ladder) with a representative,
+#       error-barred view at a few interesting sizes.  Reuses the same inputs;
+#       hal2maf pushed to --halMaxSize (10M) so it appears at the bigger sizes.
+# ======================================================================
+if [[ "$DO_5" -eq 1 ]]; then
+    O5="$OUTROOT/cmp5_view_sample"
+    # taf.tui preferred (the user's "taf tui view"); fall back to the maf-backed
+    # universal if only that was supplied.
+    V5_SRC=""
+    if   [[ -n "$BASE_TUI_TAF" ]]; then V5_SRC="$BASE_TUI_TAF"
+    elif [[ -n "$BASE_TUI_MAF" ]]; then V5_SRC="$BASE_TUI_MAF"
+    fi
+    [[ -n "$V5_SRC" ]] || { echo "ERROR(#5): need --baseTuiTaf (or --baseTui) for the universal .tui source" >&2; exit 1; }
+    for v in HG38_MAF HAL BIGBED; do
+        [[ -n "${!v}" ]] || { echo "ERROR(#5): missing --$(echo "$v" | tr 'A-Z_' 'a-z')" >&2; exit 1; }
+    done
+    V5_FLAGS=( -u "$V5_SRC" -m "$HG38_MAF" -H "$HAL" -b "$BIGBED" -o "$O5"
+        --refGenome "$HAL_GENOME"
+        --sizes "$VIEW_SAMPLE_SIZES" --nSamples "$VIEW_SAMPLE_N" --seed "$VIEW_SAMPLE_SEED"
+        --halMaxSize "$HAL_MAX_SIZE"
+        -T "$T_TOTAL" --timeBudget "$TIME_BUDGET"
+        --time "$SBATCH_TIME" --mem "$SBATCH_MEM" )
+    [[ -n "$HAL_TIME_BUDGET" ]] && V5_FLAGS+=( --halTimeBudget "$HAL_TIME_BUDGET" )
+    run_driver env TAFFY="$TAFFY" bash "$SAMPLE_DRV" "${V5_FLAGS[@]}" "${COMMON_FLAGS[@]}"
+    echo ">> #5: random-sample view ($VIEW_SAMPLE_N regions/size, sizes $VIEW_SAMPLE_SIZES; taf.tui/tai/hal2maf/bigMafToMaf -> hg38 MAF); hal2maf to --halMaxSize=$HAL_MAX_SIZE" >&2
 fi
 
 echo
