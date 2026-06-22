@@ -17,11 +17,20 @@
 #include "sonLib.h"
 #include <getopt.h>
 #include "chain.h"
+#include "bigWig.h"
 #include <time.h>
 #include <errno.h>
+#include <math.h>
 #include <signal.h>
 #include <unistd.h>
 #include <stdlib.h>
+
+// Universal-column chunk size for the uni<chunk> bigWig axis -- must match
+// taf_gerp.c's GERP_UNI_CHUNK (the column -> (chunk, within) split that keeps
+// each bigWig chrom under the bigWig 2^32 coordinate limit).
+#define GERP_UNI_CHUNK 4000000000LL
+// The bin width our uni<chunk> depth bigWigs use (gerp --bin 1000).
+#define GERP_UNI_BIN 1000LL
 
 static void usage(void) {
     fprintf(stderr, "taffy lift [options]\n");
@@ -31,6 +40,8 @@ static void usage(void) {
     fprintf(stderr, "-b --bed       [FILE_NAME] : Input BED3+ in ancestor row-0 coords (chrom = full genome.sequence).  Exactly one of -w / -b is required.\n");
     fprintf(stderr, "-g --genome    [STRING]    : REQUIRED Target genome name (e.g. hg38)\n");
     fprintf(stderr, "-o --outputFile [FILE_NAME] : Output (wig if input was wig, BED if input was BED; default stdout)\n");
+    fprintf(stderr, "--bigwig [FILE_NAME]       : QUERY-SHIM mode: read the universal-depth bigWig (uni<chunk> axis) along a target window and emit it in target-genome coords as an N-bp binned bedGraph.  Requires -r and -B; mutually exclusive with -w/-b.  Maps via one tui_query (source=target=the queried genome).\n");
+    fprintf(stderr, "-r --region    [SEQ:S-E]   : (--bigwig mode) Target window genome.sequence:START-END (0-based half-open), e.g. hg38.chr20:1000000-2000000.\n");
     fprintf(stderr, "-m --memCap    [SIZE]      : (wig mode) Max in-memory output buffer before spilling to disk; suffix K/M/G allowed (default 2G).  Env TAFFY_LIFT_BUDGET_MB also honored (CLI wins).\n");
     fprintf(stderr, "-G --maxGap    [INT]       : (bed mode) Merge two adjacent target rows when the gap between them is <= INT bp.  Default 0 (touch / overlap only).  Max 2^60.  The merged interval spans the un-lifted gap region (no UCSC liftOver / halLiftover analogue).  Downstream tools that count target coverage will overcount by up to INT * number-of-merges.\n");
     fprintf(stderr, "-S --minSize   [INT]       : (bed mode) Drop output rows whose target length is < INT bp.  Default 1 (no filter).  Applied AFTER --maxGap so small fragments that would coalesce don't get filtered prematurely; reported in the summary log as 'dropped < --minSize'.\n");
@@ -1597,6 +1608,139 @@ static int bed_lift_main_impl(Tui *tui, TuiGenomeLift *gl,
     return 0;
 }
 
+// taffy lift --bigwig: the universal-summary query shim.  Given a target leaf
+// window G.chrom:[a,b), read the universal depth (a uni<chunk> bigWig keyed on
+// integer universal columns) along that window and emit it in G coordinates,
+// binned to N-bp windows.  Because the queried genome is BOTH the source and
+// the target, ONE tui_query gives the whole map -- each interval carries the
+// column<->G-bp correspondence (t_start/rev) -- so there is no second-genome
+// lift (no tui_genome_lift/visit_runs).  The universal columns are scattered
+// across the whole axis, so depth is fetched per interval (random access).
+static int bigwig_lift_window(Tui *tui, const char *bigwig_file,
+                              const char *target_genome, const char *region,
+                              int64_t bin_size, const char *output_file) {
+    // Parse region "SEQ:START-END" (SEQ = full genome.sequence, e.g. hg38.chr20).
+    char *rcopy = stString_copy(region);
+    char *colon = strrchr(rcopy, ':');
+    if (colon == NULL) {
+        fprintf(stderr, "ERROR: --region must be SEQ:START-END (got '%s')\n", region);
+        free(rcopy); return 1;
+    }
+    *colon = '\0';
+    const char *seq = rcopy;
+    long long la = 0, lb = 0; char extra = 0;
+    if (sscanf(colon + 1, "%lld-%lld%c", &la, &lb, &extra) != 2 || la < 0 || lb < la) {
+        fprintf(stderr, "ERROR: bad --region range '%s' (expected START-END, END>=START>=0)\n",
+                colon + 1);
+        free(rcopy); return 1;
+    }
+    int64_t a = (int64_t)la, b = (int64_t)lb;
+
+    // Output chrom = SEQ with the "target_genome." prefix stripped, so the
+    // bedGraph carries the browser chrom (chr20, not hg38.chr20).
+    const char *out_chrom = seq;
+    size_t glen = strlen(target_genome);
+    if (strncmp(seq, target_genome, glen) == 0 && seq[glen] == '.')
+        out_chrom = seq + glen + 1;
+
+    if (bwInit(1 << 17) != 0) {
+        fprintf(stderr, "ERROR: bwInit failed\n"); free(rcopy); return 1;
+    }
+    bigWigFile_t *bw = bwOpen(bigwig_file, NULL, "r");
+    if (bw == NULL) {
+        fprintf(stderr, "ERROR: failed to open bigWig %s\n", bigwig_file);
+        bwCleanup(); free(rcopy); return 1;
+    }
+
+    // Universal columns under a leaf window are SCATTERED across the whole axis
+    // (column order = ancestor pre-order), so a windowed query has no locality
+    // -- per-interval random reads thrash the bigWig.  Load the whole binned
+    // depth once into a flat array (global column / BIN -> depth) and look up
+    // per interval.  ~T/BIN floats (13 MB for apes; ~130 MB for a 577-way).
+    int64_t T  = tui_total_columns(tui);
+    int64_t nb = T / GERP_UNI_BIN + 2;
+    float  *udepth = st_calloc((size_t)nb, sizeof(float));
+    time_t lt0 = time(NULL);
+    for (int64_t c = 0; c < bw->cl->nKeys; c++) {
+        const char *uchrom = bw->cl->chrom[c];
+        if (strncmp(uchrom, "uni", 3) != 0) continue;
+        int64_t koff = atoll(uchrom + 3) * GERP_UNI_CHUNK;   // chunk -> global col base
+        bwOverlappingIntervals_t *ov =
+            bwGetOverlappingIntervals(bw, (char *)uchrom, 0, bw->cl->len[c]);
+        if (ov == NULL) continue;
+        for (uint32_t i = 0; i < ov->l; i++) {
+            int64_t gb = (koff + (int64_t)ov->start[i]) / GERP_UNI_BIN;
+            if (gb >= 0 && gb < nb) udepth[gb] = (float)ov->value[i];
+        }
+        bwDestroyOverlappingIntervals(ov);
+    }
+    st_logInfo("taffy lift --bigwig: loaded %" PRIi64 " universal depth bins in %"
+               PRIi64 " s\n", nb, (int64_t)(time(NULL) - lt0));
+
+    // Forward map: G window -> universal-column intervals (the whole mapping).
+    int64_t n_iv = 0;
+    TuiInterval *iv = tui_query(tui, seq, a, b, &n_iv);
+
+    FILE *fh = output_file ? fopen(output_file, "w") : stdout;
+    if (fh == NULL) {
+        fprintf(stderr, "ERROR: failed to open output %s\n", output_file);
+        free(iv); bwClose(bw); bwCleanup(); free(rcopy); return 1;
+    }
+
+    int64_t N = bin_size;
+    int64_t nbins = (b > a) ? (b - a + N - 1) / N : 0;
+    double  *bin_sum = nbins ? st_calloc((size_t)nbins, sizeof(double))  : NULL;
+    int64_t *bin_len = nbins ? st_calloc((size_t)nbins, sizeof(int64_t)) : NULL;
+    int64_t n_na = 0;
+
+    for (int64_t k = 0; k < n_iv; k++) {
+        int64_t cs = iv[k].start, ce = iv[k].end, L = ce - cs;
+        // mean universal depth over the interval's bins (in-memory lookup)
+        int64_t b0 = cs / GERP_UNI_BIN, b1 = (ce - 1) / GERP_UNI_BIN;
+        double d;
+        if (b0 == b1) d = udepth[b0];
+        else {
+            double sum = 0;
+            for (int64_t bb = b0; bb <= b1; bb++) sum += udepth[bb];
+            d = sum / (double)(b1 - b0 + 1);
+        }
+        if (d == 0.0) n_na++;
+
+        // column range -> G bp range (rev: G descends as the column ascends)
+        int64_t g_lo, g_hi;
+        if (iv[k].rev == 0) { g_lo = iv[k].t_start;         g_hi = iv[k].t_start + L; }
+        else                { g_lo = iv[k].t_start - L + 1; g_hi = iv[k].t_start + 1; }
+        if (g_lo < a) g_lo = a;
+        if (g_hi > b) g_hi = b;
+        if (g_lo >= g_hi) continue;
+
+        // overlap-weighted accumulation into N-bp G bins
+        for (int64_t bi = (g_lo - a) / N; bi <= (g_hi - 1 - a) / N; bi++) {
+            int64_t bl = a + bi * N, bh = bl + N; if (bh > b) bh = b;
+            int64_t ov = (g_hi < bh ? g_hi : bh) - (g_lo > bl ? g_lo : bl);
+            if (ov > 0) { bin_sum[bi] += d * (double)ov; bin_len[bi] += ov; }
+        }
+    }
+
+    // Emit the G-coord binned bedGraph -- sorted by construction.
+    int64_t n_emit = 0;
+    for (int64_t bi = 0; bi < nbins; bi++) {
+        if (bin_len[bi] <= 0) continue;
+        int64_t bl = a + bi * N, bh = bl + N; if (bh > b) bh = b;
+        fprintf(fh, "%s\t%" PRIi64 "\t%" PRIi64 "\t%.4g\n",
+                out_chrom, bl, bh, bin_sum[bi] / (double)bin_len[bi]);
+        n_emit++;
+    }
+    st_logInfo("taffy lift --bigwig %s:%" PRIi64 "-%" PRIi64 ": %" PRIi64
+               " intervals, %" PRIi64 " n/a fetches, %" PRIi64 "/%" PRIi64
+               " bins emitted\n", seq, a, b, n_iv, n_na, n_emit, nbins);
+
+    free(bin_sum); free(bin_len); free(iv); free(udepth);
+    if (output_file) fclose(fh);
+    bwClose(bw); bwCleanup(); free(rcopy);
+    return 0;
+}
+
 int taf_lift_main(int argc, char *argv[]) {
     time_t startTime = time(NULL);
     char *logLevelString = NULL;
@@ -1605,6 +1749,8 @@ int taf_lift_main(int argc, char *argv[]) {
     char *bed_file       = NULL;
     char *target_genome  = NULL;
     char *output_file    = NULL;
+    char *bigwig_file    = NULL;   // --bigwig: universal-depth bigWig (query-shim mode)
+    char *region         = NULL;   // -r/--region: target window G.chrom:START-END
     int64_t mem_cap_cli  = -1;     // -1 sentinel = "not set on CLI"
     int64_t max_gap      = 0;      // --maxGap (bed mode), 0 = strict abut
     int64_t min_size     = 1;      // --minSize (bed mode), 1 = no filter
@@ -1633,6 +1779,8 @@ int taf_lift_main(int argc, char *argv[]) {
             { "bed",        required_argument, 0, 'b' },
             { "genome",     required_argument, 0, 'g' },
             { "outputFile", required_argument, 0, 'o' },
+            { "bigwig",     required_argument, 0, 1007 },
+            { "region",     required_argument, 0, 'r' },
             { "memCap",     required_argument, 0, 'm' },
             { "maxGap",     required_argument, 0, 'G' },
             { "minSize",    required_argument, 0, 'S' },
@@ -1649,7 +1797,7 @@ int taf_lift_main(int argc, char *argv[]) {
             { 0, 0, 0, 0 }
         };
         int idx = 0;
-        int key = getopt_long(argc, argv, "l:i:w:b:g:o:m:G:S:FB:C:h", long_options, &idx);
+        int key = getopt_long(argc, argv, "l:i:w:b:g:o:m:G:S:FB:C:r:h", long_options, &idx);
         if (key == -1) break;
         switch (key) {
             case 'l': logLevelString = optarg; break;
@@ -1658,6 +1806,8 @@ int taf_lift_main(int argc, char *argv[]) {
             case 'b': bed_file       = optarg; break;
             case 'g': target_genome  = optarg; break;
             case 'o': output_file    = optarg; break;
+            case 'r': region         = optarg; break;
+            case 1007: bigwig_file   = optarg; break;
             case 'm':
                 mem_cap_cli = lift_parse_size(optarg);
                 if (mem_cap_cli <= 0) {
@@ -1798,6 +1948,33 @@ int taf_lift_main(int argc, char *argv[]) {
         fprintf(stderr, "ERROR: -i and -g are required\n");
         usage();
         return 1;
+    }
+    // --bigwig query-shim mode: read the universal-depth bigWig along a target
+    // window and emit it in G coords (binned).  Self-contained -- needs only
+    // tui_query (source=target=G), not the wig/bed -> visit_runs lift below.
+    if (bigwig_file != NULL) {
+        if (region == NULL) {
+            fprintf(stderr, "ERROR: --bigwig requires -r/--region G.chrom:START-END\n");
+            return 1;
+        }
+        if (bin_size <= 0) {
+            fprintf(stderr, "ERROR: --bigwig requires -B/--bin N (output is an N-bp binned bedGraph)\n");
+            return 1;
+        }
+        if (wig_file != NULL || bed_file != NULL) {
+            fprintf(stderr, "ERROR: --bigwig is mutually exclusive with -w/--wig and -b/--bed\n");
+            return 1;
+        }
+        char *tui_p = tui_path(maf_file);
+        Tui *tui = tui_load(tui_p);
+        if (tui == NULL) {
+            fprintf(stderr, "ERROR: failed to open .tui at %s\n", tui_p);
+            free(tui_p); return 1;
+        }
+        int rc = bigwig_lift_window(tui, bigwig_file, target_genome, region,
+                                    bin_size, output_file);
+        tui_destruct(tui); free(tui_p);
+        return rc;
     }
     if ((wig_file == NULL) == (bed_file == NULL)) {
         fprintf(stderr, "ERROR: exactly one of -w/--wig or -b/--bed must be specified\n");
