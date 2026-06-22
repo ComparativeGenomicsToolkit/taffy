@@ -112,10 +112,34 @@ typedef struct {
     uint8_t      *leaf_csets;
 } GerpThreadState;
 
+// --universal wig keys on a synthetic axis "uni<chunk>": chunk = column /
+// GERP_UNI_CHUNK, position = column % GERP_UNI_CHUNK + 1 (1-based).  Chunking
+// keeps each chrom under the bigWig 32-bit coordinate limit (2^32).  apes
+// T=3.27e9 < GERP_UNI_CHUNK so it is a single "uni0"; a larger T (577-way)
+// splits into uni0/uni1/...
+#define GERP_UNI_CHUNK 4000000000LL
+
+// Emit one `variableStep chrom=<chrom>` header to the rs and/or depth buffer.
+static void gerp_emit_wig_header(GerpBlockResult *res, const char *chrom,
+                                 bool to_rs, bool to_depth) {
+    if (to_rs) {
+        gerpbuf_putn(&res->rs, "variableStep chrom=", 19);
+        gerpbuf_puts(&res->rs, chrom);
+        gerpbuf_putc(&res->rs, '\n');
+    }
+    if (to_depth) {
+        gerpbuf_putn(&res->depth, "variableStep chrom=", 19);
+        gerpbuf_puts(&res->depth, chrom);
+        gerpbuf_putc(&res->depth, '\n');
+    }
+}
+
 static void score_one_block(const GerpTree *gt, GerpThreadState *ts,
                             const Alignment *aln, GerpBlockResult *res,
                             GerpParalogPolicy policy, int64_t min_leaves,
-                            double branch_scale, bool want_depth) {
+                            double branch_scale, bool want_depth,
+                            bool depth_only, bool universal_wig,
+                            int64_t block_start_col) {
     gerpbuf_reset(&res->rs);
     if (want_depth) gerpbuf_reset(&res->depth);
     res->cols_scored = 0;
@@ -159,15 +183,17 @@ static void score_one_block(const GerpTree *gt, GerpThreadState *ts,
         return;
     }
 
-    // Emit per-block variableStep header keyed on row-0's seq name.
-    gerpbuf_putn(&res->rs, "variableStep chrom=", 19);
-    gerpbuf_puts(&res->rs, ref->sequence_name);
-    gerpbuf_putc(&res->rs, '\n');
-    if (want_depth) {
-        gerpbuf_putn(&res->depth, "variableStep chrom=", 19);
-        gerpbuf_puts(&res->depth, ref->sequence_name);
-        gerpbuf_putc(&res->depth, '\n');
-    }
+    // The `variableStep chrom=...` header is emitted LAZILY -- only when a
+    // column is actually written -- so a block with no scored column (all
+    // < min_leaves, common for ancestor-heavy universal-MAF blocks) writes
+    // NOTHING rather than a dangling empty header (which wigToBigWig rejects).
+    // NAMED mode keys on row-0's seq name and fires once (hdr_emitted).
+    // --universal mode keys on "uni<chunk>" and re-fires when the chunk changes
+    // (cur_chunk).  rs and depth trigger on the same column, so their
+    // (chrom,pos) structure stays byte-identical (gerp-stats invariant).
+    // --depthOnly leaves the rs buffer empty.
+    bool    hdr_emitted = false;   // NAMED mode: header written yet?
+    int64_t cur_chunk   = -1;      // --universal mode: chunk of last header
 
     int64_t n_leaves = gerp_tree_n_leaves(gt);
     int64_t anchor   = ref->start;  // 0-based; wig is 1-based -> +1 below
@@ -187,14 +213,42 @@ static void score_one_block(const GerpTree *gt, GerpThreadState *ts,
         }
         double  rs    = 0;
         int64_t depth = 0;
-        bool    scored = gerp_score_column_csets(gt, ts->sc, ts->leaf_csets,
-                                                 min_leaves, branch_scale,
-                                                 &rs, &depth);
-        int64_t wig_pos = anchor + 1;
+        bool    scored;
+        if (depth_only) {
+            // Depth = number of leaves present (non-gap) at this column -- the
+            // same count gerp_score_column_csets returns -- but WITHOUT the
+            // O(n_nodes) Hartigan/RS tree walk, which we don't need.
+            for (int64_t i = 0; i < n_leaves; i++)
+                if (ts->leaf_csets[i]) depth++;
+            scored = (depth >= min_leaves);
+        } else {
+            scored = gerp_score_column_csets(gt, ts->sc, ts->leaf_csets,
+                                             min_leaves, branch_scale,
+                                             &rs, &depth);
+        }
         if (scored) {
-            gerpbuf_put_score(&res->rs, wig_pos, rs, 4);
-            if (want_depth) gerpbuf_put_score(&res->depth, wig_pos,
-                                              (double)depth, 0);
+            int64_t wig_pos;
+            if (universal_wig) {
+                int64_t uc    = block_start_col + col;   // global universal column
+                int64_t chunk = uc / GERP_UNI_CHUNK;
+                wig_pos       = uc % GERP_UNI_CHUNK + 1;  // 1-based within chunk
+                if (chunk != cur_chunk) {                 // chunk start -> new header
+                    char unibuf[24];
+                    snprintf(unibuf, sizeof unibuf, "uni%" PRId64, chunk);
+                    gerp_emit_wig_header(res, unibuf, !depth_only, want_depth);
+                    cur_chunk = chunk;
+                }
+            } else {
+                wig_pos = anchor + 1;
+                if (!hdr_emitted) {
+                    gerp_emit_wig_header(res, ref->sequence_name,
+                                         !depth_only, want_depth);
+                    hdr_emitted = true;
+                }
+            }
+            if (!depth_only) gerpbuf_put_score(&res->rs, wig_pos, rs, 4);
+            if (want_depth)  gerpbuf_put_score(&res->depth, wig_pos,
+                                               (double)depth, 0);
             res->cols_scored++;
         }
         // No depth-only emit when !scored: that asymmetry caused gerp-stats
@@ -231,6 +285,8 @@ static void usage(void) {
     fprintf(stderr, "--skipParalogs : Alias for --paralog skip.\n");
     fprintf(stderr, "--keepParalogs : Alias for --paralog first (kept for back-compat; prefer --paralog union).\n");
     fprintf(stderr, "-T --threads N : Parallel block scoring + bgzf I/O on bgzipped streams (default 1).\n");
+    fprintf(stderr, "--depthOnly : Only compute/emit the -D depth wig; skip the RS tree walk entirely (much faster, esp. on deep trees).  Requires -D; -o gets no data.\n");
+    fprintf(stderr, "--universal : Key the wig on the integer universal column (chrom 'uni<chunk>', 1-based pos within chunk) instead of row-0 ancestor coords.  Output is in globally-monotone column order -- already sorted for wigToBigWig.  Incompatible with -r/-R (use --columnRange or whole-file streaming).\n");
     fprintf(stderr, "-l --logLevel : Set the log level.\n");
     fprintf(stderr, "-h --help : Print this help message.\n");
 }
@@ -242,6 +298,8 @@ enum {
     OPT_SKIP_PARALOGS,
     OPT_KEEP_PARALOGS,
     OPT_COLUMN_RANGE,
+    OPT_DEPTH_ONLY,
+    OPT_UNIVERSAL,
 };
 
 static int parse_paralog_policy(const char *s, GerpParalogPolicy *out) {
@@ -335,6 +393,8 @@ int taf_gerp_main(int argc, char *argv[]) {
     int64_t min_leaves   = 2;
     GerpParalogPolicy paralog_policy = GERP_PARALOG_UNION;
     int n_threads        = 1;
+    bool depth_only      = false;
+    bool universal_wig   = false;
 
     while (1) {
         static struct option long_options[] = {
@@ -353,6 +413,8 @@ int taf_gerp_main(int argc, char *argv[]) {
             { "skipParalogs",   no_argument,       0, OPT_SKIP_PARALOGS },
             { "keepParalogs",   no_argument,       0, OPT_KEEP_PARALOGS },
             { "threads",        required_argument, 0, 'T' },
+            { "depthOnly",      no_argument,       0, OPT_DEPTH_ONLY },
+            { "universal",      no_argument,       0, OPT_UNIVERSAL },
             { "help",           no_argument,       0, 'h' },
             { 0, 0, 0, 0 }
         };
@@ -381,6 +443,8 @@ int taf_gerp_main(int argc, char *argv[]) {
             case OPT_SKIP_PARALOGS: paralog_policy = GERP_PARALOG_SKIP;  break;
             case OPT_KEEP_PARALOGS: paralog_policy = GERP_PARALOG_FIRST; break;
             case OPT_COLUMN_RANGE:  columnRangeArg = optarg; break;
+            case OPT_DEPTH_ONLY:    depth_only     = true;   break;
+            case OPT_UNIVERSAL:     universal_wig  = true;   break;
             case 'h': usage(); return 0;
             default:  usage(); return 1;
         }
@@ -453,6 +517,15 @@ int taf_gerp_main(int argc, char *argv[]) {
         fprintf(stderr, "taffy gerp: -r, -R, and --columnRange are mutually exclusive\n");
         return 1;
     }
+    if (depth_only && depthFile == NULL) {
+        fprintf(stderr, "taffy gerp: --depthOnly requires -D/--depthFile (it computes no RS for -o)\n");
+        return 1;
+    }
+    if (universal_wig && (region != NULL || regionFile != NULL)) {
+        fprintf(stderr, "taffy gerp: --universal is incompatible with -r/-R -- a leaf region maps to\n"
+                        "  non-contiguous universal columns.  Use --columnRange or whole-file streaming.\n");
+        return 1;
+    }
 
     // Output(s).
     FILE *out_fh = (outputFile == NULL) ? stdout : fopen(outputFile, "w");
@@ -491,6 +564,7 @@ int taf_gerp_main(int argc, char *argv[]) {
     int batch_cap = 4 * n_threads;
     if (batch_cap < 4) batch_cap = 4;
     Alignment       **batch_aln = st_calloc((size_t)batch_cap, sizeof(Alignment *));
+    int64_t          *batch_col = st_calloc((size_t)batch_cap, sizeof(int64_t));  // per-block start universal column (--universal)
     GerpBlockResult  *results   = st_calloc((size_t)batch_cap, sizeof(GerpBlockResult));
     for (int i = 0; i < batch_cap; i++) {
         gerpbuf_init(&results[i].rs, 4096);
@@ -651,6 +725,11 @@ int taf_gerp_main(int argc, char *argv[]) {
         // manages its own state.  Carry is per-region (one streaming
         // run inside each iterator).
         Alignment *carry_aln = NULL;
+        // Running universal column for --universal: streaming starts at 0,
+        // column-range at LO; += column_number per block in read (Phase A,
+        // file == column order).  Unused in region mode, which --universal
+        // forbids.
+        int64_t uni_col = have_col_range ? col_range_iv.start : 0;
 
         while (!fatal) {
             // Phase A: serial read of up to batch_cap blocks.  TAF chains
@@ -692,6 +771,8 @@ int taf_gerp_main(int argc, char *argv[]) {
                     alignment_destruct(carry_aln, 1);
                     carry_aln = NULL;
                 }
+                batch_col[n_read] = uni_col;       // this block's first universal column
+                uni_col += a->column_number;
                 batch_aln[n_read++] = a;
                 p_for_read = a;
             }
@@ -715,7 +796,8 @@ int taf_gerp_main(int argc, char *argv[]) {
 #endif
                 score_one_block(gt, &ts[t], batch_aln[i], &results[i],
                                 paralog_policy, min_leaves, branch_scale,
-                                want_depth);
+                                want_depth, depth_only, universal_wig,
+                                batch_col[i]);
             }
 
             // Phase C: serial emit + accounting in batch order.
@@ -798,6 +880,7 @@ int taf_gerp_main(int argc, char *argv[]) {
     }
     free(results);
     free(batch_aln);
+    free(batch_col);
     for (int t = 0; t < n_threads; t++) {
         gerp_scratch_destruct(ts[t].sc);
         free(ts[t].entries);
