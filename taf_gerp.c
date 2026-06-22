@@ -100,6 +100,16 @@ typedef struct {
     const char *unknown_seq;     // borrowed from aln when status == UNKNOWN
     bool    bad_strand;
     const char *bad_strand_seq;
+    // --bin: this block's columns pre-aggregated per universal-column bin.
+    // The block's columns are contiguous, so the touched bins are the
+    // contiguous range [bin_first, bin_first+bin_n); bin_sum/bin_cnt hold the
+    // depth sum and column count this block contributes to each.  Phase C
+    // merges these across blocks (the boundary bin is shared with neighbours).
+    int64_t  bin_first;
+    int64_t *bin_sum;
+    int64_t *bin_cnt;
+    int64_t  bin_cap;
+    int64_t  bin_n;
 } GerpBlockResult;
 
 // Per-thread scratch -- one set per OpenMP worker thread.  entries[] is
@@ -134,15 +144,33 @@ static void gerp_emit_wig_header(GerpBlockResult *res, const char *chrom,
     }
 }
 
+// --bin: write one binned bedGraph line on the universal axis -- the mean
+// depth over the bin's columns, on chrom uni<chunk> with the bin's
+// within-chunk [start, end).  GERP_UNI_CHUNK is required to be a multiple of
+// the bin size, so a bin never straddles a chunk boundary.
+static void gerp_flush_bin(LW *dout, int64_t bin, int64_t sum, int64_t cnt,
+                           int64_t bin_size) {
+    if (sum <= 0 || cnt <= 0) return;   // drop all-unscored bins (awk parity)
+    int64_t c0    = bin * bin_size;
+    int64_t chunk = c0 / GERP_UNI_CHUNK;
+    int64_t ws    = c0 % GERP_UNI_CHUNK;
+    char line[96];
+    int n = snprintf(line, sizeof line,
+                     "uni%" PRId64 "\t%" PRId64 "\t%" PRId64 "\t%.4g\n",
+                     chunk, ws, ws + cnt, (double)sum / (double)cnt);
+    LW_putn(dout, line, (size_t)n);
+}
+
 static void score_one_block(const GerpTree *gt, GerpThreadState *ts,
                             const Alignment *aln, GerpBlockResult *res,
                             GerpParalogPolicy policy, int64_t min_leaves,
                             double branch_scale, bool want_depth,
                             bool depth_only, bool universal_wig,
-                            int64_t block_start_col) {
+                            int64_t block_start_col, int64_t bin_size) {
     gerpbuf_reset(&res->rs);
     if (want_depth) gerpbuf_reset(&res->depth);
     res->cols_scored = 0;
+    res->bin_n = 0;
     res->status = GERP_BLOCK_OK;
     res->had_paralog = false;
     res->unknown_seq = NULL;
@@ -226,7 +254,36 @@ static void score_one_block(const GerpTree *gt, GerpThreadState *ts,
                                              min_leaves, branch_scale,
                                              &rs, &depth);
         }
-        if (scored) {
+        if (bin_size > 0) {
+            // --bin: aggregate into this block's per-bin partials.  bin_sum
+            // sums SCORED columns only (depth >= min_leaves); bin_cnt counts
+            // every column the bin covers here.  Row-0 is gap-free in a
+            // universal MAF, and --bin shards are N-aligned (checked at the
+            // --columnRange parse), so each bin is processed from its start and
+            // bin_cnt is its true universal-column count: N for a full bin,
+            // fewer only for the genome's last (partial) bin.  flush emits
+            // mean = bin_sum/bin_cnt (== the awk binner's sum/clamped-width)
+            // and drops a bin with no scored column.  The block's columns are
+            // contiguous, so the touched bins form one contiguous range
+            // [bin_first, bin_first+bin_n).
+            int64_t bin = (block_start_col + col) / bin_size;
+            if (res->bin_n == 0) res->bin_first = bin;
+            int64_t idx = bin - res->bin_first;
+            if (idx >= res->bin_n) {                   // start of the next bin
+                if (idx >= res->bin_cap) {
+                    int64_t nc = res->bin_cap ? res->bin_cap * 2 : 64;
+                    while (nc <= idx) nc *= 2;
+                    res->bin_sum = st_realloc(res->bin_sum, (size_t)nc * sizeof(int64_t));
+                    res->bin_cnt = st_realloc(res->bin_cnt, (size_t)nc * sizeof(int64_t));
+                    res->bin_cap = nc;
+                }
+                res->bin_sum[idx] = 0;
+                res->bin_cnt[idx] = 0;
+                res->bin_n        = idx + 1;
+            }
+            if (scored) { res->bin_sum[idx] += depth; res->cols_scored++; }
+            res->bin_cnt[idx]++;   // every column -> bin-mean denominator
+        } else if (scored) {
             int64_t wig_pos;
             if (universal_wig) {
                 int64_t uc    = block_start_col + col;   // global universal column
@@ -287,6 +344,7 @@ static void usage(void) {
     fprintf(stderr, "-T --threads N : Parallel block scoring + bgzf I/O on bgzipped streams (default 1).\n");
     fprintf(stderr, "--depthOnly : Only compute/emit the -D depth wig; skip the RS tree walk entirely (much faster, esp. on deep trees).  Requires -D; -o gets no data.\n");
     fprintf(stderr, "--universal : Key the wig on the integer universal column (chrom 'uni<chunk>', 1-based pos within chunk) instead of row-0 ancestor coords.  Output is in globally-monotone column order -- already sorted for wigToBigWig.  Incompatible with -r/-R (use --columnRange or whole-file streaming).\n");
+    fprintf(stderr, "--bin N : Emit depth as a binned bedGraph (mean depth per N-column bin) on the universal axis, instead of per-column -- replaces the external awk binner.  Requires --universal, --depthOnly, and -D.  N must divide the 4e9 chunk size (e.g. 1000, 10000).\n");
     fprintf(stderr, "-l --logLevel : Set the log level.\n");
     fprintf(stderr, "-h --help : Print this help message.\n");
 }
@@ -300,6 +358,7 @@ enum {
     OPT_COLUMN_RANGE,
     OPT_DEPTH_ONLY,
     OPT_UNIVERSAL,
+    OPT_BIN,
 };
 
 static int parse_paralog_policy(const char *s, GerpParalogPolicy *out) {
@@ -395,6 +454,7 @@ int taf_gerp_main(int argc, char *argv[]) {
     int n_threads        = 1;
     bool depth_only      = false;
     bool universal_wig   = false;
+    int64_t bin_size     = 0;
 
     while (1) {
         static struct option long_options[] = {
@@ -415,6 +475,7 @@ int taf_gerp_main(int argc, char *argv[]) {
             { "threads",        required_argument, 0, 'T' },
             { "depthOnly",      no_argument,       0, OPT_DEPTH_ONLY },
             { "universal",      no_argument,       0, OPT_UNIVERSAL },
+            { "bin",            required_argument, 0, OPT_BIN },
             { "help",           no_argument,       0, 'h' },
             { 0, 0, 0, 0 }
         };
@@ -445,6 +506,7 @@ int taf_gerp_main(int argc, char *argv[]) {
             case OPT_COLUMN_RANGE:  columnRangeArg = optarg; break;
             case OPT_DEPTH_ONLY:    depth_only     = true;   break;
             case OPT_UNIVERSAL:     universal_wig  = true;   break;
+            case OPT_BIN:           bin_size       = atoll(optarg); break;
             case 'h': usage(); return 0;
             default:  usage(); return 1;
         }
@@ -525,6 +587,21 @@ int taf_gerp_main(int argc, char *argv[]) {
         fprintf(stderr, "taffy gerp: --universal is incompatible with -r/-R -- a leaf region maps to\n"
                         "  non-contiguous universal columns.  Use --columnRange or whole-file streaming.\n");
         return 1;
+    }
+    if (bin_size < 0) {
+        fprintf(stderr, "taffy gerp: --bin N must be > 0\n");
+        return 1;
+    }
+    if (bin_size > 0) {
+        if (!universal_wig || !depth_only || depthFile == NULL) {
+            fprintf(stderr, "taffy gerp: --bin requires --universal, --depthOnly, and -D\n");
+            return 1;
+        }
+        if (GERP_UNI_CHUNK % bin_size != 0) {
+            fprintf(stderr, "taffy gerp: --bin N must divide the universal chunk size %lld "
+                            "(use e.g. 1000, 10000)\n", (long long)GERP_UNI_CHUNK);
+            return 1;
+        }
     }
 
     // Output(s).
@@ -623,6 +700,17 @@ int taf_gerp_main(int argc, char *argv[]) {
         // happens to be zero (T < N or rounding).  Skip all work cleanly
         // so the runner doesn't have to special-case it.
         if (lo == hi) empty_col_range = true;
+        // --bin keys each bin's bedGraph interval on the bin START (bin*N), so
+        // a shard must begin and end ON bin boundaries -- otherwise its first
+        // (or last) bin is processed from the middle, and two shards would
+        // emit overlapping records for the boundary bin (wigToBigWig rejects).
+        // Whole-file streaming (start 0) is inherently aligned.
+        if (bin_size > 0 && (lo % bin_size != 0 || hi % bin_size != 0)) {
+            fprintf(stderr, "taffy gerp: with --bin %lld, --columnRange LO and HI must be "
+                            "multiples of %lld (shard boundaries must fall on bin boundaries)\n",
+                    (long long)bin_size, (long long)bin_size);
+            return 1;
+        }
     }
 
     // Region / column-range mode: load the .tui (universal MAF) or .tai
@@ -685,6 +773,10 @@ int taf_gerp_main(int argc, char *argv[]) {
     // over the shared tui/tai, then runs the inner read/score/emit batched
     // loop to exhaustion).  Empty column-range -> 0 iterations (success
     // no-op for SLURM shards that ended up with a zero slice).
+    // --bin running binner: depth accumulates across blocks (in column order)
+    // into the current universal-column bin; emitted when the bin advances.
+    int64_t cur_bin = -1, cur_sum = 0, cur_cnt = 0;
+
     int64_t n_iter = (regions != NULL) ? n_regions
                    : empty_col_range   ? 0
                    :                     1;
@@ -797,7 +889,7 @@ int taf_gerp_main(int argc, char *argv[]) {
                 score_one_block(gt, &ts[t], batch_aln[i], &results[i],
                                 paralog_policy, min_leaves, branch_scale,
                                 want_depth, depth_only, universal_wig,
-                                batch_col[i]);
+                                batch_col[i], bin_size);
             }
 
             // Phase C: serial emit + accounting in batch order.
@@ -825,8 +917,24 @@ int taf_gerp_main(int argc, char *argv[]) {
                     continue;
                 }
                 n_scored_cols += r->cols_scored;
-                if (r->rs.len > 0)            LW_putn(out,  r->rs.buf,    r->rs.len);
-                if (want_depth && r->depth.len > 0) LW_putn(dout, r->depth.buf, r->depth.len);
+                if (bin_size > 0) {
+                    // Merge this block's per-bin partials into the running
+                    // binner; the boundary bin is shared with the previous
+                    // block, so accumulate until the bin index advances, then
+                    // flush (the -1 sentinel / zero-count flush is a no-op).
+                    for (int64_t k = 0; k < r->bin_n; k++) {
+                        int64_t bin = r->bin_first + k;
+                        if (bin != cur_bin) {
+                            gerp_flush_bin(dout, cur_bin, cur_sum, cur_cnt, bin_size);
+                            cur_bin = bin; cur_sum = 0; cur_cnt = 0;
+                        }
+                        cur_sum += r->bin_sum[k];
+                        cur_cnt += r->bin_cnt[k];
+                    }
+                } else {
+                    if (r->rs.len > 0)            LW_putn(out,  r->rs.buf,    r->rs.len);
+                    if (want_depth && r->depth.len > 0) LW_putn(dout, r->depth.buf, r->depth.len);
+                }
             }
 
             // Phase D: free this batch's alignments, retaining the last one
@@ -858,6 +966,9 @@ int taf_gerp_main(int argc, char *argv[]) {
         free(uiv);
     }
 
+    // Flush the last --bin partial (no successor block to trigger its flush).
+    if (bin_size > 0) gerp_flush_bin(dout, cur_bin, cur_sum, cur_cnt, bin_size);
+
     if (tui    != NULL) tui_destruct(tui);
     if (tai    != NULL) tai_destruct(tai);
     if (tai_fh != NULL) fclose(tai_fh);
@@ -877,6 +988,8 @@ int taf_gerp_main(int argc, char *argv[]) {
     for (int i = 0; i < batch_cap; i++) {
         gerpbuf_destroy(&results[i].rs);
         if (want_depth) gerpbuf_destroy(&results[i].depth);
+        free(results[i].bin_sum);
+        free(results[i].bin_cnt);
     }
     free(results);
     free(batch_aln);
