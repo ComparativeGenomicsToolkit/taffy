@@ -1652,30 +1652,7 @@ static int bigwig_lift_window(Tui *tui, const char *bigwig_file,
         bwCleanup(); free(rcopy); return 1;
     }
 
-    // Universal columns under a leaf window are SCATTERED across the whole axis
-    // (column order = ancestor pre-order), so a windowed query has no locality
-    // -- per-interval random reads thrash the bigWig.  Load the whole binned
-    // depth once into a flat array (global column / BIN -> depth) and look up
-    // per interval.  ~T/BIN floats (13 MB for apes; ~130 MB for a 577-way).
-    int64_t T  = tui_total_columns(tui);
-    int64_t nb = T / GERP_UNI_BIN + 2;
-    float  *udepth = st_calloc((size_t)nb, sizeof(float));
-    time_t lt0 = time(NULL);
-    for (int64_t c = 0; c < bw->cl->nKeys; c++) {
-        const char *uchrom = bw->cl->chrom[c];
-        if (strncmp(uchrom, "uni", 3) != 0) continue;
-        int64_t koff = atoll(uchrom + 3) * GERP_UNI_CHUNK;   // chunk -> global col base
-        bwOverlappingIntervals_t *ov =
-            bwGetOverlappingIntervals(bw, (char *)uchrom, 0, bw->cl->len[c]);
-        if (ov == NULL) continue;
-        for (uint32_t i = 0; i < ov->l; i++) {
-            int64_t gb = (koff + (int64_t)ov->start[i]) / GERP_UNI_BIN;
-            if (gb >= 0 && gb < nb) udepth[gb] = (float)ov->value[i];
-        }
-        bwDestroyOverlappingIntervals(ov);
-    }
-    st_logInfo("taffy lift --bigwig: loaded %" PRIi64 " universal depth bins in %"
-               PRIi64 " s\n", nb, (int64_t)(time(NULL) - lt0));
+    int64_t T = tui_total_columns(tui);   // for the read-fraction log below
 
     // Forward map: G window -> universal-column intervals (the whole mapping).
     int64_t n_iv = 0;
@@ -1691,35 +1668,66 @@ static int bigwig_lift_window(Tui *tui, const char *bigwig_file,
     int64_t nbins = (b > a) ? (b - a + N - 1) / N : 0;
     double  *bin_sum = nbins ? st_calloc((size_t)nbins, sizeof(double))  : NULL;
     int64_t *bin_len = nbins ? st_calloc((size_t)nbins, sizeof(int64_t)) : NULL;
-    int64_t n_na = 0;
-
-    for (int64_t k = 0; k < n_iv; k++) {
-        int64_t cs = iv[k].start, ce = iv[k].end, L = ce - cs;
-        // mean universal depth over the interval's bins (in-memory lookup)
-        int64_t b0 = cs / GERP_UNI_BIN, b1 = (ce - 1) / GERP_UNI_BIN;
-        double d;
-        if (b0 == b1) d = udepth[b0];
-        else {
-            double sum = 0;
-            for (int64_t bb = b0; bb <= b1; bb++) sum += udepth[bb];
-            d = sum / (double)(b1 - b0 + 1);
+    // Cluster-coalesced random fetch.  tui_query intervals are column-sorted;
+    // a leaf window's columns sit in a bounded number of dense clusters
+    // separated by huge gaps (the ancestor recurrence).  Coalesce intervals
+    // within COALESCE_GAP (and not across a chunk) into a cluster-range, fetch
+    // its per-column depth once via libBigWig random access, distribute to the
+    // intervals.  Reads only the window's columns (~0.07% of a 577-way axis for
+    // one chromosome), never the whole file -- the load-all version stopped
+    // scaling past ~apes (72 Gbp axis would be a 288 MB / 288 GB read per query).
+    const int64_t COALESCE_GAP = 1 << 14;   // 16k cols: merge within-cluster gaps
+    int64_t n_na = 0, n_clusters = 0, cols_fetched = 0;
+    int64_t k = 0;
+    while (k < n_iv) {
+        int64_t chunk = iv[k].start / GERP_UNI_CHUNK;
+        int64_t lo = iv[k].start, hi = iv[k].end;
+        int64_t j = k + 1;
+        while (j < n_iv && iv[j].start / GERP_UNI_CHUNK == chunk &&
+               iv[j].start - hi <= COALESCE_GAP) {
+            if (iv[j].end > hi) hi = iv[j].end;
+            j++;
         }
-        if (d == 0.0) n_na++;
+        n_clusters++;
+        cols_fetched += hi - lo;
+        int64_t base = chunk * GERP_UNI_CHUNK;
+        char uchrom[24];
+        snprintf(uchrom, sizeof uchrom, "uni%" PRIi64, chunk);
+        bwOverlappingIntervals_t *ov =
+            bwGetValues(bw, uchrom, (uint32_t)(lo - base), (uint32_t)(hi - base), 1);
 
-        // column range -> G bp range (rev: G descends as the column ascends)
-        int64_t g_lo, g_hi;
-        if (iv[k].rev == 0) { g_lo = iv[k].t_start;         g_hi = iv[k].t_start + L; }
-        else                { g_lo = iv[k].t_start - L + 1; g_hi = iv[k].t_start + 1; }
-        if (g_lo < a) g_lo = a;
-        if (g_hi > b) g_hi = b;
-        if (g_lo >= g_hi) continue;
+        for (int64_t m = k; m < j; m++) {
+            int64_t cs = iv[m].start, ce = iv[m].end, L = ce - cs;
+            // mean universal depth over the interval's columns (NaN = uncovered)
+            double sum = 0; int64_t cnt = 0;
+            if (ov != NULL) {
+                for (int64_t c = cs; c < ce; c++) {
+                    int64_t idx = c - lo;
+                    if (idx >= 0 && idx < (int64_t)ov->l && !isnan(ov->value[idx])) {
+                        sum += ov->value[idx]; cnt++;
+                    }
+                }
+            }
+            double d = cnt > 0 ? sum / (double)cnt : 0.0;
+            if (cnt == 0) n_na++;
 
-        // overlap-weighted accumulation into N-bp G bins
-        for (int64_t bi = (g_lo - a) / N; bi <= (g_hi - 1 - a) / N; bi++) {
-            int64_t bl = a + bi * N, bh = bl + N; if (bh > b) bh = b;
-            int64_t ov = (g_hi < bh ? g_hi : bh) - (g_lo > bl ? g_lo : bl);
-            if (ov > 0) { bin_sum[bi] += d * (double)ov; bin_len[bi] += ov; }
+            // column range -> G bp range (rev: G descends as the column ascends)
+            int64_t g_lo, g_hi;
+            if (iv[m].rev == 0) { g_lo = iv[m].t_start;         g_hi = iv[m].t_start + L; }
+            else                { g_lo = iv[m].t_start - L + 1; g_hi = iv[m].t_start + 1; }
+            if (g_lo < a) g_lo = a;
+            if (g_hi > b) g_hi = b;
+            if (g_lo >= g_hi) continue;
+
+            // overlap-weighted accumulation into N-bp G bins
+            for (int64_t bi = (g_lo - a) / N; bi <= (g_hi - 1 - a) / N; bi++) {
+                int64_t bl = a + bi * N, bh = bl + N; if (bh > b) bh = b;
+                int64_t o = (g_hi < bh ? g_hi : bh) - (g_lo > bl ? g_lo : bl);
+                if (o > 0) { bin_sum[bi] += d * (double)o; bin_len[bi] += o; }
+            }
         }
+        if (ov != NULL) bwDestroyOverlappingIntervals(ov);
+        k = j;
     }
 
     // Emit the G-coord binned bedGraph -- sorted by construction.
@@ -1732,10 +1740,12 @@ static int bigwig_lift_window(Tui *tui, const char *bigwig_file,
         n_emit++;
     }
     st_logInfo("taffy lift --bigwig %s:%" PRIi64 "-%" PRIi64 ": %" PRIi64
-               " intervals, %" PRIi64 " n/a fetches, %" PRIi64 "/%" PRIi64
-               " bins emitted\n", seq, a, b, n_iv, n_na, n_emit, nbins);
+               " intervals in %" PRIi64 " clusters, %" PRIi64 " cols fetched "
+               "(%.4f%% of axis), %" PRIi64 " uncovered, %" PRIi64 "/%" PRIi64
+               " bins emitted\n", seq, a, b, n_iv, n_clusters, cols_fetched,
+               100.0 * (double)cols_fetched / (double)T, n_na, n_emit, nbins);
 
-    free(bin_sum); free(bin_len); free(iv); free(udepth);
+    free(bin_sum); free(bin_len); free(iv);
     if (output_file) fclose(fh);
     bwClose(bw); bwCleanup(); free(rcopy);
     return 0;
