@@ -219,7 +219,7 @@ int taf_view_main(int argc, char *argv[]) {
     // `tcol` sentinel row carrying universal-column coord), query (reorient
     // onto the queried genome).  Universal mode auto-engages when <input>.tui
     // is present; -U just picks the mode.  -U with no .tui is an error.
-    enum { U_MODE_ANCESTOR, U_MODE_TCOL, U_MODE_QUERY };
+    enum { U_MODE_ANCESTOR, U_MODE_TCOL, U_MODE_QUERY, U_MODE_COLUMNS };
     int universal_mode = U_MODE_ANCESTOR;
     bool universal_mode_set = false;
     bool use_compression = false;
@@ -335,8 +335,9 @@ int taf_view_main(int argc, char *argv[]) {
                 if (strcmp(optarg, "ancestor") == 0)      universal_mode = U_MODE_ANCESTOR;
                 else if (strcmp(optarg, "tcol") == 0)     universal_mode = U_MODE_TCOL;
                 else if (strcmp(optarg, "query") == 0)    universal_mode = U_MODE_QUERY;
+                else if (strcmp(optarg, "columns") == 0)  universal_mode = U_MODE_COLUMNS;
                 else { fprintf(stderr,
-                    "Invalid -U mode '%s'; expected ancestor|tcol|query\n", optarg);
+                    "Invalid -U mode '%s'; expected ancestor|tcol|query|columns\n", optarg);
                     return 1; }
                 universal_mode_set = true;
                 break;
@@ -674,6 +675,25 @@ int taf_view_main(int argc, char *argv[]) {
                             region_start + region_length, &n_uiv);
         }
         const TuiInterval *iv_in = tcol_input ? &tcol_iv : uiv;
+        if (universal_mode == U_MODE_COLUMNS) {
+            // Forward-map primitive: print the universal-column intervals this
+            // region occupies and skip extraction.  Each line is
+            //   col_start <TAB> col_end <TAB> src_start <TAB> rev
+            // and the source (queried-genome) position at column c is
+            //   rev ? src_start - (c - col_start) : src_start + (c - col_start),
+            // so each interval is BOTH the forward lift (region -> columns) and
+            // its inverse (column -> source bp) -- the whole shim mapping in one
+            // call.  Zero n_uiv so the iterator below is a no-op and we still
+            // fall through to the normal LW flush / cleanup (no early return).
+            for (int64_t i = 0; i < n_uiv; i++) {
+                char cbuf[96];
+                int m = snprintf(cbuf, sizeof cbuf, "%" PRIi64 "\t%" PRIi64
+                                 "\t%" PRIi64 "\t%d\n", iv_in[i].start,
+                                 iv_in[i].end, iv_in[i].t_start, iv_in[i].rev);
+                LW_putn(output, cbuf, (size_t)m);
+            }
+            n_uiv = 0;
+        }
         TuiExtractIt *xit = tui_extract_iterator(tui, li, !taf_input,
                                                  run_length_encode_input_bases,
                                                  iv_in, n_uiv);
