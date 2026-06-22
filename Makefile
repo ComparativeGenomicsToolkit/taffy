@@ -3,6 +3,7 @@ include ${rootPath}/include.mk
 
 srcDir = taffy/impl
 oneCodeDir = taffy/submodules/ONEcode
+bigWigDir = taffy/submodules/libBigWig
 blockVizDir = taffy/blockViz
 libHeaders = taffy/inc/*.h ${blockVizDir}/inc/*.h
 libTests = tests/*.c
@@ -29,11 +30,19 @@ abPOA:
 
 ${LIBDIR}/libabpoa.a : abPOA
 
+# Vendored libBigWig (local-file reader only; -DNOCURL drops the libcurl dep).
+# Built like abPOA into ${LIBDIR}/libBigWig.a and linked via -lBigWig.
+${LIBDIR}/libBigWig.a :
+	mkdir -p ${LIBDIR} ${INCLDIR}
+	cd ${bigWigDir} && ${CC} -O3 -g -fPIC -DNOCURL -c bwRead.c bwStats.c bwValues.c bwWrite.c io.c
+	${AR} rc ${LIBDIR}/libBigWig.a ${bigWigDir}/bwRead.o ${bigWigDir}/bwStats.o ${bigWigDir}/bwValues.o ${bigWigDir}/bwWrite.o ${bigWigDir}/io.o
+	ln -f ${bigWigDir}/bigWig.h ${bigWigDir}/bwCommon.h ${bigWigDir}/bwValues.h ${bigWigDir}/bigWigIO.h ${INCLDIR}
+
 ${sonLibDir}/sonLib.a : sonLib
 
 ${sonLibDir}/cuTest.a : sonLib
 
-stTafDependencies = ${sonLibDir}/sonLib.a ${sonLibDir}/cuTest.a ${LIBDIR}/libabpoa.a
+stTafDependencies = ${sonLibDir}/sonLib.a ${sonLibDir}/cuTest.a ${LIBDIR}/libabpoa.a ${LIBDIR}/libBigWig.a
 
 ${oneCodeDir}/ONElib.o : ${oneCodeDir}/ONElib.c ${oneCodeDir}/ONElib.h
 	${CC} ${CFLAGS} ${LDFLAGS} -fPIC -o ${oneCodeDir}/ONElib.o -c ${oneCodeDir}/ONElib.c
