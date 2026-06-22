@@ -299,12 +299,26 @@ if [[ "\$STAGE_LOCAL" -eq 1 ]]; then
     stage_bg "\$BB"
     stage_rc=0
     for p in "\${stage_pids[@]}"; do wait "\$p" || stage_rc=1; done
-    [[ "\$stage_rc" -eq 0 ]] || { echo "ERROR: a stage-in copy failed" >&2; exit 1; }
+    [[ "\$stage_rc" -eq 0 ]] || { echo "ERROR: a stage-in cp returned non-zero" >&2; exit 1; }
+    # VERIFY each staged copy matches its source byte count.  A cp to a full FS
+    # can return 0 yet truncate (write succeeds, flush doesn't) -- this 2.4TB
+    # stage (incl the 965GB HAL + 623GB bb) is exactly where that bit cmp5: the
+    # staged hg38 MAF read failed cryptically.  Catch truncation here.
+    for f in "\$UNI_TAF" "\$UNI_TAF.tui" "\$HG38" "\$HG38.tai" "\$HAL" "\$BB"; do
+        [[ -f "\$f" ]] || continue
+        ss=\$(stat -Lc %s "\$f" 2>/dev/null); ds=\$(stat -c %s "\$STAGE_DIR/\$(basename "\$f")" 2>/dev/null || echo -1)
+        [[ "\$ss" == "\$ds" ]] || { echo "ERROR: staged \$(basename "\$f") is \$ds bytes, source is \$ss -- truncated (scratch full?)" >&2; exit 1; }
+    done
+    # Index files (.tai/.tui) must be NEWER than the data they index, or taffy
+    # treats them as stale.  cp doesn't preserve mtimes and parallel staging
+    # finishes the tiny .tai long before the huge .gz -- so the staged .tai ends
+    # up OLDER than its .gz.  Touch the staged indexes last so they're newer.
+    for ix in "\$STAGE_DIR"/*.tai "\$STAGE_DIR"/*.tui; do [[ -f "\$ix" ]] && touch "\$ix"; done
     UNI_TAF="\$STAGE_DIR/\$(basename "\$UNI_TAF")"
     HG38="\$STAGE_DIR/\$(basename "\$HG38")"
     HAL="\$STAGE_DIR/\$(basename "\$HAL")"
     BB="\$STAGE_DIR/\$(basename "\$BB")"
-    echo "stage: all inputs staged to \$STAGE_DIR" >&2
+    echo "stage: all inputs staged + size-verified to \$STAGE_DIR" >&2
 fi
 
 # --- Sample the regions once (same regions for every tool). ------------
@@ -312,7 +326,7 @@ fi
 # sampler filters to canonical \$REF_GENOME.chrN and draws the windows.
 CHROM_STATS="\$OUTDIR/hg38.stats.txt"
 REGIONS="\$OUTDIR/regions.tsv"
-"\$TAFFY" stats -s -i "\$HG38" > "\$CHROM_STATS" 2>/dev/null || { echo "ERROR: taffy stats -s failed on \$HG38" >&2; exit 1; }
+"\$TAFFY" stats -s -i "\$HG38" > "\$CHROM_STATS" 2> "\$OUTDIR/stats.err" || { echo "ERROR: taffy stats -s failed on \$HG38:" >&2; cat "\$OUTDIR/stats.err" >&2; exit 1; }
 python3 "\$OUTDIR/sample_regions.py" --stats "\$CHROM_STATS" --refGenome "\$REF_GENOME" \\
     --sizes "\$SIZES_CSV" --nSamples "\$N_SAMPLES" --seed "\$SEED" > "\$REGIONS" \\
     || { echo "ERROR: region sampling failed" >&2; exit 1; }
@@ -384,8 +398,10 @@ register_pid() { pid_threads[\$1]=\$2; }
 for N in "\${SIZES[@]}"; do
     echo "=== size wave N=\$N ===" >&2
     t_wave=\$SECONDS
-    declare -A pids
-    declare -A rowfiles
+    unset pids rowfiles; declare -A pids rowfiles   # CLEAR stale keys: a declare-A on an existing
+                                                    # assoc array does NOT reset it, so a wave where
+                                                    # hal is skipped (size > HAL_MAX_SIZE) would else
+                                                    # re-append the prior wave's hal rowfiles.
     launched=0
     unset pid_threads; declare -A pid_threads
 
