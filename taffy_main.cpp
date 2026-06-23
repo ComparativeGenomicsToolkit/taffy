@@ -14,7 +14,7 @@ extern int taf_stats_main(int argc, char *argv[]);
 extern int taf_annotate_main(int argc, char *argv[]);
 extern int taf_lift_main(int argc, char *argv[]);
 extern int taf_chain_main(int argc, char *argv[]);
-extern int taf_gerp_main(int argc, char *argv[]);
+extern int taf_depth_main(int argc, char *argv[]);
 extern int taf_gerp_stats_main(int argc, char *argv[]);
 }
 
@@ -37,7 +37,7 @@ void usage() {
     fprintf(stderr, "    annotate       annotate a TAF file with labels from a wiggle file\n");
     fprintf(stderr, "    lift           lift a .wig annotation from ancestor coords to a leaf genome via .tui\n");
     fprintf(stderr, "    tui-chain      build a chained .tui sidecar (merges adjacent runs into longer chains for faster lift)\n");
-    fprintf(stderr, "    gerp           per-column GERP RS conservation scoring -> wig\n");
+    fprintf(stderr, "    depth          per-column leaf depth and/or GERP RS conservation -> wig\n");
     fprintf(stderr, "    gerp-stats      depth-correct + percentile-rank gerp output\n");
     fprintf(stderr, "\n");
 
@@ -77,8 +77,8 @@ int main(int argc, char *argv[]) {
         return taf_lift_main(argc - 1, argv + 1);
     } else if (strcmp(argv[1], "tui-chain") == 0) {
         return taf_chain_main(argc - 1, argv + 1);
-    } else if (strcmp(argv[1], "gerp") == 0) {
-        return taf_gerp_main(argc - 1, argv + 1);
+    } else if (strcmp(argv[1], "depth") == 0) {
+        return taf_depth_main(argc - 1, argv + 1);
     } else if (strcmp(argv[1], "gerp-stats") == 0) {
         return taf_gerp_stats_main(argc - 1, argv + 1);
     } else {

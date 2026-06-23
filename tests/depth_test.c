@@ -1,8 +1,8 @@
 /*
- * Unit tests for taffy/impl/gerp.c.  Focused on the Fitch parsimony
- * + branch-sum core (gerp_score_column) since that's the algorithmic
- * meat; the per-block driver is exercised by the end-to-end smoke
- * test against evolverMammals run from the harness above.
+ * Tests for the GERP scoring core (taffy/impl/gerp.c -- Fitch parsimony +
+ * branch-sum, gerp_score_column) PLUS end-to-end CLI tests of the `taffy depth`
+ * driver: leaf depth, named vs integer coords, --bin, and the opt-in output
+ * guards, run against tests/evolverMammals.maf via st_system.
  */
 
 #include "CuTest.h"
@@ -303,7 +303,51 @@ static void test_char_wrapper_matches_cset(CuTest *tc) {
     gerp_tree_destruct(gt);
 }
 
-CuSuite* gerp_test_suite(void) {
+// --- CLI / driver tests: `taffy depth` against evolverMammals.maf ---------
+// 5 leaves, referenced on Anc0, carries a `# hal` tree (so --depth needs no
+// -t).  st_system runs the built ./bin/taffy and returns its exit code, as in
+// stats_test.c / coverage_test.c.
+
+// Named --bin emits per-(row-0 seq, bin) records `name start end sum cnt`:
+// 5 columns, end>start, 0<cnt<=N, and 0<=sum<=cnt*n_leaves (depth <= 5 leaves).
+static void test_depth_named_bin_cli(CuTest *tc) {
+    const char *maf = "./tests/evolverMammals.maf";
+    int rc = st_system("./bin/taffy depth -i %s --coords named --bin 1000 "
+                       "--minLeaves 1 --depth ./tests/depth.named.bg", maf);
+    CuAssertIntEquals(tc, 0, rc);
+    CuAssertIntEquals(tc, 0, st_system("test -s ./tests/depth.named.bg"));
+    CuAssertIntEquals(tc, 0, st_system(
+        "awk 'NF!=5||$3<=$2||$5<=0||$5>1000||$4<0||$4>$5*5{exit 1}' "
+        "./tests/depth.named.bg"));
+    st_system("rm -f ./tests/depth.named.bg");
+}
+
+// At least one of --rs / --depth is required.
+static void test_depth_requires_output(CuTest *tc) {
+    int rc = st_system("./bin/taffy depth -i ./tests/evolverMammals.maf "
+                       ">/dev/null 2>&1");
+    CuAssertTrue(tc, rc != 0);
+}
+
+// Integer coords: a single chrom "uni", monotone 4-col bedGraph; needs a .tui.
+static void test_depth_integer_coords_cli(CuTest *tc) {
+    const char *maf = "./tests/evolverMammals.maf";
+    st_system("rm -f %s.tui ./tests/depth.int.bg", maf);  // clean slate
+    // Integer coords without a .tui error out.
+    int rc = st_system("./bin/taffy depth -i %s --coords integer --bin 1000 "
+                       "--depth ./tests/depth.int.bg >/dev/null 2>&1", maf);
+    CuAssertTrue(tc, rc != 0);
+    // Build the universal index, then integer --bin emits chrom "uni".
+    CuAssertIntEquals(tc, 0, st_system("./bin/taffy index -i %s -u", maf));
+    rc = st_system("./bin/taffy depth -i %s --coords integer --bin 1000 "
+                   "--minLeaves 1 --depth ./tests/depth.int.bg", maf);
+    CuAssertIntEquals(tc, 0, rc);
+    CuAssertIntEquals(tc, 0, st_system(
+        "awk '$1!=\"uni\"||NF!=4||$3<=$2{exit 1}' ./tests/depth.int.bg"));
+    st_system("rm -f %s.tui ./tests/depth.int.bg", maf);
+}
+
+CuSuite* depth_test_suite(void) {
     CuSuite* suite = CuSuiteNew();
     SUITE_ADD_TEST(suite, test_construct_and_introspect);
     SUITE_ADD_TEST(suite, test_all_present_no_subs);
@@ -315,5 +359,8 @@ CuSuite* gerp_test_suite(void) {
     SUITE_ADD_TEST(suite, test_polytomy_hartigan);
     SUITE_ADD_TEST(suite, test_paralog_union_cset);
     SUITE_ADD_TEST(suite, test_char_wrapper_matches_cset);
+    SUITE_ADD_TEST(suite, test_depth_named_bin_cli);
+    SUITE_ADD_TEST(suite, test_depth_requires_output);
+    SUITE_ADD_TEST(suite, test_depth_integer_coords_cli);
     return suite;
 }

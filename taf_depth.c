@@ -1,5 +1,5 @@
 /*
- * taffy gerp: per-column GERP RS conservation scoring -> wig output.
+ * taffy depth: per-column leaf depth and/or GERP RS conservation -> wig output.
  *
  * The reference (row 0) of each MAF/TAF block keys the wig record
  * (sequence_name + advancing position over non-gap row-0 bases).  In a
@@ -110,6 +110,8 @@ typedef struct {
     int64_t *bin_cnt;
     int64_t  bin_cap;
     int64_t  bin_n;
+    const char *bin_name;   // --bin named coords: this block's row-0 seq name
+    int64_t  bin_anchor;    // --bin named coords: row-0 start pos (bin 0's start)
 } GerpBlockResult;
 
 // Per-thread scratch -- one set per OpenMP worker thread.  entries[] is
@@ -122,12 +124,11 @@ typedef struct {
     uint8_t      *leaf_csets;
 } GerpThreadState;
 
-// --universal wig keys on a synthetic axis "uni<chunk>": chunk = column /
-// GERP_UNI_CHUNK, position = column % GERP_UNI_CHUNK + 1 (1-based).  Chunking
-// keeps each chrom under the bigWig 32-bit coordinate limit (2^32).  apes
-// T=3.27e9 < GERP_UNI_CHUNK so it is a single "uni0"; a larger T (577-way)
-// splits into uni0/uni1/...
-#define GERP_UNI_CHUNK 4000000000LL
+// Integer coords (--coords integer) key the wig on the raw universal column as a
+// single chrom "uni", 1-based position = column + 1.  No chunking, so the column
+// must fit a 32-bit wig coordinate: T is required to be < 2^31 (checked once T is
+// known).  Named coords (the default) key on the row-0 reference/ancestor seq,
+// which recurs across blocks and so needs a downstream sort (+ merge for --bin).
 
 // Emit one `variableStep chrom=<chrom>` header to the rs and/or depth buffer.
 static void gerp_emit_wig_header(GerpBlockResult *res, const char *chrom,
@@ -144,28 +145,37 @@ static void gerp_emit_wig_header(GerpBlockResult *res, const char *chrom,
     }
 }
 
-// --bin: write one binned bedGraph line on the universal axis -- the mean
-// depth over the bin's columns, on chrom uni<chunk> with the bin's
-// within-chunk [start, end).  GERP_UNI_CHUNK is required to be a multiple of
-// the bin size, so a bin never straddles a chunk boundary.
+// --bin integer coords: write one binned bedGraph line on the single "uni" chrom
+// -- the mean depth over the bin's columns, [bin*N, bin*N+cnt).  The column axis
+// is monotone, so this runs straight off the Phase-C running binner (already
+// sorted, no external sort).  Drops all-unscored bins (awk parity).
 static void gerp_flush_bin(LW *dout, int64_t bin, int64_t sum, int64_t cnt,
                            int64_t bin_size) {
-    if (sum <= 0 || cnt <= 0) return;   // drop all-unscored bins (awk parity)
-    int64_t c0    = bin * bin_size;
-    int64_t chunk = c0 / GERP_UNI_CHUNK;
-    int64_t ws    = c0 % GERP_UNI_CHUNK;
+    if (sum <= 0 || cnt <= 0) return;
+    int64_t start = bin * bin_size;
     char line[96];
-    int n = snprintf(line, sizeof line,
-                     "uni%" PRId64 "\t%" PRId64 "\t%" PRId64 "\t%.4g\n",
-                     chunk, ws, ws + cnt, (double)sum / (double)cnt);
+    int n = snprintf(line, sizeof line, "uni\t%" PRId64 "\t%" PRId64 "\t%.4g\n",
+                     start, start + cnt, (double)sum / (double)cnt);
     LW_putn(dout, line, (size_t)n);
 }
+
+// --bin named coords: the row-0 seq recurs non-monotonically across blocks (root
+// backbone interleaved with descendant --novel inserts) AND a universal MAF is
+// heavily fragmented (~1 block per ~15 columns), so emitting per block would
+// explode the output.  Depth is instead accumulated per (row-0 seq, bin) in a
+// hash keyed "name\tbin" -> NamedBinAgg, then dumped (unsorted) after the stream
+// as `name start end sum cnt` and reconciled downstream by `sort -k1,1 -k2,2n`
+// + a per-(name,bin) merge (sum the sum,cnt; emit start..start+cnt and sum/cnt).
+// start is the bin's earliest covered position; end = start+cnt (row-0 gap-free).
+// NOT dropped on sum==0 -- the count is needed in the merged denominator (a bin
+// split across shards must keep its full column total).
+typedef struct { int64_t start, sum, cnt; } NamedBinAgg;
 
 static void score_one_block(const GerpTree *gt, GerpThreadState *ts,
                             const Alignment *aln, GerpBlockResult *res,
                             GerpParalogPolicy policy, int64_t min_leaves,
                             double branch_scale, bool want_depth,
-                            bool depth_only, bool universal_wig,
+                            bool depth_only, bool coords_integer,
                             int64_t block_start_col, int64_t bin_size) {
     gerpbuf_reset(&res->rs);
     if (want_depth) gerpbuf_reset(&res->depth);
@@ -215,13 +225,11 @@ static void score_one_block(const GerpTree *gt, GerpThreadState *ts,
     // column is actually written -- so a block with no scored column (all
     // < min_leaves, common for ancestor-heavy universal-MAF blocks) writes
     // NOTHING rather than a dangling empty header (which wigToBigWig rejects).
-    // NAMED mode keys on row-0's seq name and fires once (hdr_emitted).
-    // --universal mode keys on "uni<chunk>" and re-fires when the chunk changes
-    // (cur_chunk).  rs and depth trigger on the same column, so their
-    // (chrom,pos) structure stays byte-identical (gerp-stats invariant).
-    // --depthOnly leaves the rs buffer empty.
-    bool    hdr_emitted = false;   // NAMED mode: header written yet?
-    int64_t cur_chunk   = -1;      // --universal mode: chunk of last header
+    // Both coord modes fire it exactly once per block (hdr_emitted): named on
+    // row-0's seq name, integer on the single "uni" chrom.  rs and depth trigger
+    // on the same column, so their (chrom,pos) structure stays byte-identical
+    // (gerp-stats invariant).  No --rs leaves the rs buffer empty.
+    bool hdr_emitted = false;
 
     int64_t n_leaves = gerp_tree_n_leaves(gt);
     int64_t anchor   = ref->start;  // 0-based; wig is 1-based -> +1 below
@@ -266,8 +274,13 @@ static void score_one_block(const GerpTree *gt, GerpThreadState *ts,
             // and drops a bin with no scored column.  The block's columns are
             // contiguous, so the touched bins form one contiguous range
             // [bin_first, bin_first+bin_n).
-            int64_t bin = (block_start_col + col) / bin_size;
-            if (res->bin_n == 0) res->bin_first = bin;
+            int64_t bin = coords_integer ? (block_start_col + col) / bin_size
+                                         : anchor / bin_size;
+            if (res->bin_n == 0) {
+                res->bin_first  = bin;
+                res->bin_name   = ref->sequence_name;  // named coords: row-0 seq
+                res->bin_anchor = anchor;               // named coords: bin 0 start
+            }
             int64_t idx = bin - res->bin_first;
             if (idx >= res->bin_n) {                   // start of the next bin
                 if (idx >= res->bin_cap) {
@@ -285,15 +298,11 @@ static void score_one_block(const GerpTree *gt, GerpThreadState *ts,
             res->bin_cnt[idx]++;   // every column -> bin-mean denominator
         } else if (scored) {
             int64_t wig_pos;
-            if (universal_wig) {
-                int64_t uc    = block_start_col + col;   // global universal column
-                int64_t chunk = uc / GERP_UNI_CHUNK;
-                wig_pos       = uc % GERP_UNI_CHUNK + 1;  // 1-based within chunk
-                if (chunk != cur_chunk) {                 // chunk start -> new header
-                    char unibuf[24];
-                    snprintf(unibuf, sizeof unibuf, "uni%" PRId64, chunk);
-                    gerp_emit_wig_header(res, unibuf, !depth_only, want_depth);
-                    cur_chunk = chunk;
+            if (coords_integer) {
+                wig_pos = (block_start_col + col) + 1;   // 1-based universal column
+                if (!hdr_emitted) {
+                    gerp_emit_wig_header(res, "uni", !depth_only, want_depth);
+                    hdr_emitted = true;
                 }
             } else {
                 wig_pos = anchor + 1;
@@ -323,28 +332,41 @@ static void score_one_block(const GerpTree *gt, GerpThreadState *ts,
 /////////////////////////////////////////////////////////////////////////////
 
 static void usage(void) {
-    fprintf(stderr, "taffy gerp [options]\n");
-    fprintf(stderr, "Compute per-column GERP RS conservation scores -> wig.\n");
+    fprintf(stderr, "taffy depth [options]\n");
+    fprintf(stderr, "Per-column leaf DEPTH and/or GERP RS conservation from a MAF/TAF -> wig.\n");
     fprintf(stderr, "-i --inputFile : Input MAF or TAF (auto-detected; bgzipped ok).  Reads stdin if omitted.\n");
-    fprintf(stderr, "-o --outputFile : Output wig.  Writes stdout if omitted.\n");
-    fprintf(stderr, "-c --useCompression : Bgzip the output (matches taffy view).\n");
+    fprintf(stderr, "Outputs -- at least one required, each opt-in:\n");
+    fprintf(stderr, "  --depth FILE : Per-column (or --bin binned) count of non-gap leaves at each column.\n");
+    fprintf(stderr, "  --rs FILE    : Per-column GERP RS conservation score (Hartigan tree walk).  Needs a tree.\n");
+    fprintf(stderr, "--coords MODE : Wig coordinate system (default named):\n");
+    fprintf(stderr, "    named   -- row-0 reference/ancestor seq + position.  Works for any MAF.  In a universal\n");
+    fprintf(stderr, "               MAF the row-0 seq recurs, so the output is NOT sorted: pipe through\n");
+    fprintf(stderr, "               `sort -k1,1 -k2,2n` (+ the merge below for --bin) before wigToBigWig.\n");
+    fprintf(stderr, "    integer -- the raw universal column [0,T) as a single chrom 'uni' (1-based).  Monotone\n");
+    fprintf(stderr, "               (already sorted) but a 32-bit wig coord, so errors if T > 2^31.  Requires .tui.\n");
+    fprintf(stderr, "--bin N : Emit --depth as a binned bedGraph (mean depth per N bin) instead of per-column.\n");
+    fprintf(stderr, "          integer coords -> ready-to-use bedGraph.  named coords -> PER-BLOCK PARTIALS\n");
+    fprintf(stderr, "          (name start end sum cnt); reconcile with: sort -k1,1 -k2,2n | <sum (sum,cnt) per\n");
+    fprintf(stderr, "          (name, start/N) -> sum/cnt>.  Only bins --depth (not --rs).\n");
+    fprintf(stderr, "-c --useCompression : Bgzip the output(s).\n");
     fprintf(stderr, "-t --tree : Newick tree override.  Default: the `# hal` tree comment in the input header.\n");
-    fprintf(stderr, "-D --depthFile : Optional second wig with the per-base count of A/C/G/T leaves at each column.\n");
-    fprintf(stderr, "-r --region SEQ:START-END : Restrict to one anchor chrom range.  Requires <inputFile>.tui (universal MAF, auto-detected) OR <inputFile>.tai (regular MAF).  Half-open, 0-based.\n");
-    fprintf(stderr, "-R --regionFile FILE : Like -r but a file of regions (one SEQ:START-END per line; '#' comments + blanks ignored).  Amortises one .tui/.tai load across all regions -- intended for SLURM-style sharding with many small regions per shard.\n");
-    fprintf(stderr, "   --columnRange LO-HI : Restrict to a universal-column range (half-open, 0-based; HI <= T from `taffy stats -u`).  Requires .tui.  Each universal column belongs to exactly one shard, so this is the natural unit for SLURM sharding -- no chrom-by-chrom double-counting.  Mutually exclusive with -r/-R.\n");
-    fprintf(stderr, "--branchScale : Global multiplier on branch lengths (default 1.0).\n");
+    fprintf(stderr, "-r --region SEQ:START-END : Restrict to one anchor chrom range.  Requires <inputFile>.tui\n");
+    fprintf(stderr, "     (universal MAF, auto-detected) OR <inputFile>.tai (regular MAF).  Half-open, 0-based.\n");
+    fprintf(stderr, "     Incompatible with --coords integer (a leaf region maps to scattered columns).\n");
+    fprintf(stderr, "-R --regionFile FILE : Like -r but a file of regions (one SEQ:START-END per line; '#'\n");
+    fprintf(stderr, "     comments + blanks ignored).  Amortises one index load -- for SLURM region sharding.\n");
+    fprintf(stderr, "   --columnRange LO-HI : Restrict to a universal-column range (half-open, 0-based; HI <= T\n");
+    fprintf(stderr, "     from `taffy stats -u`).  Requires .tui.  The natural unit for SLURM sharding.  With\n");
+    fprintf(stderr, "     --coords integer --bin, LO/HI must be multiples of N.  Mutually exclusive with -r/-R.\n");
     fprintf(stderr, "--minLeaves : Minimum surviving non-gap leaves to score a column (default 2).\n");
-    fprintf(stderr, "--paralog MODE : How to treat duplicate-species rows in one block (default union).\n");
+    fprintf(stderr, "--branchScale : Global multiplier on branch lengths (default 1.0).\n");
+    fprintf(stderr, "--paralog MODE : Duplicate-species rows in one block (default union):\n");
     fprintf(stderr, "                 union -- OR each species's paralog bases into a multi-state leaf cset (Hartigan).\n");
     fprintf(stderr, "                 skip  -- drop the entire block (strict GERP++ semantics).\n");
     fprintf(stderr, "                 first -- score using only the first-seen row per species.\n");
     fprintf(stderr, "--skipParalogs : Alias for --paralog skip.\n");
-    fprintf(stderr, "--keepParalogs : Alias for --paralog first (kept for back-compat; prefer --paralog union).\n");
+    fprintf(stderr, "--keepParalogs : Alias for --paralog first.\n");
     fprintf(stderr, "-T --threads N : Parallel block scoring + bgzf I/O on bgzipped streams (default 1).\n");
-    fprintf(stderr, "--depthOnly : Only compute/emit the -D depth wig; skip the RS tree walk entirely (much faster, esp. on deep trees).  Requires -D; -o gets no data.\n");
-    fprintf(stderr, "--universal : Key the wig on the integer universal column (chrom 'uni<chunk>', 1-based pos within chunk) instead of row-0 ancestor coords.  Output is in globally-monotone column order -- already sorted for wigToBigWig.  Incompatible with -r/-R (use --columnRange or whole-file streaming).\n");
-    fprintf(stderr, "--bin N : Emit depth as a binned bedGraph (mean depth per N-column bin) on the universal axis, instead of per-column -- replaces the external awk binner.  Requires --universal, --depthOnly, and -D.  N must divide the 4e9 chunk size (e.g. 1000, 10000).\n");
     fprintf(stderr, "-l --logLevel : Set the log level.\n");
     fprintf(stderr, "-h --help : Print this help message.\n");
 }
@@ -356,8 +378,9 @@ enum {
     OPT_SKIP_PARALOGS,
     OPT_KEEP_PARALOGS,
     OPT_COLUMN_RANGE,
-    OPT_DEPTH_ONLY,
-    OPT_UNIVERSAL,
+    OPT_RS,
+    OPT_DEPTH,
+    OPT_COORDS,
     OPT_BIN,
 };
 
@@ -384,7 +407,7 @@ typedef struct {
 static GerpRegion *read_regions_file(const char *path, int64_t *n_out) {
     FILE *f = fopen(path, "r");
     if (f == NULL) {
-        fprintf(stderr, "taffy gerp: cannot open --regionFile: %s\n", path);
+        fprintf(stderr, "taffy depth: cannot open --regionFile: %s\n", path);
         return NULL;
     }
     char line[4096];
@@ -397,7 +420,7 @@ static GerpRegion *read_regions_file(const char *path, int64_t *n_out) {
         // Reject lines that didn't fit -- otherwise we'd silently parse
         // a truncated region.
         if (len == sizeof(line) - 1 && line[len-1] != '\n') {
-            fprintf(stderr, "taffy gerp: --regionFile %s line %" PRIi64 ": "
+            fprintf(stderr, "taffy depth: --regionFile %s line %" PRIi64 ": "
                             "line exceeds %zu bytes\n",
                     path, n_lines, sizeof(line) - 1);
             for (int64_t i = 0; i < n_regions; i++) free(out[i].seq);
@@ -415,7 +438,7 @@ static GerpRegion *read_regions_file(const char *path, int64_t *n_out) {
         int64_t start = 0, length = 0;
         char *seq = tai_parse_region(p, &start, &length);
         if (seq == NULL) {
-            fprintf(stderr, "taffy gerp: --regionFile %s line %" PRIi64 ": "
+            fprintf(stderr, "taffy depth: --regionFile %s line %" PRIi64 ": "
                             "invalid region: %s\n", path, n_lines, p);
             for (int64_t i = 0; i < n_regions; i++) free(out[i].seq);
             free(out); fclose(f);
@@ -436,67 +459,67 @@ static GerpRegion *read_regions_file(const char *path, int64_t *n_out) {
     return out;
 }
 
-int taf_gerp_main(int argc, char *argv[]) {
+int taf_depth_main(int argc, char *argv[]) {
     time_t startTime = time(NULL);
 
     char *logLevelString = NULL;
     char *inputFile      = NULL;
-    char *outputFile     = NULL;
-    char *depthFile      = NULL;
+    char *rsFile         = NULL;   // --rs    : GERP RS conservation wig (opt-in)
+    char *depthFile      = NULL;   // --depth : leaf-depth wig (opt-in)
     char *treeFile       = NULL;
     char *region         = NULL;
     char *regionFile     = NULL;
     char *columnRangeArg = NULL;
+    char *coordsArg      = NULL;   // --coords named|integer (default named)
     bool use_compression = false;
     double branch_scale  = 1.0;
     int64_t min_leaves   = 2;
     GerpParalogPolicy paralog_policy = GERP_PARALOG_UNION;
     int n_threads        = 1;
-    bool depth_only      = false;
-    bool universal_wig   = false;
+    bool coords_integer  = false;  // --coords integer : raw universal column axis
     int64_t bin_size     = 0;
 
     while (1) {
         static struct option long_options[] = {
             { "logLevel",       required_argument, 0, 'l' },
             { "inputFile",      required_argument, 0, 'i' },
-            { "outputFile",     required_argument, 0, 'o' },
+            { "rs",             required_argument, 0, OPT_RS },
+            { "depth",          required_argument, 0, OPT_DEPTH },
             { "useCompression", no_argument,       0, 'c' },
             { "tree",           required_argument, 0, 't' },
-            { "depthFile",      required_argument, 0, 'D' },
             { "region",         required_argument, 0, 'r' },
             { "regionFile",     required_argument, 0, 'R' },
             { "columnRange",    required_argument, 0, OPT_COLUMN_RANGE },
+            { "coords",         required_argument, 0, OPT_COORDS },
             { "branchScale",    required_argument, 0, OPT_BRANCH_SCALE },
             { "minLeaves",      required_argument, 0, OPT_MIN_LEAVES },
             { "paralog",        required_argument, 0, OPT_PARALOG },
             { "skipParalogs",   no_argument,       0, OPT_SKIP_PARALOGS },
             { "keepParalogs",   no_argument,       0, OPT_KEEP_PARALOGS },
             { "threads",        required_argument, 0, 'T' },
-            { "depthOnly",      no_argument,       0, OPT_DEPTH_ONLY },
-            { "universal",      no_argument,       0, OPT_UNIVERSAL },
             { "bin",            required_argument, 0, OPT_BIN },
             { "help",           no_argument,       0, 'h' },
             { 0, 0, 0, 0 }
         };
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:o:ct:D:r:R:T:h", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:ct:r:R:T:h", long_options, &option_index);
         if (key == -1) break;
         switch (key) {
             case 'l': logLevelString = optarg; break;
             case 'i': inputFile      = optarg; break;
-            case 'o': outputFile     = optarg; break;
+            case OPT_RS:    rsFile    = optarg; break;
+            case OPT_DEPTH: depthFile = optarg; break;
             case 'c': use_compression = true;  break;
             case 't': treeFile       = optarg; break;
-            case 'D': depthFile      = optarg; break;
             case 'r': region         = optarg; break;
             case 'R': regionFile     = optarg; break;
             case 'T': n_threads      = atoi(optarg); break;
+            case OPT_COORDS:        coordsArg     = optarg; break;
             case OPT_BRANCH_SCALE:  branch_scale  = atof(optarg); break;
             case OPT_MIN_LEAVES:    min_leaves    = atol(optarg); break;
             case OPT_PARALOG:
                 if (parse_paralog_policy(optarg, &paralog_policy) != 0) {
-                    fprintf(stderr, "taffy gerp: --paralog must be one of union|skip|first (got %s)\n",
+                    fprintf(stderr, "taffy depth: --paralog must be one of union|skip|first (got %s)\n",
                             optarg);
                     return 1;
                 }
@@ -504,8 +527,6 @@ int taf_gerp_main(int argc, char *argv[]) {
             case OPT_SKIP_PARALOGS: paralog_policy = GERP_PARALOG_SKIP;  break;
             case OPT_KEEP_PARALOGS: paralog_policy = GERP_PARALOG_FIRST; break;
             case OPT_COLUMN_RANGE:  columnRangeArg = optarg; break;
-            case OPT_DEPTH_ONLY:    depth_only     = true;   break;
-            case OPT_UNIVERSAL:     universal_wig  = true;   break;
             case OPT_BIN:           bin_size       = atoll(optarg); break;
             case 'h': usage(); return 0;
             default:  usage(); return 1;
@@ -513,19 +534,34 @@ int taf_gerp_main(int argc, char *argv[]) {
     }
     if (n_threads < 1) n_threads = 1;
 
+    // Output toggles: --rs and --depth are each opt-in (>=1 required, checked
+    // below).  No --rs -> skip the RS tree walk entirely (the old --depthOnly).
+    bool want_rs    = (rsFile != NULL);
+    bool depth_only = !want_rs;
+    // Coordinate system: --coords named (default) | integer.
+    if (coordsArg != NULL) {
+        if      (strcmp(coordsArg, "named")   == 0) coords_integer = false;
+        else if (strcmp(coordsArg, "integer") == 0) coords_integer = true;
+        else {
+            fprintf(stderr, "taffy depth: --coords must be 'named' or 'integer' (got %s)\n",
+                    coordsArg);
+            return 1;
+        }
+    }
+
     st_setLogLevelFromString(logLevelString);
     LI_set_bgzf_threads(n_threads);
 
     // Input.
     FILE *in_fh = (inputFile == NULL) ? stdin : fopen(inputFile, "r");
     if (in_fh == NULL) {
-        fprintf(stderr, "taffy gerp: cannot open input file: %s\n", inputFile);
+        fprintf(stderr, "taffy depth: cannot open input file: %s\n", inputFile);
         return 1;
     }
     LI *li = LI_construct(in_fh);
     int input_format = check_input_format(LI_peek_at_next_line(li));
     if (input_format != 0 && input_format != 1) {
-        fprintf(stderr, "taffy gerp: input must be MAF or TAF\n");
+        fprintf(stderr, "taffy depth: input must be MAF or TAF\n");
         return 1;
     }
     bool rle = false;
@@ -538,13 +574,13 @@ int taf_gerp_main(int argc, char *argv[]) {
     if (treeFile != NULL) {
         FILE *tf = fopen(treeFile, "r");
         if (tf == NULL) {
-            fprintf(stderr, "taffy gerp: cannot open tree file: %s\n", treeFile);
+            fprintf(stderr, "taffy depth: cannot open tree file: %s\n", treeFile);
             return 1;
         }
         fseek(tf, 0, SEEK_END);
         long n = ftell(tf);
         if (n < 0) {
-            fprintf(stderr, "taffy gerp: ftell failed on tree file: %s\n", treeFile);
+            fprintf(stderr, "taffy depth: ftell failed on tree file: %s\n", treeFile);
             fclose(tf);
             return 1;
         }
@@ -556,7 +592,7 @@ int taf_gerp_main(int argc, char *argv[]) {
     } else {
         Tag *hal = tag_find(header_tag, (char *) TAF_HAL_TREE_KEY);
         if (hal == NULL) {
-            fprintf(stderr, "taffy gerp: no -t tree given and input header has no `# hal` tree.\n"
+            fprintf(stderr, "taffy depth: no -t tree given and input header has no `# hal` tree.\n"
                             "  Either pass -t <tree.nwk> or supply input from cactus-hal2maf which preserves\n"
                             "  the tree as a `# hal` comment.\n");
             return 1;
@@ -566,58 +602,69 @@ int taf_gerp_main(int argc, char *argv[]) {
     GerpTree *gt = gerp_tree_construct(newick);
     free(newick);
     if (gt == NULL) {
-        fprintf(stderr, "taffy gerp: failed to parse Newick tree\n");
+        fprintf(stderr, "taffy depth: failed to parse Newick tree\n");
         return 1;
     }
-    st_logInfo("taffy gerp: tree has %" PRIi64 " leaves\n", gerp_tree_n_leaves(gt));
+    st_logInfo("taffy depth: tree has %" PRIi64 " leaves\n", gerp_tree_n_leaves(gt));
 
     // CLI mutual-exclusion check goes BEFORE the output file opens so a
     // bad combination doesn't leave a stub output file behind.  -r, -R,
     // and --columnRange are pairwise exclusive (full-fledged validation
     // of the individual values happens later, after the index is loaded).
     if ((region != NULL) + (regionFile != NULL) + (columnRangeArg != NULL) > 1) {
-        fprintf(stderr, "taffy gerp: -r, -R, and --columnRange are mutually exclusive\n");
+        fprintf(stderr, "taffy depth: -r, -R, and --columnRange are mutually exclusive\n");
         return 1;
     }
-    if (depth_only && depthFile == NULL) {
-        fprintf(stderr, "taffy gerp: --depthOnly requires -D/--depthFile (it computes no RS for -o)\n");
+    // At least one output must be requested -- each is opt-in.
+    if (rsFile == NULL && depthFile == NULL) {
+        fprintf(stderr, "taffy depth: need at least one output -- pass --rs FILE and/or --depth FILE\n");
         return 1;
     }
-    if (universal_wig && (region != NULL || regionFile != NULL)) {
-        fprintf(stderr, "taffy gerp: --universal is incompatible with -r/-R -- a leaf region maps to\n"
-                        "  non-contiguous universal columns.  Use --columnRange or whole-file streaming.\n");
+    // Integer coords are the raw universal column [0,T): a contiguous-column
+    // concept, so -r/-R (a leaf region -> scattered columns) is out.  Use
+    // --columnRange or whole-file streaming.  (The T < 2^31 cap is enforced
+    // once T is known -- after the .tui loads, or per-block while streaming.)
+    if (coords_integer && (region != NULL || regionFile != NULL)) {
+        fprintf(stderr, "taffy depth: --coords integer is incompatible with -r/-R -- a leaf region maps\n"
+                        "  to non-contiguous universal columns.  Use --columnRange or whole-file streaming.\n");
         return 1;
     }
     if (bin_size < 0) {
-        fprintf(stderr, "taffy gerp: --bin N must be > 0\n");
+        fprintf(stderr, "taffy depth: --bin N must be > 0\n");
         return 1;
     }
     if (bin_size > 0) {
-        if (!universal_wig || !depth_only || depthFile == NULL) {
-            fprintf(stderr, "taffy gerp: --bin requires --universal, --depthOnly, and -D\n");
+        // --bin bins the leaf-depth output (mean depth per bin).  It does not
+        // bin RS, so require --depth and forbid --rs.
+        if (depthFile == NULL) {
+            fprintf(stderr, "taffy depth: --bin requires --depth FILE (it bins the depth output)\n");
             return 1;
         }
-        if (GERP_UNI_CHUNK % bin_size != 0) {
-            fprintf(stderr, "taffy gerp: --bin N must divide the universal chunk size %lld "
-                            "(use e.g. 1000, 10000)\n", (long long)GERP_UNI_CHUNK);
+        if (rsFile != NULL) {
+            fprintf(stderr, "taffy depth: --bin only bins --depth; drop --rs (or run RS separately)\n");
             return 1;
         }
     }
 
-    // Output(s).
-    FILE *out_fh = (outputFile == NULL) ? stdout : fopen(outputFile, "w");
-    if (out_fh == NULL) {
-        fprintf(stderr, "taffy gerp: cannot open output file: %s\n", outputFile);
-        return 1;
+    // Outputs -- each opt-in (validated above: at least one is set).  There is
+    // no stdout default; a wig is written only to its named file.
+    LW   *out    = NULL;   // --rs
+    FILE *out_fh = NULL;
+    if (rsFile != NULL) {
+        out_fh = fopen(rsFile, "w");
+        if (out_fh == NULL) {
+            fprintf(stderr, "taffy depth: cannot open --rs file: %s\n", rsFile);
+            return 1;
+        }
+        out = LW_construct(out_fh, use_compression);
     }
-    LW *out  = LW_construct(out_fh, use_compression);
-    LW *dout = NULL;
+    LW   *dout    = NULL;  // --depth
     FILE *dout_fh = NULL;
     bool want_depth = (depthFile != NULL);
     if (want_depth) {
         dout_fh = fopen(depthFile, "w");
         if (dout_fh == NULL) {
-            fprintf(stderr, "taffy gerp: cannot open depth file: %s\n", depthFile);
+            fprintf(stderr, "taffy depth: cannot open --depth file: %s\n", depthFile);
             return 1;
         }
         dout = LW_construct(dout_fh, use_compression);
@@ -662,14 +709,14 @@ int taf_gerp_main(int argc, char *argv[]) {
     if (regionFile != NULL) {
         regions = read_regions_file(regionFile, &n_regions);
         if (regions == NULL) return 1;
-        st_logInfo("taffy gerp: %" PRIi64 " regions read from %s\n",
+        st_logInfo("taffy depth: %" PRIi64 " regions read from %s\n",
                    n_regions, regionFile);
     } else if (region != NULL) {
         regions = st_calloc(1, sizeof(GerpRegion));
         regions[0].seq = tai_parse_region(region, &regions[0].start,
                                           &regions[0].length);
         if (regions[0].seq == NULL) {
-            fprintf(stderr, "taffy gerp: invalid region: %s\n", region);
+            fprintf(stderr, "taffy depth: invalid region: %s\n", region);
             free(regions);
             return 1;
         }
@@ -689,7 +736,7 @@ int taf_gerp_main(int argc, char *argv[]) {
         char extra = 0;
         if (sscanf(columnRangeArg, "%lld-%lld%c", &lo, &hi, &extra) != 2 ||
             lo < 0 || hi < lo) {
-            fprintf(stderr, "taffy gerp: invalid --columnRange %s "
+            fprintf(stderr, "taffy depth: invalid --columnRange %s "
                             "(expected LO-HI with HI >= LO >= 0)\n", columnRangeArg);
             return 1;
         }
@@ -700,14 +747,14 @@ int taf_gerp_main(int argc, char *argv[]) {
         // happens to be zero (T < N or rounding).  Skip all work cleanly
         // so the runner doesn't have to special-case it.
         if (lo == hi) empty_col_range = true;
-        // --bin keys each bin's bedGraph interval on the bin START (bin*N), so
-        // a shard must begin and end ON bin boundaries -- otherwise its first
-        // (or last) bin is processed from the middle, and two shards would
-        // emit overlapping records for the boundary bin (wigToBigWig rejects).
-        // Whole-file streaming (start 0) is inherently aligned.
-        if (bin_size > 0 && (lo % bin_size != 0 || hi % bin_size != 0)) {
-            fprintf(stderr, "taffy gerp: with --bin %lld, --columnRange LO and HI must be "
-                            "multiples of %lld (shard boundaries must fall on bin boundaries)\n",
+        // Integer coords run a column-monotone running binner, so a shard must
+        // begin/end ON bin boundaries -- else its first/last bin is processed
+        // mid-bin and two shards emit overlapping records for the boundary bin
+        // (wigToBigWig rejects).  Named coords reconcile split bins downstream
+        // (sort+merge), so they don't need aligned shards.
+        if (bin_size > 0 && coords_integer && (lo % bin_size != 0 || hi % bin_size != 0)) {
+            fprintf(stderr, "taffy depth: with --coords integer --bin %lld, --columnRange LO and HI\n"
+                            "  must be multiples of %lld (shard boundaries must fall on bin boundaries)\n",
                     (long long)bin_size, (long long)bin_size);
             return 1;
         }
@@ -720,51 +767,63 @@ int taf_gerp_main(int argc, char *argv[]) {
     Tui  *tui    = NULL;
     Tai  *tai    = NULL;
     FILE *tai_fh = NULL;
-    if (regions != NULL || have_col_range) {
+    if (regions != NULL || have_col_range || coords_integer) {
         if (inputFile == NULL) {
-            fprintf(stderr, "taffy gerp: -r/-R/--columnRange requires -i <file> (cannot index stdin)\n");
+            fprintf(stderr, "taffy depth: -r/-R/--columnRange/--coords integer require -i <file> (cannot index stdin)\n");
             return 1;
         }
         char *tui_fn = tui_path(inputFile);
         bool tui_present = (access(tui_fn, F_OK) == 0);
-        if (have_col_range && !tui_present) {
-            fprintf(stderr, "taffy gerp: --columnRange requires a .tui index: %s\n", tui_fn);
+        if ((have_col_range || coords_integer) && !tui_present) {
+            fprintf(stderr, "taffy depth: %s requires a .tui index (universal MAF -- build with\n"
+                            "  `taffy index -u`), or use --coords named: %s\n",
+                    have_col_range ? "--columnRange" : "--coords integer", tui_fn);
             free(tui_fn);
             return 1;
         }
         if (tui_present) {
             tui = tui_load(tui_fn);
             if (tui == NULL) {
-                fprintf(stderr, "taffy gerp: cannot open .tui: %s\n", tui_fn);
+                fprintf(stderr, "taffy depth: cannot open .tui: %s\n", tui_fn);
                 free(tui_fn);
                 return 1;
             }
             free(tui_fn);
-            st_logInfo("taffy gerp: loaded .tui index (universal MAF mode)\n");
+            st_logInfo("taffy depth: loaded .tui index (universal MAF mode)\n");
         } else {
             free(tui_fn);
             char *tai_fn = tai_path(inputFile);
             tai_fh = fopen(tai_fn, "r");
             if (tai_fh == NULL) {
-                fprintf(stderr, "taffy gerp: cannot open index (.tui or .tai must exist for %s): %s\n",
+                fprintf(stderr, "taffy depth: cannot open index (.tui or .tai must exist for %s): %s\n",
                         inputFile, tai_fn);
                 free(tai_fn);
                 return 1;
             }
             tai = tai_load(tai_fh, input_format == 1);
             free(tai_fn);
-            st_logInfo("taffy gerp: loaded .tai index\n");
+            st_logInfo("taffy depth: loaded .tai index\n");
         }
         if (have_col_range) {
             int64_t T = tui_total_columns(tui);
             if (col_range_iv.end > T) {
-                fprintf(stderr, "taffy gerp: --columnRange %" PRIi64 "-%" PRIi64
+                fprintf(stderr, "taffy depth: --columnRange %" PRIi64 "-%" PRIi64
                                 " exceeds T=%" PRIi64 " (total universal columns).\n",
                         col_range_iv.start, col_range_iv.end, T);
                 return 1;
             }
-            st_logInfo("taffy gerp: column-range mode, [%" PRIi64 ", %" PRIi64 ") of T=%" PRIi64 "\n",
+            st_logInfo("taffy depth: column-range mode, [%" PRIi64 ", %" PRIi64 ") of T=%" PRIi64 "\n",
                        col_range_iv.start, col_range_iv.end, T);
+        }
+        // Integer coords are a single 32-bit-indexed "uni" chrom, so T must fit.
+        if (coords_integer) {
+            int64_t Tc = tui_total_columns(tui);
+            if (Tc > (1LL << 31)) {
+                fprintf(stderr, "taffy depth: --coords integer needs <= 2^31 universal columns, but\n"
+                                "  T=%" PRIi64 " -- a 32-bit wig can't index it.  Use --coords named.\n", Tc);
+                return 1;
+            }
+            st_logInfo("taffy depth: integer coords, single \"uni\" chrom, T=%" PRIi64 "\n", Tc);
         }
     }
 
@@ -773,9 +832,14 @@ int taf_gerp_main(int argc, char *argv[]) {
     // over the shared tui/tai, then runs the inner read/score/emit batched
     // loop to exhaustion).  Empty column-range -> 0 iterations (success
     // no-op for SLURM shards that ended up with a zero slice).
-    // --bin running binner: depth accumulates across blocks (in column order)
-    // into the current universal-column bin; emitted when the bin advances.
+    // integer --bin running binner: depth accumulates across blocks (in column
+    // order) into the current universal-column bin; emitted when the bin advances.
     int64_t cur_bin = -1, cur_sum = 0, cur_cnt = 0;
+    // named --bin: accumulate (row-0 seq, bin) -> NamedBinAgg here (the running
+    // binner can't, since the row-0 seq recurs); dumped after the stream.
+    stHash *bin_hash = (bin_size > 0 && !coords_integer)
+        ? stHash_construct3(stHash_stringKey, stHash_stringEqualKey, free, free)
+        : NULL;
 
     int64_t n_iter = (regions != NULL) ? n_regions
                    : empty_col_range   ? 0
@@ -793,12 +857,12 @@ int taf_gerp_main(int argc, char *argv[]) {
                                 &n_uiv);
                 tui_it = tui_extract_iterator(tui, li, input_format == 1,
                                               rle, uiv, n_uiv);
-                st_logDebug("taffy gerp: region %s:%" PRIi64 "-%" PRIi64
+                st_logDebug("taffy depth: region %s:%" PRIi64 "-%" PRIi64
                             " resolved via .tui to %" PRIi64 " universal intervals\n",
                             r->seq, r->start, r->start + r->length, n_uiv);
             } else {
                 tai_it = tai_iterator(tai, li, rle, r->seq, r->start, r->length);
-                st_logDebug("taffy gerp: region %s:%" PRIi64 "-%" PRIi64 " via .tai\n",
+                st_logDebug("taffy depth: region %s:%" PRIi64 "-%" PRIi64 " via .tai\n",
                             r->seq, r->start, r->start + r->length);
             }
         } else if (have_col_range) {
@@ -888,7 +952,7 @@ int taf_gerp_main(int argc, char *argv[]) {
 #endif
                 score_one_block(gt, &ts[t], batch_aln[i], &results[i],
                                 paralog_policy, min_leaves, branch_scale,
-                                want_depth, depth_only, universal_wig,
+                                want_depth, depth_only, coords_integer,
                                 batch_col[i], bin_size);
             }
 
@@ -896,7 +960,7 @@ int taf_gerp_main(int argc, char *argv[]) {
             for (int i = 0; i < n_read; i++) {
                 GerpBlockResult *r = &results[i];
                 if (r->status == GERP_BLOCK_UNKNOWN_SPECIES) {
-                    fprintf(stderr, "taffy gerp: row in block has species not in tree: %s\n"
+                    fprintf(stderr, "taffy depth: row in block has species not in tree: %s\n"
                                     "  (pass -t with a tree that covers all leaves in the alignment, or\n"
                                     "   drop the offending rows upstream)\n",
                             r->unknown_seq ? r->unknown_seq : "(unknown)");
@@ -904,7 +968,7 @@ int taf_gerp_main(int argc, char *argv[]) {
                     break;
                 }
                 if (r->bad_strand) {
-                    fprintf(stderr, "taffy gerp: row-0 is on the reverse strand in a block "
+                    fprintf(stderr, "taffy depth: row-0 is on the reverse strand in a block "
                                     "(%s).  Re-orient with taffy view -U query (or upstream) "
                                     "before scoring.\n",
                             r->bad_strand_seq ? r->bad_strand_seq : "(unknown)");
@@ -917,11 +981,11 @@ int taf_gerp_main(int argc, char *argv[]) {
                     continue;
                 }
                 n_scored_cols += r->cols_scored;
-                if (bin_size > 0) {
-                    // Merge this block's per-bin partials into the running
-                    // binner; the boundary bin is shared with the previous
-                    // block, so accumulate until the bin index advances, then
-                    // flush (the -1 sentinel / zero-count flush is a no-op).
+                if (bin_size > 0 && coords_integer) {
+                    // Integer coords: columns are monotone, so merge this block's
+                    // per-bin partials into the running binner (the boundary bin
+                    // is shared with the previous block) and flush when the bin
+                    // index advances.  Output is already sorted.
                     for (int64_t k = 0; k < r->bin_n; k++) {
                         int64_t bin = r->bin_first + k;
                         if (bin != cur_bin) {
@@ -931,8 +995,29 @@ int taf_gerp_main(int argc, char *argv[]) {
                         cur_sum += r->bin_sum[k];
                         cur_cnt += r->bin_cnt[k];
                     }
+                } else if (bin_size > 0) {
+                    // Named coords: accumulate per (row-0 seq, bin) so the
+                    // recurrence collapses to one record per bin, not one per
+                    // block.  bin 0 starts at the block's row-0 start (mid-bin if
+                    // the block began mid-bin); later bins start on their boundary.
+                    for (int64_t k = 0; k < r->bin_n; k++) {
+                        int64_t start = (k == 0) ? r->bin_anchor
+                                                 : (r->bin_first + k) * bin_size;
+                        char key[600];
+                        snprintf(key, sizeof key, "%s\t%" PRId64,
+                                 r->bin_name, r->bin_first + k);
+                        NamedBinAgg *agg = stHash_search(bin_hash, key);
+                        if (agg == NULL) {
+                            agg = st_malloc(sizeof(*agg));
+                            agg->start = start; agg->sum = 0; agg->cnt = 0;
+                            stHash_insert(bin_hash, stString_copy(key), agg);
+                        }
+                        if (start < agg->start) agg->start = start;
+                        agg->sum += r->bin_sum[k];
+                        agg->cnt += r->bin_cnt[k];
+                    }
                 } else {
-                    if (r->rs.len > 0)            LW_putn(out,  r->rs.buf,    r->rs.len);
+                    if (out != NULL && r->rs.len > 0)   LW_putn(out,  r->rs.buf,    r->rs.len);
                     if (want_depth && r->depth.len > 0) LW_putn(dout, r->depth.buf, r->depth.len);
                 }
             }
@@ -966,8 +1051,32 @@ int taf_gerp_main(int argc, char *argv[]) {
         free(uiv);
     }
 
-    // Flush the last --bin partial (no successor block to trigger its flush).
-    if (bin_size > 0) gerp_flush_bin(dout, cur_bin, cur_sum, cur_cnt, bin_size);
+    // Flush the last integer-coords bin (the running binner has no successor
+    // block to trigger it).  Named coords accumulate in bin_hash instead.
+    if (bin_size > 0 && coords_integer)
+        gerp_flush_bin(dout, cur_bin, cur_sum, cur_cnt, bin_size);
+
+    // Named --bin: dump the accumulated bins, unsorted: `name start end sum cnt`.
+    // Reconcile downstream: sort -k1,1 -k2,2n | <sum (sum,cnt) per (name,start/N),
+    // emit start..start+cnt and sum/cnt>.  Kept as sum,cnt (not a mean) so a bin
+    // split across shards merges correctly.
+    if (bin_hash != NULL) {
+        stHashIterator *hit = stHash_getIterator(bin_hash);
+        char *key;
+        while ((key = stHash_getNext(hit)) != NULL) {
+            NamedBinAgg *agg = stHash_search(bin_hash, key);
+            const char *tab = strchr(key, '\t');
+            int namelen = tab ? (int)(tab - key) : (int)strlen(key);
+            char line[700];
+            int n = snprintf(line, sizeof line,
+                             "%.*s\t%" PRId64 "\t%" PRId64 "\t%" PRId64 "\t%" PRId64 "\n",
+                             namelen, key, agg->start, agg->start + agg->cnt,
+                             agg->sum, agg->cnt);
+            LW_putn(dout, line, (size_t)n);
+        }
+        stHash_destructIterator(hit);
+        stHash_destruct(bin_hash);
+    }
 
     if (tui    != NULL) tui_destruct(tui);
     if (tai    != NULL) tai_destruct(tai);
@@ -980,7 +1089,7 @@ int taf_gerp_main(int argc, char *argv[]) {
     const char *policy_name = (paralog_policy == GERP_PARALOG_UNION) ? "union"
                             : (paralog_policy == GERP_PARALOG_SKIP)  ? "skip"
                             :                                          "first";
-    st_logInfo("taffy gerp: %" PRIi64 " blocks read, %" PRIi64 " with paralogs (policy=%s; "
+    st_logInfo("taffy depth: %" PRIi64 " blocks read, %" PRIi64 " with paralogs (policy=%s; "
                "%" PRIi64 " block-skips), %" PRIi64 " columns scored in %" PRIi64 " seconds\n",
                n_blocks, n_paralog_blocks, policy_name, n_skipped_paralog,
                n_scored_cols, (int64_t)(time(NULL) - startTime));
@@ -1005,8 +1114,10 @@ int taf_gerp_main(int argc, char *argv[]) {
     tag_destruct(header_tag);
     LI_destruct(li);
     if (inputFile != NULL) fclose(in_fh);
-    LW_destruct(out, false);
-    if (outputFile != NULL) fclose(out_fh);
+    if (out != NULL) {                 // --rs may be absent
+        LW_destruct(out, false);
+        fclose(out_fh);
+    }
     if (dout != NULL) {
         LW_destruct(dout, false);
         if (depthFile != NULL) fclose(dout_fh);
