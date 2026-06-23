@@ -1669,7 +1669,7 @@ static void named_fetch_cb(const TuiRun *r, void *user) {
         }
 }
 
-typedef struct { int64_t col_start; int64_t count; char *name; } NamedGtab;
+typedef struct { int64_t col_start; char *name; } NamedGtab;
 
 static int named_gtab_cmp(const void *pa, const void *pb) {
     int64_t x = ((const NamedGtab *)pa)->col_start, y = ((const NamedGtab *)pb)->col_start;
@@ -1689,20 +1689,16 @@ static void lift_named_depth(Tui *tui, bigWigFile_t *bw, const TuiInterval *iv,
                              int64_t n_iv, int64_t T, int64_t a, int64_t b, int64_t N,
                              double *bin_sum, int64_t *bin_len,
                              int64_t *n_na_out, int64_t *cols_out) {
-    // Each bigWig contig is one row-0 column run.  Group contigs by genome to get
-    // each row-0 genome's column COUNT (sum of contig lengths -- NOT total_bp,
-    // which also counts the genome's non-row-0 bp).
-    stHash *gcnt = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, free, free);
+    // The distinct row-0 genomes present in the bigWig (chrom = "<genome>.<seq>"),
+    // collected as a set (the hash value is an unused presence marker).  Each
+    // genome's column range is derived below from its lift's min column, not from
+    // contig lengths (a contig-length sum is NOT the genome's column span).
+    stHash *gcnt = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, free, NULL);
     for (int64_t i = 0; i < bw->cl->nKeys; i++) {
         const char *ch = bw->cl->chrom[i]; if (ch == NULL) continue;
         const char *dot = strchr(ch, '.');
         char *g = dot ? stString_getSubString(ch, 0, (int64_t)(dot - ch)) : stString_copy(ch);
-        int64_t *cnt = stHash_search(gcnt, g);
-        if (cnt == NULL) {
-            cnt = st_malloc(sizeof(int64_t)); *cnt = 0;
-            stHash_insert(gcnt, stString_copy(g), cnt);
-        }
-        *cnt += (int64_t)bw->cl->len[i];
+        if (stHash_search(gcnt, g) == NULL) stHash_insert(gcnt, stString_copy(g), (void *)1);
         free(g);
     }
     // Per row-0 genome: load its lift (cached in glc, reused by the fetch loop) and
@@ -1720,7 +1716,6 @@ static void lift_named_depth(Tui *tui, bigWigFile_t *bw, const TuiInterval *iv,
         TuiGenomeLift *gl = tui_genome_lift_load(tui, g);
         int64_t mc = (gl != NULL) ? tui_genome_lift_min_col(gl) : -1;
         gt[gi].col_start = (mc >= 0) ? mc : T;
-        gt[gi].count     = *(int64_t *)stHash_search(gcnt, g);
         gt[gi].name      = stString_copy(g);
         if (gl != NULL) stHash_insert(glc, gt[gi].name, gl);   // pointer key == gt[gi].name
         gi++;
@@ -1729,12 +1724,17 @@ static void lift_named_depth(Tui *tui, bigWigFile_t *bw, const TuiInterval *iv,
     n_gt = gi;
     qsort(gt, (size_t)n_gt, sizeof(NamedGtab), named_gtab_cmp);
     stHash_destruct(gcnt);
-    // Row-0 genomes tile [0,T) gaplessly: col_start[i+1] == col_start[i]+count[i].
-    for (int64_t i = 0; i + 1 < n_gt; i++)
-        if (gt[i + 1].col_start != gt[i].col_start + gt[i].count)
-            st_logDebug("taffy lift --bigwig: row-0 genome %s [col %" PRIi64 ", cnt %" PRIi64
-                        "] -> next col %" PRIi64 " (gap)\n", gt[i].name, gt[i].col_start,
-                        gt[i].count, gt[i + 1].col_start);
+    // Genomes are attributed by [col_start_i, col_start_{i+1}), which tiles
+    // [gt[0].col_start, T) by construction (sorted, abutting -- no per-genome gap
+    // check is meaningful; gt[].count is a contig-length sum, NOT the column span).
+    // The one thing not guaranteed is that the ROOT ancestor occupies column 0: if
+    // it was dropped (e.g. a high --minLeaves left it with no scored bins) the axis
+    // starts above 0 and columns [0, gt[0].col_start) would mis-attribute to gt[0].
+    if (n_gt > 0 && gt[0].col_start != 0)
+        fprintf(stderr, "WARN: taffy lift --bigwig: named axis starts at column %" PRIi64
+                " (not 0); the root ancestor appears absent from the bigWig, so columns "
+                "[0,%" PRIi64 ") will mis-attribute to %s\n",
+                gt[0].col_start, gt[0].col_start, gt[0].name);
     NamedFetchCache fc = { "", 0, NULL };
     int64_t n_na = 0, cols = 0;
     for (int64_t m = 0; m < n_iv; m++) {
