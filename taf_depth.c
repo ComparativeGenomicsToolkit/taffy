@@ -112,6 +112,7 @@ typedef struct {
     int64_t  bin_n;
     const char *bin_name;   // --bin named coords: this block's row-0 seq name
     int64_t  bin_anchor;    // --bin named coords: row-0 start pos (bin 0's start)
+    int64_t  bin_last;      // --bin named coords: row-0 end pos (exclusive), for extent
 } GerpBlockResult;
 
 // Per-thread scratch -- one set per OpenMP worker thread.  entries[] is
@@ -165,11 +166,14 @@ static void gerp_flush_bin(LW *dout, int64_t bin, int64_t sum, int64_t cnt,
 // explode the output.  Depth is instead accumulated per (row-0 seq, bin) in a
 // hash keyed "name\tbin" -> NamedBinAgg, then dumped (unsorted) after the stream
 // as `name start end sum cnt` and reconciled downstream by `sort -k1,1 -k2,2n`
-// + a per-(name,bin) merge (sum the sum,cnt; emit start..start+cnt and sum/cnt).
-// start is the bin's earliest covered position; end = start+cnt (row-0 gap-free).
+// + a per-(name,bin) merge (sum the sum,cnt; emit [start,end] and sum/cnt).
+// start/end are the bin's min/max covered positions.  The columns of one
+// (name,bin) can be SCATTERED across non-adjacent blocks (the recurrence above),
+// so end is tracked as the max covered position -- NOT start+cnt, which assumed
+// contiguity and dropped every fragment past the first (leaving bigWig holes).
 // NOT dropped on sum==0 -- the count is needed in the merged denominator (a bin
 // split across shards must keep its full column total).
-typedef struct { int64_t start, sum, cnt; } NamedBinAgg;
+typedef struct { int64_t start, end, sum, cnt; } NamedBinAgg;
 
 static void score_one_block(const GerpTree *gt, GerpThreadState *ts,
                             const Alignment *aln, GerpBlockResult *res,
@@ -325,6 +329,7 @@ static void score_one_block(const GerpTree *gt, GerpThreadState *ts,
         // which keys on (chrom, pos) tuples that exist in BOTH wigs.
         anchor++;
     }
+    res->bin_last = anchor;   // block's row-0 end (exclusive) -- named --bin extent
 }
 
 /////////////////////////////////////////////////////////////////////////////
@@ -1000,19 +1005,26 @@ int taf_depth_main(int argc, char *argv[]) {
                     // recurrence collapses to one record per bin, not one per
                     // block.  bin 0 starts at the block's row-0 start (mid-bin if
                     // the block began mid-bin); later bins start on their boundary.
+                    // A (name,bin)'s columns can be SCATTERED across non-adjacent
+                    // blocks, so track end as the MAX covered position: the last
+                    // bin ends at the block's row-0 end, earlier bins at the next
+                    // boundary -- never start+cnt (which assumed contiguity).
                     for (int64_t k = 0; k < r->bin_n; k++) {
-                        int64_t start = (k == 0) ? r->bin_anchor
-                                                 : (r->bin_first + k) * bin_size;
+                        int64_t bin   = r->bin_first + k;
+                        int64_t start = (k == 0) ? r->bin_anchor : bin * bin_size;
+                        int64_t end   = (k == r->bin_n - 1) ? r->bin_last
+                                                            : (bin + 1) * bin_size;
                         char key[600];
-                        snprintf(key, sizeof key, "%s\t%" PRId64,
-                                 r->bin_name, r->bin_first + k);
+                        snprintf(key, sizeof key, "%s\t%" PRId64, r->bin_name, bin);
                         NamedBinAgg *agg = stHash_search(bin_hash, key);
                         if (agg == NULL) {
                             agg = st_malloc(sizeof(*agg));
-                            agg->start = start; agg->sum = 0; agg->cnt = 0;
+                            agg->start = start; agg->end = end;
+                            agg->sum = 0; agg->cnt = 0;
                             stHash_insert(bin_hash, stString_copy(key), agg);
                         }
                         if (start < agg->start) agg->start = start;
+                        if (end   > agg->end)   agg->end   = end;
                         agg->sum += r->bin_sum[k];
                         agg->cnt += r->bin_cnt[k];
                     }
@@ -1058,8 +1070,8 @@ int taf_depth_main(int argc, char *argv[]) {
 
     // Named --bin: dump the accumulated bins, unsorted: `name start end sum cnt`.
     // Reconcile downstream: sort -k1,1 -k2,2n | <sum (sum,cnt) per (name,start/N),
-    // emit start..start+cnt and sum/cnt>.  Kept as sum,cnt (not a mean) so a bin
-    // split across shards merges correctly.
+    // emit [min start, max end] and sum/cnt>.  Kept as sum,cnt (not a mean) so a
+    // bin split across shards merges correctly.
     if (bin_hash != NULL) {
         stHashIterator *hit = stHash_getIterator(bin_hash);
         char *key;
@@ -1070,7 +1082,7 @@ int taf_depth_main(int argc, char *argv[]) {
             char line[700];
             int n = snprintf(line, sizeof line,
                              "%.*s\t%" PRId64 "\t%" PRId64 "\t%" PRId64 "\t%" PRId64 "\n",
-                             namelen, key, agg->start, agg->start + agg->cnt,
+                             namelen, key, agg->start, agg->end,
                              agg->sum, agg->cnt);
             LW_putn(dout, line, (size_t)n);
         }
