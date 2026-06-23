@@ -14,9 +14,10 @@
 #                       a clean 4-col bedGraph of mean depth
 #   4. wigToBigWig      -> <out>  (+ a <out>.sizes from `taffy stats -s`)
 #
-# NOTE: `taffy lift --bigwig` currently queries the older integer-column axis;
-# the named-coord query is a pending follow-up.  This builds the named bigWig
-# (browsable directly on ancestor coords) in the meantime.
+# The bigWig is keyed on row-0 ancestor coords, so it both browses directly on
+# ancestor coords AND is queryable per leaf with `taffy lift --bigwig BW
+# -g <leaf> -r <leaf.seq:start-end>` (auto-detects the named axis; emits
+# leaf-coordinate mean-depth bins -- the browser summary).
 #
 # Single process: fine up to ~a fish-subtree alignment.  For the full 577-way
 # shard it over SLURM instead (uni_depth_bigwig_slurm.sh).
@@ -105,4 +106,4 @@ echo "[4/4] taffy stats -s -> sizes; wigToBigWig -> $OUT ..." >&2
 echo "" >&2
 echo "done: $OUT ($(du -h "$OUT" 2>/dev/null | cut -f1)); sizes: $SIZES" >&2
 echo "  keyed on row-0 ancestor coords (e.g. AncNrefChrM); browse directly." >&2
-echo "  (taffy lift --bigwig named query is a pending follow-up.)" >&2
+echo "  query per leaf: taffy lift --bigwig $OUT -g <leaf> -r <leaf.seq:start-end>" >&2
