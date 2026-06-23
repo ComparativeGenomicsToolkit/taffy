@@ -303,6 +303,12 @@ int tui_genome_lift_column(const TuiGenomeLift *gl, int64_t column,
  * does NOT grow with lazy decodes).  Use for the startup diagnostic. */
 int64_t tui_genome_lift_n_chunks(const TuiGenomeLift *gl);
 
+/* Smallest universal column this genome maps to (chunks[0].g_min), or -1 if it
+ * has no chunks.  Cheap (chunk metadata only, no R decode).  For row-0 ancestors
+ * in a universal MAF -- column-contiguous in pre-order -- this is the genome's
+ * row-0 backbone start, the correct key for ordering its row-0 column range. */
+int64_t tui_genome_lift_min_col(const TuiGenomeLift *gl);
+
 /*
  * One gap-free run of source-to-target alignment, as visited by
  * tui_genome_lift_visit_runs.  `seq` is borrowed from gl (valid until

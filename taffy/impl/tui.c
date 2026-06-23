@@ -2354,6 +2354,14 @@ int64_t tui_genome_lift_n_chunks(const TuiGenomeLift *gl) {
     return gl == NULL ? 0 : gl->n_chunks;
 }
 
+// Smallest universal column this genome maps to (chunks are g_min-sorted, so
+// chunks[0].g_min).  -1 if the genome has no chunks.  In a universal MAF the
+// row-0 ancestors are column-contiguous in pre-order, so this min column is the
+// genome's row-0 backbone start -- the key for ordering row-0 genome ranges.
+int64_t tui_genome_lift_min_col(const TuiGenomeLift *gl) {
+    return (gl == NULL || gl->n_chunks <= 0) ? -1 : gl->chunks[0].g_min;
+}
+
 // Visit runs in `ch` intersecting [c_lo, c_hi).  Binary-search for the first
 // run with g_start >= c_lo, then walk backward (catching earlier runs whose
 // length extends past c_lo via max_end_prefix) and forward (until g_start
