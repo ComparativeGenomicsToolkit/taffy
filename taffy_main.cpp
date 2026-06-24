@@ -20,7 +20,6 @@ extern int taf_gerp_stats_main(int argc, char *argv[]);
 
 extern int taf_add_gap_bases_main(int argc, char *argv[]);
 extern int taf_coverage_main(int argc, char *argv[]);
-extern int taf_summary_main(int argc, char *argv[]);
 
 void usage() {
     fprintf(stderr, "taffy: toolkit for working with TAF and MAF multiple alignment files\n\n");
@@ -33,7 +32,6 @@ void usage() {
     fprintf(stderr, "    sort           sort the rows of a TAF file to a desired order\n");
     fprintf(stderr, "    stats          print statistics of a TAF file\n");
     fprintf(stderr, "    coverage       print coverage statistics of a given genome in a TAF file\n");
-    fprintf(stderr, "    summary        bigMafSummary-equivalent zoom-out coverage from a .tui (per-species, scored)\n");
     fprintf(stderr, "    annotate       annotate a TAF file with labels from a wiggle file\n");
     fprintf(stderr, "    lift           lift a .wig annotation from ancestor coords to a leaf genome via .tui\n");
     fprintf(stderr, "    tui-chain      build a chained .tui sidecar (merges adjacent runs into longer chains for faster lift)\n");
@@ -69,8 +67,6 @@ int main(int argc, char *argv[]) {
         return taf_stats_main(argc - 1, argv + 1);
     } else if (strcmp(argv[1], "coverage") == 0) {
         return taf_coverage_main(argc - 1, argv + 1);
-    } else if (strcmp(argv[1], "summary") == 0) {
-        return taf_summary_main(argc - 1, argv + 1);
     } else if (strcmp(argv[1], "annotate") == 0) {
         return taf_annotate_main(argc - 1, argv + 1);
     } else if (strcmp(argv[1], "lift") == 0) {

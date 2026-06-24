@@ -105,8 +105,8 @@ ${srcDir}/remote_io.o : ${srcDir}/remote_io.c ${libHeaders}
 ${BINDIR}/stTafTests : ${libTests} ${LIBDIR}/libstTaf.a ${stTafDependencies}
 	${CC} ${CFLAGS} ${LDFLAGS} -I${blockVizDir}/inc -o ${BINDIR}/stTafTests ${libTests} ${LIBDIR}/libstTaf.a ${LDLIBS}
 
-${BINDIR}/taffy : taf_norm.o taf_add_gap_bases.o taf_index.o taf_view.o taf_sort.o taf_stats.o taf_coverage.o taf_summary.o taf_annotate.o taf_lift.o taf_chain.o taf_depth.o taf_gerp_stats.o taffy_main.o ${LIBDIR}/libstTaf.a ${libHeaders} ${stTafDependencies}
-	${CXX} ${CPPFLAGS} ${CXXFLAGS} taf_norm.o taf_add_gap_bases.o taf_index.o taf_view.o taf_sort.o taf_stats.o taf_coverage.o taf_summary.o taf_annotate.o taf_lift.o taf_chain.o taf_depth.o taf_gerp_stats.o taffy_main.o -o ${BINDIR}/taffy ${LIBDIR}/libstTaf.a ${LDLIBS}
+${BINDIR}/taffy : taf_norm.o taf_add_gap_bases.o taf_index.o taf_view.o taf_sort.o taf_stats.o taf_coverage.o taf_annotate.o taf_lift.o taf_chain.o taf_depth.o taf_gerp_stats.o taffy_main.o ${LIBDIR}/libstTaf.a ${libHeaders} ${stTafDependencies}
+	${CXX} ${CPPFLAGS} ${CXXFLAGS} taf_norm.o taf_add_gap_bases.o taf_index.o taf_view.o taf_sort.o taf_stats.o taf_coverage.o taf_annotate.o taf_lift.o taf_chain.o taf_depth.o taf_gerp_stats.o taffy_main.o -o ${BINDIR}/taffy ${LIBDIR}/libstTaf.a ${LDLIBS}
 
 ${BINDIR}/taffyBlockVizTest : ${blockVizDir}/tests/taffyBlockVizTest.cpp ${LIBDIR}/libstTaf.a ${blockVizDir}/inc/taffyBlockViz.h ${stTafDependencies}
 	${CXX} ${CPPFLAGS} ${CXXFLAGS} -I${blockVizDir}/inc ${blockVizDir}/tests/taffyBlockVizTest.cpp -o ${BINDIR}/taffyBlockVizTest ${LIBDIR}/libstTaf.a ${LDLIBS}
@@ -134,9 +134,6 @@ taf_stats.o : taf_stats.c ${stTafDependencies} ${libHeaders}
 
 taf_coverage.o : taf_coverage.cpp ${stTafDependencies} ${libHeaders}
 	${CXX} ${CPPFLAGS} ${CXXFLAGS} -o taf_coverage.o -c taf_coverage.cpp
-
-taf_summary.o : taf_summary.cpp ${stTafDependencies} ${libHeaders}
-	${CXX} ${CPPFLAGS} ${CXXFLAGS} -I${blockVizDir}/inc -o taf_summary.o -c taf_summary.cpp
 
 taf_annotate.o : taf_annotate.c ${stTafDependencies} ${libHeaders}
 	${CC} ${CFLAGS} ${CFLAGS} -o taf_annotate.o -c taf_annotate.c
