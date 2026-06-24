@@ -3,22 +3,28 @@
 # Universal-depth bigWig for a BIG universal MAF (e.g. 577-way) -- SLURM
 # =====================================================================
 # Shards universal-column space into ranges, runs one
-#   taffy depth --coords named --depth --bin BIN --columnRange LO-HI
-# per shard (sbatch array), then a dependent job sorts + merges the per-shard
-# records into the NAMED row-0 (ancestor) depth bigWig.
+#   taffy depth --depth --bin BIN --columnRange LO-HI
+# per shard (sbatch array), then a dependent job concatenates the per-shard
+# bedGraphs into the universal-column depth bigWig.
 #
-# Named coords (the only option past 2^31 columns) key each record on the row-0
-# ancestor seq, which recurs through the column order -- so a (name,bin) can be
-# split across shard boundaries.  Shards therefore need NO bin alignment; the
-# assembly's sort + per-(name,bin) merge (uni_depth_merge.awk) reconciles them.
+# The output is on the UNIVERSAL-COLUMN axis: the raw column [0,T) 2e9-chunked
+# into chroms uni0,uni1,... (see TUI_UNI_CHUNK).  Each shard emits an already-
+# sorted, monotone, bigWig-ready bedGraph slice; a bin never straddles a shard
+# boundary (shards are bin-aligned) nor a chunk boundary (2e9 is a multiple of
+# BIN), so assembly is just `cat` in shard order -- NO sort, NO merge.
+#
+# The chrom-sizes file (uni0..uniK, each 2e9 except the last = T mod 2e9) is a
+# pure function of T, so shard 0 emits it via `taffy depth --sizes` and the
+# assembly reuses it.
 #
 # For a small alignment (<= a fish subtree) use uni_depth_bigwig_local.sh.
 #
 # Usage: uni_depth_bigwig_slurm.sh -i UNI.maf.gz -o OUT.bw [options]
 #   -i FILE        universal MAF/TAF (its <FILE>.tui must already exist)
 #   -o FILE        output bigWig (shards + .bg + .sizes land beside it)
-#   -b INT         bin width in bp (default 1000)
-#   -s INT         shard size in universal columns (default 1e8)
+#   -b INT         bin width in bp (default 1000; must divide 2e9)
+#   -s INT         shard size in universal columns (default 1e8; must be a
+#                  multiple of BIN so shard edges fall on bin boundaries)
 #   -T INT         depth threads per shard (default 8)
 #   --mem GB       sbatch --mem per shard task (default 16)
 #   --time HRS     sbatch --time per shard task (default 4)
@@ -33,9 +39,8 @@ set -euo pipefail
 INPUT=""; OUT=""; BIN=1000; SHARD=100000000; THREADS=8
 MEM_GB=16; TIME_HRS=4; PARTITION=""; ACCOUNT=""; DRYRUN=0
 TAFFY="${TAFFY:-taffy}"; WIGTOBIGWIG="${WIGTOBIGWIG:-wigToBigWig}"
-SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-usage() { sed -n '17,27p' "$0" >&2; exit "${1:-1}"; }
+usage() { sed -n '20,32p' "$0" >&2; exit "${1:-1}"; }
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -i) INPUT=$2; shift 2;;
@@ -59,7 +64,9 @@ done
 command -v "$TAFFY" >/dev/null 2>&1 || { echo "ERROR: taffy not found (set \$TAFFY)" >&2; exit 1; }
 command -v "$WIGTOBIGWIG" >/dev/null 2>&1 || echo "WARN: wigToBigWig not on this PATH; the assembly job needs it on the compute node" >&2
 (( BIN > 0 ))   || { echo "ERROR: -b ($BIN) must be > 0" >&2; exit 1; }
+(( 2000000000 % BIN == 0 )) || { echo "ERROR: -b ($BIN) must divide 2000000000 (the uni-axis chunk size)" >&2; exit 1; }
 (( SHARD > 0 )) || { echo "ERROR: -s ($SHARD) must be > 0" >&2; exit 1; }
+(( SHARD % BIN == 0 )) || { echo "ERROR: -s ($SHARD) must be a multiple of -b ($BIN) so shard edges fall on bin boundaries" >&2; exit 1; }
 
 T=$("$TAFFY" stats -i "$INPUT" -u)
 NSHARD=$(( (T + SHARD - 1) / SHARD ))
@@ -68,9 +75,11 @@ BASE=$(basename "$OUT"); BASE=${BASE%.bw}; BASE=${BASE%.bigWig}
 SHARDDIR="$OUTDIR/$BASE.shards"; mkdir -p "$SHARDDIR"
 RUNNER="$OUTDIR/.$BASE.runner.sh"
 ASSEMBLE="$OUTDIR/.$BASE.assemble.sh"
-echo ">> T=$T  bin=$BIN bp  shard=$SHARD cols  shards=$NSHARD  (named row-0 coords)" >&2
+echo ">> T=$T  bin=$BIN bp  shard=$SHARD cols  shards=$NSHARD  (universal-column uni axis)" >&2
 
 # ---- per-shard depth ----
+# Shard 0 also writes the global uni0..uniK chrom-sizes (--sizes; a pure function
+# of T, independent of the shard's column range), which the assembly reuses.
 cat > "$RUNNER" <<EOF
 #!/bin/bash
 #SBATCH --cpus-per-task=$THREADS
@@ -82,8 +91,10 @@ set -euo pipefail
 LO=\$(( SLURM_ARRAY_TASK_ID * $SHARD ))
 HI=\$(( LO + $SHARD )); (( HI > $T )) && HI=$T
 (( LO >= HI )) && exit 0
-"$TAFFY" depth -i "$INPUT" --coords named --bin $BIN --minLeaves 1 \\
-  -T \$SLURM_CPUS_PER_TASK --columnRange \$LO-\$HI \\
+SIZES_ARG=""
+(( SLURM_ARRAY_TASK_ID == 0 )) && SIZES_ARG="--sizes $OUTDIR/$BASE.sizes"
+"$TAFFY" depth -i "$INPUT" --bin $BIN --minLeaves 1 \\
+  -T \$SLURM_CPUS_PER_TASK --columnRange \$LO-\$HI \$SIZES_ARG \\
   --depth "$SHARDDIR/shard.\$(printf '%05d' \$SLURM_ARRAY_TASK_ID).bg"
 EOF
 
@@ -91,16 +102,15 @@ EOF
 cat > "$ASSEMBLE" <<EOF
 #!/bin/bash
 #SBATCH --cpus-per-task=2
-#SBATCH --mem=32G
+#SBATCH --mem=8G
 #SBATCH --time=8:00:00
 ${PARTITION:+#SBATCH --partition=$PARTITION}
 ${ACCOUNT:+#SBATCH --account=$ACCOUNT}
 set -euo pipefail
-# Named coords: a (row-0 seq, bin) can be split across shard boundaries, so sort
-# by (name,start) then sum (sum,cnt) per (name,bin) into a mean-depth bedGraph.
-# Chrom sizes (ancestor refChrs + leaves) come from the .tui via stats -s.
-cat "$SHARDDIR"/shard.*.bg | LC_ALL=C sort -k1,1 -k2,2n -T "$OUTDIR" | awk -v N=$BIN -f "$SCRIPTDIR/uni_depth_merge.awk" > "$OUTDIR/$BASE.bg"
-"$TAFFY" stats -i "$INPUT" -s > "$OUTDIR/$BASE.sizes"
+# Universal-column axis: each shard is its own column slice, already monotone and
+# bin/chunk-aligned, so just concatenate in shard (column) order -- NO sort, NO
+# merge.  The uni0..uniK chrom sizes were written by shard 0 (--sizes).
+ls "$SHARDDIR"/shard.*.bg | LC_ALL=C sort | xargs cat > "$OUTDIR/$BASE.bg"
 "$WIGTOBIGWIG" "$OUTDIR/$BASE.bg" "$OUTDIR/$BASE.sizes" "$OUT"
 echo "made $OUT (\$(du -h "$OUT"|cut -f1))"
 EOF

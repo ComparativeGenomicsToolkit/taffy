@@ -25,17 +25,9 @@
 #include <unistd.h>
 #include <stdlib.h>
 
-// Universal-column chunk size for the uni<chunk> bigWig axis -- MUST match the
-// chunking used to BUILD the depth bigWig (and the .sizes file).  2e9 < 2^31:
-// libBigWig reads uint32 positions, but the WRITER (wigToBigWig) and the UCSC
-// spot tools (bigWigSummary/Info) treat positions/chrom-sizes as SIGNED 32-bit
-// and overflow above 2^31 (a >=2^31 chrom is silently rejected; reads return
-// negative coords).  So every chunk must stay strictly below 2^31.  (The old
-// 4e9 was a latent corruption bug -- offsets reached 4e9 and the chrom size
-// 4e9 >= 2^31 is unbuildable via wigToBigWig.)  T=72.49e9 -> uni0..uni36.
-#define GERP_UNI_CHUNK 2000000000LL
-// The bin width our uni<chunk> depth bigWigs use (gerp --bin 1000).
-#define GERP_UNI_BIN 1000LL
+// The uni<chunk> depth-bigWig axis chunk size (TUI_UNI_CHUNK) is defined in
+// tui.h so the BUILDER (taffy depth) and this READER cannot drift; see the
+// comment there for the 2e9-not-4e9 (signed-32-bit) rationale.
 
 static void usage(void) {
     fprintf(stderr, "taffy lift [options]\n");
@@ -45,7 +37,7 @@ static void usage(void) {
     fprintf(stderr, "-b --bed       [FILE_NAME] : Input BED3+ in ancestor row-0 coords (chrom = full genome.sequence).  Exactly one of -w / -b is required.\n");
     fprintf(stderr, "-g --genome    [STRING]    : REQUIRED Target genome name (e.g. hg38)\n");
     fprintf(stderr, "-o --outputFile [FILE_NAME] : Output (wig if input was wig, BED if input was BED; default stdout)\n");
-    fprintf(stderr, "--bigwig [FILE_NAME]       : QUERY-SHIM mode: read a universal-depth bigWig along a target window and emit it in target-genome coords as an N-bp binned bedGraph.  Coord system auto-detected: NAMED (chrom = row-0 ancestor genome.sequence, default of `taffy depth`) or integer (single 'uni' chrom).  Requires -r and -B; mutually exclusive with -w/-b.\n");
+    fprintf(stderr, "--bigwig [FILE_NAME]       : QUERY-SHIM mode: read a universal-depth bigWig along a target window and emit it in target-genome coords as an N-bp binned bedGraph.  The bigWig must be on the integer universal-column axis (chroms uni0,uni1,..., 2e9-chunked) produced by `taffy depth --bin N`.  Requires -r and -B; mutually exclusive with -w/-b.\n");
     fprintf(stderr, "-r --region    [SEQ:S-E]   : (--bigwig mode) Target window genome.sequence:START-END (0-based half-open), e.g. hg38.chr20:1000000-2000000.\n");
     fprintf(stderr, "-m --memCap    [SIZE]      : (wig mode) Max in-memory output buffer before spilling to disk; suffix K/M/G allowed (default 2G).  Env TAFFY_LIFT_BUDGET_MB also honored (CLI wins).\n");
     fprintf(stderr, "-G --maxGap    [INT]       : (bed mode) Merge two adjacent target rows when the gap between them is <= INT bp.  Default 0 (touch / overlap only).  Max 2^60.  The merged interval spans the un-lifted gap region (no UCSC liftOver / halLiftover analogue).  Downstream tools that count target coverage will overcount by up to INT * number-of-merges.\n");
@@ -1626,161 +1618,6 @@ static inline double bw_now_s(void) {
     return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 }
 
-// ---- NAMED-axis (row-0 ancestor contig) depth source for --bigwig ----------
-// The universal column axis is the row-0 ancestor contigs concatenated, genomes
-// in column (pre-order) order, each contig one contiguous run.  So column ->
-// (contig,pos) is: binary-search the column to its row-0 GENOME (cumulative
-// total_bp over the genomes present in the bigWig), then tui_genome_lift_visit_runs
-// maps the column range to (contig,pos) runs; bwGetValues reads the named bigWig.
-// Per-contig bigWig fetch cache.  Row-0 runs arrive in column order, which for a
-// forward-strand row-0 ancestor is contig-pos order, so consecutive same-contig
-// reads coalesce into ONE bwGetValues over a NAMED_FETCH_SPAN window instead of
-// one read per run (the per-call chrom-tree lookup dominates on a 100k-chrom bigWig).
-#define NAMED_FETCH_SPAN (1 << 16)
-typedef struct { char contig[512]; int64_t base; bwOverlappingIntervals_t *ov; } NamedFetchCache;
-typedef struct { bigWigFile_t *bw; const char *genome; int64_t cs, ce;
-                 double sum; int64_t cnt; NamedFetchCache *fc; } NamedFetchCtx;
-
-static void named_fetch_cb(const TuiRun *r, void *user) {
-    NamedFetchCtx *fx = (NamedFetchCtx *)user;
-    int64_t rs   = r->g_start > fx->cs ? r->g_start : fx->cs;          // clip run to interval
-    int64_t rend = (r->g_start + r->length) < fx->ce ? (r->g_start + r->length) : fx->ce;
-    if (rs >= rend) return;
-    int64_t pos_lo, pos_hi;                                            // contig pos range
-    if (r->strand) { pos_lo = r->t_start + (rs - r->g_start);
-                     pos_hi = r->t_start + (rend - r->g_start); }
-    else           { pos_lo = r->t_start + r->length - (rend - r->g_start);
-                     pos_hi = r->t_start + r->length - (rs   - r->g_start); }
-    // TuiRun.seq is the sequence-only name; the named bigWig is keyed on the full
-    // "genome.sequence", so prepend the row-0 genome.
-    char chrom[512];
-    snprintf(chrom, sizeof chrom, "%s.%s", fx->genome, r->seq);
-    NamedFetchCache *fc = fx->fc;
-    // (Re)fetch when the cached window doesn't cover [pos_lo, pos_hi) for this contig.
-    if (fc->ov == NULL || strcmp(fc->contig, chrom) != 0 ||
-        pos_lo < fc->base || pos_hi > fc->base + (int64_t)fc->ov->l) {
-        if (fc->ov != NULL) { bwDestroyOverlappingIntervals(fc->ov); fc->ov = NULL; }
-        int64_t span = (pos_hi - pos_lo > NAMED_FETCH_SPAN) ? (pos_hi - pos_lo) : NAMED_FETCH_SPAN;
-        fc->ov   = bwGetValues(fx->bw, chrom, (uint32_t)pos_lo, (uint32_t)(pos_lo + span), 1);
-        fc->base = pos_lo;
-        snprintf(fc->contig, sizeof fc->contig, "%s", chrom);
-    }
-    if (fc->ov != NULL)
-        for (int64_t p = pos_lo; p < pos_hi; p++) {
-            int64_t idx = p - fc->base;
-            if (idx >= 0 && idx < (int64_t)fc->ov->l && !isnan(fc->ov->value[idx])) {
-                fx->sum += fc->ov->value[idx]; fx->cnt++;
-            }
-        }
-}
-
-typedef struct { int64_t col_start; char *name; } NamedGtab;
-
-static int named_gtab_cmp(const void *pa, const void *pb) {
-    int64_t x = ((const NamedGtab *)pa)->col_start, y = ((const NamedGtab *)pb)->col_start;
-    return (x < y) ? -1 : (x > y) ? 1 : 0;
-}
-
-// index of the last genome whose col_start <= c (genomes are col_start-sorted)
-static int64_t named_genome_of_col(const NamedGtab *g, int64_t n, int64_t c) {
-    int64_t lo = 0, hi = n - 1, ans = 0;
-    while (lo <= hi) { int64_t mid = (lo + hi) / 2;
-        if (g[mid].col_start <= c) { ans = mid; lo = mid + 1; } else hi = mid - 1; }
-    return ans;
-}
-
-// Fill bin_sum/bin_len from a NAMED bigWig along the queried window's columns.
-static void lift_named_depth(Tui *tui, bigWigFile_t *bw, const TuiInterval *iv,
-                             int64_t n_iv, int64_t T, int64_t a, int64_t b, int64_t N,
-                             double *bin_sum, int64_t *bin_len,
-                             int64_t *n_na_out, int64_t *cols_out) {
-    // The distinct row-0 genomes present in the bigWig (chrom = "<genome>.<seq>"),
-    // collected as a set (the hash value is an unused presence marker).  Each
-    // genome's column range is derived below from its lift's min column, not from
-    // contig lengths (a contig-length sum is NOT the genome's column span).
-    stHash *gcnt = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, free, NULL);
-    for (int64_t i = 0; i < bw->cl->nKeys; i++) {
-        const char *ch = bw->cl->chrom[i]; if (ch == NULL) continue;
-        const char *dot = strchr(ch, '.');
-        char *g = dot ? stString_getSubString(ch, 0, (int64_t)(dot - ch)) : stString_copy(ch);
-        if (stHash_search(gcnt, g) == NULL) stHash_insert(gcnt, stString_copy(g), (void *)1);
-        free(g);
-    }
-    // Per row-0 genome: load its lift (cached in glc, reused by the fetch loop) and
-    // key gt[] on its TRUE min universal column (chunks[0].g_min) -- the row-0
-    // backbone start, since row-0 ancestors are column-contiguous in ancestor
-    // pre-order.  (A probe query on the lexically-first contig is wrong: that contig
-    // isn't always the genome's column-first one, and presence != row-0.)
-    int64_t n_gt = (int64_t)stHash_size(gcnt);
-    NamedGtab *gt = st_calloc((size_t)(n_gt > 0 ? n_gt : 1), sizeof(NamedGtab));
-    stHash *glc = stHash_construct2(NULL, (void (*)(void *))tui_genome_lift_destruct);
-    stList *keys = stHash_getKeys(gcnt);
-    int64_t gi = 0;
-    for (int64_t i = 0; i < n_gt; i++) {
-        char *g = stList_get(keys, i);
-        TuiGenomeLift *gl = tui_genome_lift_load(tui, g);
-        int64_t mc = (gl != NULL) ? tui_genome_lift_min_col(gl) : -1;
-        gt[gi].col_start = (mc >= 0) ? mc : T;
-        gt[gi].name      = stString_copy(g);
-        if (gl != NULL) stHash_insert(glc, gt[gi].name, gl);   // pointer key == gt[gi].name
-        gi++;
-    }
-    stList_destruct(keys);
-    n_gt = gi;
-    qsort(gt, (size_t)n_gt, sizeof(NamedGtab), named_gtab_cmp);
-    stHash_destruct(gcnt);
-    // Genomes are attributed by [col_start_i, col_start_{i+1}), which tiles
-    // [gt[0].col_start, T) by construction (sorted, abutting -- no per-genome gap
-    // check is meaningful; gt[].count is a contig-length sum, NOT the column span).
-    // The one thing not guaranteed is that the ROOT ancestor occupies column 0: if
-    // it was dropped (e.g. a high --minLeaves left it with no scored bins) the axis
-    // starts above 0 and columns [0, gt[0].col_start) would mis-attribute to gt[0].
-    if (n_gt > 0 && gt[0].col_start != 0)
-        fprintf(stderr, "WARN: taffy lift --bigwig: named axis starts at column %" PRIi64
-                " (not 0); the root ancestor appears absent from the bigWig, so columns "
-                "[0,%" PRIi64 ") will mis-attribute to %s\n",
-                gt[0].col_start, gt[0].col_start, gt[0].name);
-    NamedFetchCache fc = { "", 0, NULL };
-    int64_t n_na = 0, cols = 0;
-    for (int64_t m = 0; m < n_iv; m++) {
-        int64_t cs = iv[m].start, ce = iv[m].end, L = ce - cs;
-        cols += L;
-        double sum = 0; int64_t cnt = 0;
-        int64_t c = cs;
-        while (c < ce && n_gt > 0) {                       // an interval may span genomes
-            int64_t gix   = named_genome_of_col(gt, n_gt, c);
-            int64_t g_end = (gix + 1 < n_gt) ? gt[gix + 1].col_start : T;
-            int64_t seg   = (ce < g_end) ? ce : g_end;
-            if (seg <= c) { c = (g_end > c) ? g_end : c + 1; continue; }
-            TuiGenomeLift *gl = (TuiGenomeLift *)stHash_search(glc, (void *)gt[gix].name);
-            if (gl != NULL) {
-                NamedFetchCtx fx = { bw, gt[gix].name, c, seg, 0.0, 0, &fc };
-                tui_genome_lift_visit_runs(gl, c, seg, named_fetch_cb, &fx);
-                sum += fx.sum; cnt += fx.cnt;
-            }
-            c = seg;
-        }
-        double d = cnt > 0 ? sum / (double)cnt : 0.0;
-        if (cnt == 0) n_na++;
-        int64_t g_lo, g_hi;                                // column range -> G bp (same as integer)
-        if (iv[m].rev == 0) { g_lo = iv[m].t_start;         g_hi = iv[m].t_start + L; }
-        else                { g_lo = iv[m].t_start - L + 1; g_hi = iv[m].t_start + 1; }
-        if (g_lo < a) g_lo = a;
-        if (g_hi > b) g_hi = b;
-        if (g_lo >= g_hi) continue;
-        for (int64_t bi = (g_lo - a) / N; bi <= (g_hi - 1 - a) / N; bi++) {
-            int64_t bl = a + bi * N, bh = bl + N; if (bh > b) bh = b;
-            int64_t o = (g_hi < bh ? g_hi : bh) - (g_lo > bl ? g_lo : bl);
-            if (o > 0) { bin_sum[bi] += d * (double)o; bin_len[bi] += o; }
-        }
-    }
-    if (fc.ov != NULL) bwDestroyOverlappingIntervals(fc.ov);
-    stHash_destruct(glc);
-    for (int64_t i = 0; i < n_gt; i++) free(gt[i].name);
-    free(gt);
-    *n_na_out = n_na; *cols_out = cols;
-}
-
 static int bigwig_lift_window(Tui *tui, const char *bigwig_file,
                               const char *target_genome, const char *region,
                               int64_t bin_size, const char *output_file) {
@@ -1837,8 +1674,10 @@ static int bigwig_lift_window(Tui *tui, const char *bigwig_file,
     int64_t nbins = (b > a) ? (b - a + N - 1) / N : 0;
     double  *bin_sum = nbins ? st_calloc((size_t)nbins, sizeof(double))  : NULL;
     int64_t *bin_len = nbins ? st_calloc((size_t)nbins, sizeof(int64_t)) : NULL;
-    // Axis sniff: integer single "uni"/"uni<chunk>" vs named row-0 ancestor
-    // contigs (the depth tool's default).  The first bigWig chrom decides.
+    // Axis check: the depth bigWig is the integer universal-column axis -- chroms
+    // named "uni<chunk>" (uni0, uni1, ...; see TUI_UNI_CHUNK in tui.h).  The named
+    // row-0 ancestor axis is no longer produced by `taffy depth`, so a non-uni
+    // chrom is an error rather than a fallback.
     bool integer_axis = false;
     if (bw->cl != NULL && bw->cl->nKeys > 0 && bw->cl->chrom[0] != NULL) {
         const char *c0 = bw->cl->chrom[0];
@@ -1848,14 +1687,22 @@ static int bigwig_lift_window(Tui *tui, const char *bigwig_file,
                 if (*p < '0' || *p > '9') { integer_axis = false; break; }
         }
     }
+    if (!integer_axis) {
+        fprintf(stderr, "ERROR: --bigwig expects the integer universal-column axis "
+                "(chroms uni0,uni1,...) produced by `taffy depth --bin N`; "
+                "the first chrom is '%s'.  Named ancestor-coordinate depth bigWigs are no "
+                "longer supported.\n",
+                (bw->cl != NULL && bw->cl->nKeys > 0 && bw->cl->chrom[0] != NULL)
+                    ? bw->cl->chrom[0] : "(none)");
+        free(bin_sum); free(bin_len); free(iv);
+        if (output_file) fclose(fh);
+        bwClose(bw); bwCleanup(); free(rcopy);
+        return 1;
+    }
 
     int64_t n_na = 0, n_clusters = 0, cols_fetched = 0;
     double t_fetch = 0, _tl = bw_now_s();
-    if (!integer_axis) {
-        // Named axis: column -> (row-0 contig, pos) via the .tui; fetch named bigWig.
-        lift_named_depth(tui, bw, iv, n_iv, T, a, b, N, bin_sum, bin_len,
-                         &n_na, &cols_fetched);
-    } else {
+    {
     // Cluster-coalesced fetch of the RAW 1kb-binned bigWig intervals via
     // bwGetOverlappingIntervals -- NOT per-base bwGetValues, which expands every
     // base (~1000x more data) and dominated the loop.  tui_query intervals are
@@ -1867,17 +1714,17 @@ static int bigwig_lift_window(Tui *tui, const char *bigwig_file,
     const int64_t COALESCE_GAP = 1 << 14;   // 16k cols: merge within-cluster gaps
     int64_t k = 0;
     while (k < n_iv) {
-        int64_t chunk = iv[k].start / GERP_UNI_CHUNK;
+        int64_t chunk = iv[k].start / TUI_UNI_CHUNK;
         int64_t lo = iv[k].start, hi = iv[k].end;
         int64_t j = k + 1;
-        while (j < n_iv && iv[j].start / GERP_UNI_CHUNK == chunk &&
+        while (j < n_iv && iv[j].start / TUI_UNI_CHUNK == chunk &&
                iv[j].start - hi <= COALESCE_GAP) {
             if (iv[j].end > hi) hi = iv[j].end;
             j++;
         }
         n_clusters++;
         cols_fetched += hi - lo;
-        int64_t base = chunk * GERP_UNI_CHUNK;
+        int64_t base = chunk * TUI_UNI_CHUNK;
         char uchrom[24];
         snprintf(uchrom, sizeof uchrom, "uni%" PRIi64, chunk);
         double _tf = bw_now_s();

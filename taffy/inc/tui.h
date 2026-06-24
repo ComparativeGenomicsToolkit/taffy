@@ -135,6 +135,22 @@ void tui_destruct(Tui *tui);
 /* Total number of universal columns T (the global column count). */
 int64_t tui_total_columns(const Tui *tui);
 
+/* Universal-column chunk size for the uni<chunk> depth-bigWig axis.  2e9 < 2^31:
+ * libBigWig reads uint32 positions, but the WRITER (wigToBigWig) and the UCSC
+ * spot tools (bigWigSummary/Info) treat positions/chrom-sizes as SIGNED 32-bit
+ * and overflow above 2^31 (a >=2^31 chrom is silently rejected; reads return
+ * negative coords).  So every chunk must stay strictly below 2^31.  (The old
+ * 4e9 was a latent corruption bug -- offsets reached 4e9 and the chrom size
+ * 4e9 >= 2^31 is unbuildable via wigToBigWig.)  T=72.49e9 -> uni0..uni36.
+ *
+ * The BUILDER (`taffy depth --bin N`) and the READER (`taffy lift --bigwig`)
+ * MUST agree: universal column c is stored at chrom
+ * uni<c/TUI_UNI_CHUNK>, 0-based position c%TUI_UNI_CHUNK.  TUI_UNI_CHUNK is also
+ * a multiple of the bin width used by the depth bigWig (1000), so no bin
+ * straddles a chunk boundary.  Defined here -- the one header both
+ * taf_depth.c (writer) and taf_lift.c (reader) include -- so they cannot drift. */
+#define TUI_UNI_CHUNK 2000000000LL
+
 /* X-record (universal-column -> source MAF file-position) accessors.
  * Used by sidecar writers (tui-chain) that need to copy the X-track from
  * a source .tui forward into a derived .tui so that view -r still works
