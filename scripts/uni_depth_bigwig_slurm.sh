@@ -21,13 +21,15 @@
 #
 # Usage: uni_depth_bigwig_slurm.sh -i UNI.maf.gz -o OUT.bw [options]
 #   -i FILE        universal MAF/TAF (its <FILE>.tui must already exist)
-#   -o FILE        output bigWig (shards + .bg + .sizes land beside it)
+#   -o FILE        output bigWig; shards + .bg + .sizes land beside it, so point
+#                  it at a ROOMY fs (~9GB peak for the 577), NOT a near-full /home
 #   -b INT         bin width in bp (default 1000; must divide 2e9)
 #   -s INT         shard size in universal columns (default 1e8; must be a
 #                  multiple of BIN so shard edges fall on bin boundaries)
 #   -T INT         depth threads per shard (default 8)
 #   --mem GB       sbatch --mem per shard task (default 16)
-#   --time HRS     sbatch --time per shard task (default 4)
+#   --time HRS     sbatch --time per shard task (default 8; raise to 12+ for the
+#                  dense 577 backbone shards -- a TIMEOUT strands the whole build)
 #   --partition P  --account A    passed through to sbatch
 #   --dry-run      write the job scripts and print sbatch lines, don't submit
 # Env: TAFFY, WIGTOBIGWIG override the binaries.
@@ -37,10 +39,10 @@
 set -euo pipefail
 
 INPUT=""; OUT=""; BIN=1000; SHARD=100000000; THREADS=8
-MEM_GB=16; TIME_HRS=4; PARTITION=""; ACCOUNT=""; DRYRUN=0
+MEM_GB=16; TIME_HRS=8; PARTITION=""; ACCOUNT=""; DRYRUN=0
 TAFFY="${TAFFY:-taffy}"; WIGTOBIGWIG="${WIGTOBIGWIG:-wigToBigWig}"
 
-usage() { sed -n '20,32p' "$0" >&2; exit "${1:-1}"; }
+usage() { sed -n '20,35p' "$0" >&2; exit "${1:-1}"; }
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -i) INPUT=$2; shift 2;;
@@ -108,9 +110,10 @@ ${PARTITION:+#SBATCH --partition=$PARTITION}
 ${ACCOUNT:+#SBATCH --account=$ACCOUNT}
 set -euo pipefail
 # Universal-column axis: each shard is its own column slice, already monotone and
-# bin/chunk-aligned, so just concatenate in shard (column) order -- NO sort, NO
-# merge.  The uni0..uniK chrom sizes were written by shard 0 (--sizes).
-ls "$SHARDDIR"/shard.*.bg | LC_ALL=C sort | xargs cat > "$OUTDIR/$BASE.bg"
+# bin/chunk-aligned, so just concatenate in shard (column) order -- NO data sort,
+# NO merge.  Shard files are zero-padded by column index, so the glob expands in
+# column order.  The uni0..uniK chrom sizes were written by shard 0 (--sizes).
+cat "$SHARDDIR"/shard.*.bg > "$OUTDIR/$BASE.bg"
 "$WIGTOBIGWIG" "$OUTDIR/$BASE.bg" "$OUTDIR/$BASE.sizes" "$OUT"
 echo "made $OUT (\$(du -h "$OUT"|cut -f1))"
 EOF

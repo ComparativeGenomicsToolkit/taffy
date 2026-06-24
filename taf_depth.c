@@ -18,7 +18,6 @@
  */
 
 #include "taf.h"
-#include "tai.h"
 #include "tui.h"
 #include "gerp.h"
 #include "sonLib.h"
@@ -339,14 +338,9 @@ static void usage(void) {
     fprintf(stderr, "          ready for `wigToBigWig --depth.bg --sizes out.bw`.  Requires .tui.\n");
     fprintf(stderr, "-c --useCompression : Bgzip the output(s).\n");
     fprintf(stderr, "-t --tree : Newick tree override.  Default: the `# hal` tree comment in the input header.\n");
-    fprintf(stderr, "-r --region SEQ:START-END : Restrict to one anchor chrom range.  Requires <inputFile>.tui.\n");
-    fprintf(stderr, "     Half-open, 0-based.\n");
-    fprintf(stderr, "     Incompatible with the universal-column output (a leaf region maps to scattered columns).\n");
-    fprintf(stderr, "-R --regionFile FILE : Like -r but a file of regions (one SEQ:START-END per line; '#'\n");
-    fprintf(stderr, "     comments + blanks ignored).  Amortises one index load -- for SLURM region sharding.\n");
     fprintf(stderr, "   --columnRange LO-HI : Restrict to a universal-column range (half-open, 0-based; HI <= T\n");
     fprintf(stderr, "     from `taffy stats -u`).  Requires .tui.  The natural unit for SLURM sharding.  With\n");
-    fprintf(stderr, "     --bin, LO must be a multiple of N (HI too, unless HI == T).  Mutually exclusive with -r/-R.\n");
+    fprintf(stderr, "     --bin, LO must be a multiple of N (HI too, unless HI == T).\n");
     fprintf(stderr, "--minLeaves : Minimum surviving non-gap leaves to score a column (default 2).\n");
     fprintf(stderr, "--branchScale : Global multiplier on branch lengths (default 1.0).\n");
     fprintf(stderr, "--paralog MODE : Duplicate-species rows in one block (default union):\n");
@@ -381,73 +375,6 @@ static int parse_paralog_policy(const char *s, GerpParalogPolicy *out) {
     return -1;
 }
 
-// One parsed region for the outer loop in region mode.  `seq` is owned
-// (allocated by tai_parse_region).
-typedef struct {
-    char   *seq;
-    int64_t start;
-    int64_t length;
-} GerpRegion;
-
-// Read a regions file -- one "SEQ:START-END" per line; '#' and blank
-// lines are ignored.  Returns a freshly-allocated array of size *n_out,
-// or NULL on error (after printing the offending line/path to stderr).
-// Caller frees each entry's seq and the array.
-static GerpRegion *read_regions_file(const char *path, int64_t *n_out) {
-    FILE *f = fopen(path, "r");
-    if (f == NULL) {
-        fprintf(stderr, "taffy depth: cannot open --regionFile: %s\n", path);
-        return NULL;
-    }
-    char line[4096];
-    int64_t n_lines = 0;
-    int64_t n_regions = 0, out_cap = 0;
-    GerpRegion *out = NULL;
-    while (fgets(line, sizeof(line), f) != NULL) {
-        n_lines++;
-        size_t len = strlen(line);
-        // Reject lines that didn't fit -- otherwise we'd silently parse
-        // a truncated region.
-        if (len == sizeof(line) - 1 && line[len-1] != '\n') {
-            fprintf(stderr, "taffy depth: --regionFile %s line %" PRIi64 ": "
-                            "line exceeds %zu bytes\n",
-                    path, n_lines, sizeof(line) - 1);
-            for (int64_t i = 0; i < n_regions; i++) free(out[i].seq);
-            free(out); fclose(f);
-            return NULL;
-        }
-        while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r' ||
-                           line[len-1] == ' '  || line[len-1] == '\t')) {
-            line[--len] = '\0';
-        }
-        char *p = line;
-        while (*p == ' ' || *p == '\t') p++;
-        if (*p == '\0' || *p == '#') continue;
-
-        int64_t start = 0, length = 0;
-        char *seq = tai_parse_region(p, &start, &length);
-        if (seq == NULL) {
-            fprintf(stderr, "taffy depth: --regionFile %s line %" PRIi64 ": "
-                            "invalid region: %s\n", path, n_lines, p);
-            for (int64_t i = 0; i < n_regions; i++) free(out[i].seq);
-            free(out); fclose(f);
-            return NULL;
-        }
-        if (n_regions >= out_cap) {
-            int64_t new_cap = out_cap > 0 ? out_cap * 2 : 16;
-            out = st_realloc(out, (size_t)new_cap * sizeof(GerpRegion));
-            out_cap = new_cap;
-        }
-        out[n_regions].seq    = seq;
-        out[n_regions].start  = start;
-        out[n_regions].length = length;
-        n_regions++;
-    }
-    fclose(f);
-    *n_out = n_regions;
-    return out;
-}
-
 int taf_depth_main(int argc, char *argv[]) {
     time_t startTime = time(NULL);
 
@@ -456,8 +383,6 @@ int taf_depth_main(int argc, char *argv[]) {
     char *rsFile         = NULL;   // --rs    : GERP RS conservation wig (opt-in)
     char *depthFile      = NULL;   // --depth : leaf-depth wig (opt-in)
     char *treeFile       = NULL;
-    char *region         = NULL;
-    char *regionFile     = NULL;
     char *columnRangeArg = NULL;
     char *sizesFile      = NULL;   // --sizes : chrom-sizes for the chunked uni axis
     bool use_compression = false;
@@ -475,8 +400,6 @@ int taf_depth_main(int argc, char *argv[]) {
             { "depth",          required_argument, 0, OPT_DEPTH },
             { "useCompression", no_argument,       0, 'c' },
             { "tree",           required_argument, 0, 't' },
-            { "region",         required_argument, 0, 'r' },
-            { "regionFile",     required_argument, 0, 'R' },
             { "columnRange",    required_argument, 0, OPT_COLUMN_RANGE },
             { "sizes",          required_argument, 0, OPT_SIZES },
             { "branchScale",    required_argument, 0, OPT_BRANCH_SCALE },
@@ -490,7 +413,7 @@ int taf_depth_main(int argc, char *argv[]) {
             { 0, 0, 0, 0 }
         };
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:ct:r:R:T:h", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:ct:T:h", long_options, &option_index);
         if (key == -1) break;
         switch (key) {
             case 'l': logLevelString = optarg; break;
@@ -499,8 +422,6 @@ int taf_depth_main(int argc, char *argv[]) {
             case OPT_DEPTH: depthFile = optarg; break;
             case 'c': use_compression = true;  break;
             case 't': treeFile       = optarg; break;
-            case 'r': region         = optarg; break;
-            case 'R': regionFile     = optarg; break;
             case 'T': n_threads      = atoi(optarg); break;
             case OPT_SIZES:         sizesFile     = optarg; break;
             case OPT_BRANCH_SCALE:  branch_scale  = atof(optarg); break;
@@ -585,26 +506,9 @@ int taf_depth_main(int argc, char *argv[]) {
     }
     st_logInfo("taffy depth: tree has %" PRIi64 " leaves\n", gerp_tree_n_leaves(gt));
 
-    // CLI mutual-exclusion check goes BEFORE the output file opens so a
-    // bad combination doesn't leave a stub output file behind.  -r, -R,
-    // and --columnRange are pairwise exclusive (full-fledged validation
-    // of the individual values happens later, after the index is loaded).
-    if ((region != NULL) + (regionFile != NULL) + (columnRangeArg != NULL) > 1) {
-        fprintf(stderr, "taffy depth: -r, -R, and --columnRange are mutually exclusive\n");
-        return 1;
-    }
     // At least one output must be requested -- each is opt-in.
     if (rsFile == NULL && depthFile == NULL) {
         fprintf(stderr, "taffy depth: need at least one output -- pass --rs FILE and/or --depth FILE\n");
-        return 1;
-    }
-    // Output is the raw universal column [0,T): a contiguous-column concept, so
-    // -r/-R (a leaf region -> scattered, non-monotone universal columns) is out.
-    // Use --columnRange (a contiguous column slice) or whole-file streaming.
-    if (region != NULL || regionFile != NULL) {
-        fprintf(stderr, "taffy depth: -r/-R are incompatible with the universal-column output -- a leaf\n"
-                        "  region maps to non-contiguous universal columns.  Use --columnRange or whole-file\n"
-                        "  streaming.\n");
         return 1;
     }
     if (bin_size < 0) {
@@ -688,30 +592,6 @@ int taf_depth_main(int argc, char *argv[]) {
     int64_t n_scored_cols = 0;
     int fatal = 0;
 
-    // Build the regions list:
-    //   no -r/-R  -> regions == NULL  (stream the whole input)
-    //   -r        -> singleton list of size 1
-    //   -R FILE   -> list parsed from file
-    // Mutual exclusion already checked above the output opens.
-    GerpRegion *regions = NULL;
-    int64_t n_regions = 0;
-    if (regionFile != NULL) {
-        regions = read_regions_file(regionFile, &n_regions);
-        if (regions == NULL) return 1;
-        st_logInfo("taffy depth: %" PRIi64 " regions read from %s\n",
-                   n_regions, regionFile);
-    } else if (region != NULL) {
-        regions = st_calloc(1, sizeof(GerpRegion));
-        regions[0].seq = tai_parse_region(region, &regions[0].start,
-                                          &regions[0].length);
-        if (regions[0].seq == NULL) {
-            fprintf(stderr, "taffy depth: invalid region: %s\n", region);
-            free(regions);
-            return 1;
-        }
-        n_regions = 1;
-    }
-
     // Parse --columnRange LO-HI directly into a TuiInterval (the iterator
     // takes column intervals natively, no tui_query needed).  Half-open
     // [LO, HI), validated against T below once the .tui is loaded.
@@ -753,11 +633,8 @@ int taf_depth_main(int argc, char *argv[]) {
 
     // The output is the universal-column axis (chunked uni0..uniK), which needs
     // T and the per-block column coords from the .tui -- so the .tui is ALWAYS
-    // required.  Load it once up front (the outer loop reuses it).  The .tai
-    // (regular-MAF leaf-coord index) is no longer used by `taffy depth`.
-    Tui  *tui    = NULL;
-    Tai  *tai    = NULL;   // unused; kept NULL so the cleanup below is a no-op
-    FILE *tai_fh = NULL;
+    // required.  Load it once up front.
+    Tui *tui = NULL;
     {
         if (inputFile == NULL) {
             fprintf(stderr, "taffy depth: requires -i <file> with a .tui index (cannot index stdin)\n");
@@ -829,46 +706,23 @@ int taf_depth_main(int argc, char *argv[]) {
         }
     }
 
-    // Outer loop: 1 iteration in streaming or column-range mode;
-    // n_regions iterations in region mode (each builds its own iterator
-    // over the shared tui/tai, then runs the inner read/score/emit batched
-    // loop to exhaustion).  Empty column-range -> 0 iterations (success
-    // no-op for SLURM shards that ended up with a zero slice).
+    // One pass: column-range mode (a direct column-slice iterator) or whole-file
+    // streaming (tui_it == NULL).  Empty column-range -> 0 iterations (a success
+    // no-op for a SLURM shard that ended up with a zero slice).
     // --bin running binner: depth accumulates across blocks (in column order)
     // into the current universal-column bin; emitted (chunked) when the bin
     // advances.  The bin index is GLOBAL over [0,T); the 2e9-chunk split happens
     // only at emit time in gerp_flush_bin.
     int64_t cur_bin = -1, cur_sum = 0, cur_cnt = 0;
 
-    int64_t n_iter = (regions != NULL) ? n_regions
-                   : empty_col_range   ? 0
-                   :                     1;
-    for (int64_t reg_idx = 0; reg_idx < n_iter && !fatal; reg_idx++) {
+    int64_t n_iter = empty_col_range ? 0 : 1;
+    for (int64_t iter = 0; iter < n_iter && !fatal; iter++) {
         TuiExtractIt *tui_it = NULL;
-        TaiIt        *tai_it = NULL;
-        TuiInterval  *uiv    = NULL;
 
-        if (regions != NULL) {
-            GerpRegion *r = &regions[reg_idx];
-            if (tui != NULL) {
-                int64_t n_uiv = 0;
-                uiv = tui_query(tui, r->seq, r->start, r->start + r->length,
-                                &n_uiv);
-                tui_it = tui_extract_iterator(tui, li, input_format == 1,
-                                              rle, uiv, n_uiv);
-                st_logDebug("taffy depth: region %s:%" PRIi64 "-%" PRIi64
-                            " resolved via .tui to %" PRIi64 " universal intervals\n",
-                            r->seq, r->start, r->start + r->length, n_uiv);
-            } else {
-                tai_it = tai_iterator(tai, li, rle, r->seq, r->start, r->length);
-                st_logDebug("taffy depth: region %s:%" PRIi64 "-%" PRIi64 " via .tai\n",
-                            r->seq, r->start, r->start + r->length);
-            }
-        } else if (have_col_range) {
-            // Direct column-range iterator: hand TuiInterval{LO,HI} straight
-            // to tui_extract_iterator (no tui_query / chrom resolution).
-            // `uiv` stays NULL -- col_range_iv lives on the stack across the
-            // single iteration, no allocation to free in the per-iter cleanup.
+        if (have_col_range) {
+            // Direct column-range iterator: hand TuiInterval{LO,HI} straight to
+            // tui_extract_iterator (no tui_query / chrom resolution).  Otherwise
+            // tui_it stays NULL and the inner loop streams the whole file.
             tui_it = tui_extract_iterator(tui, li, input_format == 1, rle,
                                           &col_range_iv, 1);
         }
@@ -876,34 +730,29 @@ int taf_depth_main(int argc, char *argv[]) {
         // TAF read needs the previous block (p_aln) for delta-coord
         // decoding.  We carry it across batches so the first block of
         // batch N+1 has batch N's last block as its predecessor.  MAF
-        // reads ignore p_aln.  Unused in region mode -- the iterator
-        // manages its own state.  Carry is per-region (one streaming
-        // run inside each iterator).
+        // reads ignore p_aln.  In column-range mode the iterator manages
+        // its own state, so the carry chain is unused.
         Alignment *carry_aln = NULL;
-        // Running universal column for --universal: streaming starts at 0,
-        // column-range at LO; += column_number per block in read (Phase A,
-        // file == column order).  Unused in region mode, which --universal
-        // forbids.
+        // Running universal column: streaming starts at 0, column-range at LO;
+        // += column_number per block in read (Phase A, file order == column
+        // order).
         int64_t uni_col = have_col_range ? col_range_iv.start : 0;
 
         while (!fatal) {
             // Phase A: serial read of up to batch_cap blocks.  TAF chains
             // through p_aln; once we've passed a block to taf_read_block as
             // p_aln, we can free the prior carry (its successor is now in
-            // hand).  Region mode forces batch_cap=1: tui_extract_next's
-            // returned alignment is invalidated by the NEXT call to it, so
-            // we can only hold one at a time.  bgzf_mt still parallelises
-            // decompress; cross-region parallelism (multiple shards) covers
-            // any lost intra-region OMP throughput.
-            int eff_batch_cap = (tui_it != NULL || tai_it != NULL) ? 1 : batch_cap;
+            // hand).  Column-range mode forces batch_cap=1: tui_extract_next's
+            // returned alignment is invalidated by the NEXT call to it, so we
+            // can only hold one at a time.  bgzf_mt still parallelises
+            // decompress; cross-shard parallelism covers any lost OMP throughput.
+            int eff_batch_cap = (tui_it != NULL) ? 1 : batch_cap;
             int n_read = 0;
             Alignment *p_for_read = carry_aln;
             while (n_read < eff_batch_cap) {
                 Alignment *a = NULL;
                 if (tui_it != NULL) {
                     a = tui_extract_next(tui_it, li);
-                } else if (tai_it != NULL) {
-                    a = tai_next(tai_it, li);
                 } else if (input_format == 0) {
                     a = taf_read_block(p_for_read, rle, li);
                 } else {
@@ -919,9 +768,9 @@ int taf_depth_main(int argc, char *argv[]) {
                 // by split-vs-single equivalence test on apes (300K cols,
                 // data lines byte-identical after sort).
                 // The previous batch's carry is now consumed by taf_read_block
-                // (it was used to decode this new block); safe to free.  Region
-                // mode doesn't use the carry chain.
-                if (tui_it == NULL && tai_it == NULL &&
+                // (it was used to decode this new block); safe to free.
+                // Column-range mode doesn't use the carry chain.
+                if (tui_it == NULL &&
                     p_for_read == carry_aln && carry_aln != NULL) {
                     alignment_destruct(carry_aln, 1);
                     carry_aln = NULL;
@@ -932,7 +781,7 @@ int taf_depth_main(int argc, char *argv[]) {
                 p_for_read = a;
             }
             if (n_read == 0) {
-                // No more blocks in this region (or in the stream).
+                // No more blocks in the stream.
                 if (carry_aln != NULL) {
                     alignment_destruct(carry_aln, 1);
                     carry_aln = NULL;
@@ -1002,21 +851,20 @@ int taf_depth_main(int argc, char *argv[]) {
 
             // Phase D: free this batch's alignments, retaining the last one
             // as carry for next batch's TAF chain.  On a fatal error we still
-            // free everything cleanly.  Region mode: tui_extract_iterator
-            // owns the yielded alignment (it frees on next call) so we
-            // null-out without destructing; tai_iterator yields ownership so
-            // we destruct normally.
+            // free everything cleanly.  Column-range mode: tui_extract_iterator
+            // owns the yielded alignment (frees it on the next call) so we
+            // null-out without destructing.
             if (tui_it != NULL) {
                 for (int i = 0; i < n_read; i++) batch_aln[i] = NULL;
             } else {
-                int free_to = (fatal || tai_it != NULL) ? n_read : n_read - 1;
+                int free_to = fatal ? n_read : n_read - 1;
                 for (int i = 0; i < free_to; i++) {
                     if (batch_aln[i] != NULL) {
                         alignment_destruct(batch_aln[i], 1);
                         batch_aln[i] = NULL;
                     }
                 }
-                if (!fatal && tai_it == NULL && n_read > 0) {
+                if (!fatal && n_read > 0) {
                     carry_aln = batch_aln[n_read - 1];
                     batch_aln[n_read - 1] = NULL;
                 }
@@ -1025,8 +873,6 @@ int taf_depth_main(int argc, char *argv[]) {
         if (carry_aln != NULL) alignment_destruct(carry_aln, 1);
 
         if (tui_it != NULL) tui_extract_iterator_destruct(tui_it);
-        if (tai_it != NULL) tai_iterator_destruct(tai_it);
-        free(uiv);
     }
 
     // Flush the last --bin bin (the running binner has no successor block to
@@ -1034,13 +880,7 @@ int taf_depth_main(int argc, char *argv[]) {
     if (bin_size > 0)
         gerp_flush_bin(dout, cur_bin, cur_sum, cur_cnt, bin_size);
 
-    if (tui    != NULL) tui_destruct(tui);
-    if (tai    != NULL) tai_destruct(tai);
-    if (tai_fh != NULL) fclose(tai_fh);
-    if (regions != NULL) {
-        for (int64_t i = 0; i < n_regions; i++) free(regions[i].seq);
-        free(regions);
-    }
+    if (tui != NULL) tui_destruct(tui);
 
     const char *policy_name = (paralog_policy == GERP_PARALOG_UNION) ? "union"
                             : (paralog_policy == GERP_PARALOG_SKIP)  ? "skip"
