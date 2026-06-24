@@ -25,10 +25,15 @@
 #include <unistd.h>
 #include <stdlib.h>
 
-// Universal-column chunk size for the uni<chunk> bigWig axis -- must match
-// taf_gerp.c's GERP_UNI_CHUNK (the column -> (chunk, within) split that keeps
-// each bigWig chrom under the bigWig 2^32 coordinate limit).
-#define GERP_UNI_CHUNK 4000000000LL
+// Universal-column chunk size for the uni<chunk> bigWig axis -- MUST match the
+// chunking used to BUILD the depth bigWig (and the .sizes file).  2e9 < 2^31:
+// libBigWig reads uint32 positions, but the WRITER (wigToBigWig) and the UCSC
+// spot tools (bigWigSummary/Info) treat positions/chrom-sizes as SIGNED 32-bit
+// and overflow above 2^31 (a >=2^31 chrom is silently rejected; reads return
+// negative coords).  So every chunk must stay strictly below 2^31.  (The old
+// 4e9 was a latent corruption bug -- offsets reached 4e9 and the chrom size
+// 4e9 >= 2^31 is unbuildable via wigToBigWig.)  T=72.49e9 -> uni0..uni36.
+#define GERP_UNI_CHUNK 2000000000LL
 // The bin width our uni<chunk> depth bigWigs use (gerp --bin 1000).
 #define GERP_UNI_BIN 1000LL
 
@@ -1851,11 +1856,14 @@ static int bigwig_lift_window(Tui *tui, const char *bigwig_file,
         lift_named_depth(tui, bw, iv, n_iv, T, a, b, N, bin_sum, bin_len,
                          &n_na, &cols_fetched);
     } else {
-    // Cluster-coalesced random fetch.  tui_query intervals are column-sorted;
-    // a leaf window's columns sit in a bounded number of dense clusters
-    // separated by huge gaps.  Coalesce intervals within COALESCE_GAP (and not
-    // across a chunk) into a cluster-range, fetch its per-column depth once via
-    // libBigWig random access, distribute to the intervals.
+    // Cluster-coalesced fetch of the RAW 1kb-binned bigWig intervals via
+    // bwGetOverlappingIntervals -- NOT per-base bwGetValues, which expands every
+    // base (~1000x more data) and dominated the loop.  tui_query intervals are
+    // column-sorted and form dense clusters separated by huge gaps; coalesce
+    // within COALESCE_GAP (not across a chunk), fetch the cluster's stored
+    // intervals once, then two-pointer merge them against the tui intervals for
+    // each interval's overlap-weighted mean depth.  Both lists are sorted, so the
+    // merge is linear and the per-column work is gone.
     const int64_t COALESCE_GAP = 1 << 14;   // 16k cols: merge within-cluster gaps
     int64_t k = 0;
     while (k < n_iv) {
@@ -1874,18 +1882,24 @@ static int bigwig_lift_window(Tui *tui, const char *bigwig_file,
         snprintf(uchrom, sizeof uchrom, "uni%" PRIi64, chunk);
         double _tf = bw_now_s();
         bwOverlappingIntervals_t *ov =
-            bwGetValues(bw, uchrom, (uint32_t)(lo - base), (uint32_t)(hi - base), 1);
+            bwGetOverlappingIntervals(bw, uchrom, (uint32_t)(lo - base), (uint32_t)(hi - base));
         t_fetch += bw_now_s() - _tf;
 
+        int64_t p = 0;     // pointer into ov, advances with the sorted tui intervals
         for (int64_t m = k; m < j; m++) {
             int64_t cs = iv[m].start, ce = iv[m].end, L = ce - cs;
-            // mean universal depth over the interval's columns (NaN = uncovered)
+            // overlap-weighted mean depth from the cluster's stored 1kb intervals
             double sum = 0; int64_t cnt = 0;
             if (ov != NULL) {
-                for (int64_t c = cs; c < ce; c++) {
-                    int64_t idx = c - lo;
-                    if (idx >= 0 && idx < (int64_t)ov->l && !isnan(ov->value[idx])) {
-                        sum += ov->value[idx]; cnt++;
+                while (p < (int64_t)ov->l && base + (int64_t)ov->end[p] <= cs) p++;
+                for (int64_t q = p; q < (int64_t)ov->l &&
+                         base + (int64_t)ov->start[q] < ce; q++) {
+                    int64_t is = base + (int64_t)ov->start[q];
+                    int64_t ie = base + (int64_t)ov->end[q];
+                    int64_t olo = cs > is ? cs : is, ohi = ce < ie ? ce : ie;
+                    int64_t w = ohi - olo;
+                    if (w > 0 && !isnan(ov->value[q])) {
+                        sum += (double)ov->value[q] * (double)w; cnt += w;
                     }
                 }
             }
