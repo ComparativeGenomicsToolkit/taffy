@@ -32,6 +32,8 @@
 #                  dense 577 backbone shards -- a TIMEOUT strands the whole build)
 #   --partition P  --account A    passed through to sbatch
 #   --dry-run      write the job scripts and print sbatch lines, don't submit
+#   --wait         submit, then BLOCK until the build finishes (poll the assembly
+#                  job); else submit array + afterok assembly and return at once
 # Env: TAFFY, WIGTOBIGWIG override the binaries.
 #
 # Requirements: taffy (`depth` subcommand), wigToBigWig (UCSC), sbatch.
@@ -39,10 +41,10 @@
 set -euo pipefail
 
 INPUT=""; OUT=""; BIN=1000; SHARD=100000000; THREADS=8
-MEM_GB=16; TIME_HRS=8; PARTITION=""; ACCOUNT=""; DRYRUN=0
+MEM_GB=16; TIME_HRS=8; PARTITION=""; ACCOUNT=""; DRYRUN=0; WAIT=0
 TAFFY="${TAFFY:-taffy}"; WIGTOBIGWIG="${WIGTOBIGWIG:-wigToBigWig}"
 
-usage() { sed -n '20,35p' "$0" >&2; exit "${1:-1}"; }
+usage() { sed -n '20,37p' "$0" >&2; exit "${1:-1}"; }
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -i) INPUT=$2; shift 2;;
@@ -55,6 +57,7 @@ while [[ $# -gt 0 ]]; do
     --partition) PARTITION=$2; shift 2;;
     --account) ACCOUNT=$2; shift 2;;
     --dry-run) DRYRUN=1; shift;;
+    --wait) WAIT=1; shift;;
     -h|--help) usage 0;;
     *) echo "ERROR: unknown arg: $1" >&2; usage;;
   esac
@@ -128,3 +131,20 @@ ARRAY_ID=$(sbatch --parsable --array=0-$((NSHARD-1)) "$RUNNER")
 echo ">> depth array submitted: job $ARRAY_ID ($NSHARD shards)" >&2
 ASM_ID=$(sbatch --parsable --dependency=afterok:"$ARRAY_ID" "$ASSEMBLE")
 echo ">> assembly submitted (afterok:$ARRAY_ID): job $ASM_ID -> $OUT" >&2
+
+if (( WAIT )); then
+  # Block until the assembly job leaves the queue.  These are real SLURM jobs
+  # (array + afterok assembly), so the build still finishes if THIS poll process
+  # dies -- run it under nohup/tmux for a multi-hour build; --wait just adds the
+  # blocking.  If a shard fails, afterok cancels the assembly -> it leaves the
+  # queue and $OUT is never written, so the -s check reports the failure.
+  echo ">> [--wait] blocking until job $ASM_ID completes (polling every 30s)..." >&2
+  sleep 5
+  while [[ -n "$(squeue -h -j "$ASM_ID" 2>/dev/null)" ]]; do sleep 30; done
+  if [[ -s "$OUT" ]]; then
+    echo ">> done -> $OUT ($(du -h "$OUT" 2>/dev/null | cut -f1))" >&2
+  else
+    echo ">> BUILD FAILED: $OUT not written -- inspect the depth array ($ARRAY_ID) and assembly ($ASM_ID)" >&2
+    exit 1
+  fi
+fi
