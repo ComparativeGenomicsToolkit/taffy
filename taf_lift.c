@@ -1708,33 +1708,12 @@ static int bigwig_lift_window(Tui *tui, const char *bigwig_file,
     // queries ONE chrom, and libBigWig SILENTLY CLAMPS an over-range request --
     // so without this, a straddling interval's post-boundary columns (which live
     // on the next chunk) are dropped and the interval is emitted with a PARTIAL
-    // mean, not even flagged uncovered.  The split carries the G-coords through
-    // linearly (forward G ascends, reverse descends, both linear in the column
-    // offset from the interval start).  Boundary crossings are rare (one per 2e9
-    // columns), so iv grows by at most ~T/2e9 entries.
+    // mean, not even flagged uncovered.  (Returns NULL when nothing straddles --
+    // the common case -- so we keep the original array with no copy.)
     {
-        int64_t n_extra = 0;
-        for (int64_t m = 0; m < n_iv; m++)
-            n_extra += (iv[m].end - 1) / TUI_UNI_CHUNK - iv[m].start / TUI_UNI_CHUNK;
-        if (n_extra > 0) {
-            TuiInterval *iv2 = st_malloc((size_t)(n_iv + n_extra) * sizeof(TuiInterval));
-            int64_t w = 0;
-            for (int64_t m = 0; m < n_iv; m++) {
-                int64_t cs = iv[m].start, ce = iv[m].end;
-                int64_t c0 = cs / TUI_UNI_CHUNK, c1 = (ce - 1) / TUI_UNI_CHUNK;
-                if (c0 == c1) { iv2[w++] = iv[m]; continue; }
-                for (int64_t c = c0; c <= c1; c++) {
-                    int64_t ps = (c == c0) ? cs : c * TUI_UNI_CHUNK;
-                    int64_t pe = (c == c1) ? ce : (c + 1) * TUI_UNI_CHUNK;
-                    TuiInterval piece = iv[m];
-                    piece.start = ps; piece.end = pe;
-                    piece.t_start = (iv[m].rev == 0) ? iv[m].t_start + (ps - cs)
-                                                     : iv[m].t_start - (ps - cs);
-                    iv2[w++] = piece;
-                }
-            }
-            free(iv); iv = iv2; n_iv = w;
-        }
+        int64_t n2 = 0;
+        TuiInterval *iv2 = tui_split_intervals_on_chunks(iv, n_iv, TUI_UNI_CHUNK, &n2);
+        if (iv2 != NULL) { free(iv); iv = iv2; n_iv = n2; }
     }
 
     int64_t n_na = 0, n_clusters = 0, cols_fetched = 0;

@@ -113,6 +113,17 @@ typedef struct {
     int     rev;
 } TuiInterval;
 
+/* Split each interval that crosses a chunk boundary (a multiple of chunk_size)
+ * into per-chunk pieces, so every returned interval lies within one chunk; the
+ * t_start/rev source mapping carries through linearly.  Returns NULL (leaving
+ * *out_n unset) when NO interval straddles -- the caller keeps its original
+ * array; otherwise a newly malloc'd array of *out_n (>= n) intervals to free.
+ * Used by `taffy lift --bigwig` so a single-chrom uni<chunk> bigWig fetch covers
+ * each interval fully (libBigWig silently clamps an over-range query).  Unit-
+ * tested in tests/depth_test.c. */
+TuiInterval *tui_split_intervals_on_chunks(const TuiInterval *iv, int64_t n,
+                                           int64_t chunk_size, int64_t *out_n);
+
 typedef struct _Tui Tui;
 
 /*
