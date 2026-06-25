@@ -327,11 +327,14 @@ if [[ "\$STAGE_LOCAL" -eq 1 ]]; then
 fi
 
 # --- Sample the regions once (same regions for every tool). ------------
-# taffy stats -s on the hg38 .tai gives every ref-seq name + length; the python
-# sampler filters to canonical \$REF_GENOME.chrN and draws the windows.
+# taffy stats -s gives every ref-seq name + length; the python sampler filters to
+# canonical \$REF_GENOME.chrN and draws the windows.  Source is the hg38 MAF when
+# given, else the universal TAF (it carries the same \$REF_GENOME.chrN leaf
+# sequences) -- so the tui-only cmp5 (no -m) still samples.
 CHROM_STATS="\$OUTDIR/hg38.stats.txt"
 REGIONS="\$OUTDIR/regions.tsv"
-"\$TAFFY" stats -s -i "\$HG38" > "\$CHROM_STATS" 2> "\$OUTDIR/stats.err" || { echo "ERROR: taffy stats -s failed on \$HG38:" >&2; cat "\$OUTDIR/stats.err" >&2; exit 1; }
+STATS_SRC="\${HG38:-\$UNI_TAF}"
+"\$TAFFY" stats -s -i "\$STATS_SRC" > "\$CHROM_STATS" 2> "\$OUTDIR/stats.err" || { echo "ERROR: taffy stats -s failed on \$STATS_SRC:" >&2; cat "\$OUTDIR/stats.err" >&2; exit 1; }
 python3 "\$OUTDIR/sample_regions.py" --stats "\$CHROM_STATS" --refGenome "\$REF_GENOME" \\
     --sizes "\$SIZES_CSV" --nSamples "\$N_SAMPLES" --seed "\$SEED" > "\$REGIONS" \\
     || { echo "ERROR: region sampling failed" >&2; exit 1; }
