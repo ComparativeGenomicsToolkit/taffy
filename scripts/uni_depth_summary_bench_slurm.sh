@@ -67,7 +67,7 @@ BIGBEDTOBED="${BIGBEDTOBED:-$(command -v bigBedToBed || true)}"
 
 usage() {
     cat >&2 <<EOF
-uni_depth_summary_bench_slurm.sh -- bench zoom-out (summary) wall time:
+uni_depth_summary_bench_slurm.sh -- bench zoom-out (summary) wall / RSS / output:
    universal-depth bigWig lift  vs  UCSC bigMafSummary,  N random regions/size
 
 Required:
@@ -330,39 +330,44 @@ python3 "\$OUTDIR/sample_regions.py" --stats "\$CHROM_STATS" --refGenome "\$REF_
 echo "sampled \$(wc -l < "\$REGIONS") regions (\$N_SAMPLES per size, seed \$SEED) over sizes \$SIZES_CSV" >&2
 
 # Truncate + write the header fresh (one job -> one bench.tsv).
-printf "tool\tsize_bp\tchrom\tstart\tsample\twall_s\texit\ttimed_out\n" > "\$BENCH_TSV"
+printf "tool\tsize_bp\tchrom\tstart\tsample\twall_s\tpeak_rss_kb\tout_bytes\texit\ttimed_out\n" > "\$BENCH_TSV"
 
 # Run one cell.  Args: tool size chrom start sample budget cmd...
-# Pipe the tool's stdout through wc -c (discarded) so we never write a big
-# bedGraph/BED to (network) OUTDIR and the cost is the tool, not the writeout.
-# /usr/bin/time measures only the left side of the pipe; PIPESTATUS[0] is the
-# tool's real exit (124 = timeout expiry, 137 = SIGKILL).  Wall time only.
+# Pipe the tool's stdout through wc -c so we never write a big bedGraph/BED to
+# (network) OUTDIR -- but capture the byte COUNT for the output-size panel.
+# /usr/bin/time -f '%e %M' gives wall + peak RSS (KB); PIPESTATUS[0] is the
+# tool's real exit (124 = timeout expiry, 137 = SIGKILL).
 run_cell() {
     local tool="\$1" N="\$2" chrom="\$3" rstart="\$4" sample="\$5" budget="\$6"
     shift 6
     local stem="\${tool}_\${N}_\${sample}"
     local time_file="\$LOGDIR/time_\${stem}.txt"
     local err_file="\$LOGDIR/err_\${stem}.log"
+    local bytes_file="\$LOGDIR/bytes_\${stem}.txt"
 
     /usr/bin/time -q -f '%e %M' -o "\$time_file" \\
         timeout --signal=KILL "\$budget" "\$@" \\
-        2> "\$err_file" | wc -c > /dev/null
+        2> "\$err_file" | wc -c > "\$bytes_file"
     local rc=\${PIPESTATUS[0]}
 
-    local wall timed_out=0
+    local wall rss timed_out=0
     if [[ -s "\$time_file" ]]; then
-        read -r wall _ < "\$time_file"
+        read -r wall rss < "\$time_file"
         if ! [[ "\$wall" =~ ^[0-9.]+\$ ]]; then
-            read -r wall _ < <(awk '/^[0-9.]+[ \t][0-9]+\$/ {l=\$0} END{print l}' "\$time_file")
+            read -r wall rss < <(awk '/^[0-9.]+[ \t][0-9]+\$/ {l=\$0} END{print l}' "\$time_file")
             [[ -z "\$wall" ]] && wall="NA"
         fi
     else
         wall="NA"
     fi
+    [[ "\$wall" =~ ^[0-9.]+\$ ]] || wall="NA"
+    [[ "\$rss"  =~ ^[0-9]+\$  ]] || rss="NA"
+    local out_bytes; read -r out_bytes < "\$bytes_file" 2>/dev/null || out_bytes=0
+    [[ "\$out_bytes" =~ ^[0-9]+\$ ]] || out_bytes=0
     if (( rc == 137 || rc == 124 )); then timed_out=1; fi
 
-    printf "%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\n" \\
-        "\$tool" "\$N" "\$chrom" "\$rstart" "\$sample" "\$wall" "\$rc" "\$timed_out"
+    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\n" \\
+        "\$tool" "\$N" "\$chrom" "\$rstart" "\$sample" "\$wall" "\$rss" "\$out_bytes" "\$rc" "\$timed_out"
 }
 
 # Run one region: ours (lift --bigwig) then theirs (bigBedToBed), SEQUENTIALLY,
@@ -428,9 +433,10 @@ chmod +x "$RUNNER"
 PLOT="$OUTDIR/plot.py"
 cat > "$PLOT" <<'PY'
 #!/usr/bin/env python3
-"""Zoom-out (summary) wall-time bench: for each backend, the MEAN wall time over
-the sampled regions with a shaded min/max band, vs query size.  ONE linear
-panel, two lines -- our universal-depth bigWig lift vs UCSC bigMafSummary.
+"""Zoom-out (summary) bench: for each backend, the MEAN over the sampled regions
+(shaded min/max band) vs query size, in THREE linear panels -- wall time, peak
+RSS, output size -- two lines (universal-depth bigWig lift vs UCSC bigMafSummary)
+to mirror the view-sample (#5) figure.
 
 Timed-out / errored samples are excluded from the aggregate; a stderr note
 reports how many were dropped per (tool,size).  If EVERY sample of a tool at a
@@ -447,10 +453,12 @@ rows = []
 with open(os.path.join(bench_dir, "bench.tsv")) as f:
     for r in csv.DictReader(f, delimiter="\t"):
         try:
-            r["size_bp"]   = int(r["size_bp"])
-            r["wall_s"]    = float(r["wall_s"]) if r["wall_s"] != "NA" else None
-            r["timed_out"] = int(r["timed_out"])
-            r["exit"]      = int(r["exit"])
+            r["size_bp"]     = int(r["size_bp"])
+            r["wall_s"]      = float(r["wall_s"]) if r["wall_s"] != "NA" else None
+            r["peak_rss_kb"] = float(r["peak_rss_kb"]) if r["peak_rss_kb"] != "NA" else None
+            r["out_bytes"]   = int(r["out_bytes"])
+            r["timed_out"]   = int(r["timed_out"])
+            r["exit"]        = int(r["exit"])
             rows.append(r)
         except (ValueError, KeyError):
             continue
@@ -465,14 +473,15 @@ present = {r["tool"] for r in rows}
 tools = [t for t in order if t in present] + sorted(present - set(order))
 
 def valid(r):
-    return (not r["timed_out"] and r["exit"] == 0 and r["wall_s"] is not None)
+    return (not r["timed_out"] and r["exit"] == 0 and r["out_bytes"] > 0
+            and r["wall_s"] is not None and r["peak_rss_kb"] is not None)
 
-def agg(tool):
+def agg(tool, field, scale):
     by = {}
     for r in rows:
         if r["tool"] != tool or not valid(r):
             continue
-        by.setdefault(r["size_bp"], []).append(r["wall_s"])
+        by.setdefault(r["size_bp"], []).append(r[field] * scale)
     out = []
     for s in sorted(by):
         vs = by[s]
@@ -488,36 +497,39 @@ for r in rows:
 for (t, s), n in sorted(drop.items()):
     print(f"note: {t} size={s}: {n} sample(s) dropped (timeout/error)", file=sys.stderr)
 
-fig, ax = plt.subplots(figsize=(9, 6))
-fig.subplots_adjust(left=0.10, right=0.97, top=0.91, bottom=0.12)
+fig, axes = plt.subplots(1, 3, figsize=(21, 6))
+fig.subplots_adjust(left=0.05, right=0.98, top=0.90, bottom=0.12, wspace=0.24)
+panels = [("wall_s", 1.0, "wall time", "seconds"),
+          ("peak_rss_kb", 1 / 1024.0, "peak RSS", "MB"),
+          ("out_bytes", 1 / 1e6, "output size", "MB")]
 
 nsamples = 0
-for tool in tools:
-    pts = agg(tool)
-    if not pts:
-        continue
-    xs   = [p[0] for p in pts]
-    mean = [p[1] for p in pts]
-    lo   = [p[2] for p in pts]
-    hi   = [p[3] for p in pts]
-    nsamples = max(nsamples, max(p[4] for p in pts))
-    c = colors.get(tool)
-    ax.plot(xs, mean, "o-", color=c, label=label.get(tool, tool))
-    ax.fill_between(xs, lo, hi, color=c, alpha=0.15)
+for ax, (field, scale, title, ylab) in zip(axes, panels):
+    for tool in tools:
+        pts = agg(tool, field, scale)
+        if not pts:
+            continue
+        xs   = [p[0] for p in pts]
+        mean = [p[1] for p in pts]
+        lo   = [p[2] for p in pts]
+        hi   = [p[3] for p in pts]
+        nsamples = max(nsamples, max(p[4] for p in pts))
+        c = colors.get(tool)
+        ax.plot(xs, mean, "o-", color=c, label=label.get(tool, tool))
+        ax.fill_between(xs, lo, hi, color=c, alpha=0.15)
+    # Linear axes (browser zoom-out).
+    ax.set_xlabel("query size (bp)")
+    ax.set_ylabel(ylab)
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3)
+    ax.set_xlim(left=0)
+    ax.set_ylim(bottom=0)
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _: f"{y:g}"))
+    ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x/1e6:g}M" if x >= 1e6 else (f"{x/1e3:g}k" if x >= 1e3 else f"{x:g}")))
+    ax.legend(fontsize=9)
 
-# Linear axes (browser zoom-out latency).
-ax.set_xlabel("query size (bp)")
-ax.set_ylabel("wall time (seconds)")
-ax.set_title("577-way hg38 zoom-out (summary) query latency")
-ax.grid(True, alpha=0.3)
-ax.set_xlim(left=0)
-ax.set_ylim(bottom=0)
-ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _: f"{y:g}"))
-ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x/1e6:g}M" if x >= 1e6 else (f"{x/1e3:g}k" if x >= 1e3 else f"{x:g}")))
-ax.legend(fontsize=9)
-
-fig.suptitle(f"universal-depth bigWig lift vs bigMafSummary: random genome-wide "
-             f"regions, mean ± range over up to {nsamples} samples/size", fontsize=11, y=0.985)
+fig.suptitle(f"universal-depth bigWig lift vs bigMafSummary: 577-way hg38 zoom-out, "
+             f"random genome-wide regions, mean ± range over up to {nsamples} samples/size", fontsize=12, y=0.98)
 out = os.path.join(bench_dir, "bench.png")
 fig.savefig(out, dpi=140)
 print(f"wrote {out}")
