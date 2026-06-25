@@ -542,6 +542,7 @@ panels = [("wall_s", 1.0, "wall time", "seconds"),
           ("out_bytes", 1 / 1e6, "output size", "MB")]
 
 for ax, (field, scale, title, ylab) in zip(axes, panels):
+    nonhal_hi = 0.0   # cap y to the non-hal2maf tools (let a slow hal2maf run off-chart)
     for tool in tools:
         pts = agg(tool, field, scale)
         if not pts:
@@ -550,15 +551,22 @@ for ax, (field, scale, title, ylab) in zip(axes, panels):
         mean = [p[1] for p in pts]
         lo   = [p[2] for p in pts]
         hi   = [p[3] for p in pts]
+        if tool != "hal":
+            nonhal_hi = max(nonhal_hi, max(hi))
         c = colors.get(tool)
         ax.plot(xs, mean, "o-", color=c, label=label.get(tool, tool))
         ax.fill_between(xs, lo, hi, color=c, alpha=0.15)
-    ax.set_xscale("log"); ax.set_yscale("log")
+    # Linear axes (browser-query view); cap y to the non-hal2maf tools so a slow
+    # hal2maf curve runs off the top rather than squashing everything else.
     ax.set_xlabel("query size (bp)")
     ax.set_ylabel(ylab)
     ax.set_title(title)
-    ax.grid(True, which="both", alpha=0.3)
+    ax.grid(True, alpha=0.3)
+    ax.set_xlim(left=0)
+    if nonhal_hi > 0:
+        ax.set_ylim(0, nonhal_hi * 1.15)
     ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _: f"{y:g}"))
+    ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x/1e6:g}M" if x >= 1e6 else (f"{x/1e3:g}k" if x >= 1e3 else f"{x:g}")))
     ax.legend(fontsize=8)
 
 nsamples = max((p[4] for t in tools for p in agg(t, "wall_s", 1.0)), default=0)

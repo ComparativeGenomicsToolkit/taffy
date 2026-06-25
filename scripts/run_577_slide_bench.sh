@@ -110,7 +110,7 @@ HAL_MAX_SIZE=10000000           # the cap: hal tools skipped above this (bp) in 
                                 # 500k -> 10M so hal2maf reaches 1M/10M (a few more data points);
                                 # HAL_TIME_BUDGET governs whether the big ones complete vs time out.
 # -- #5 random-sample view bench --
-VIEW_SAMPLE_SIZES="1000,100000,1000000,5000000,10000000"  # #5 sizes (bp)
+VIEW_SAMPLE_SIZES="100,100000,200000,300000,400000,500000,600000,700000,800000,900000,1000000"  # #5 sizes (bp): linear 100->1M, 11 pts
 VIEW_SAMPLE_N=10                # #5 random genome-wide regions per size
 VIEW_SAMPLE_SEED=20260620       # #5 RNG seed (reproducible; same regions for every tool)
 
