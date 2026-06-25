@@ -1,12 +1,11 @@
 #!/bin/bash
 #
-# run_577_slide_bench.sh -- one wrapper to drive all FOUR comparisons for
+# run_577_slide_bench.sh -- one wrapper to drive all SIX comparisons for
 # the 577-way / hg38-source conference slide.  Shared config block; invokes
-# the three existing bench drivers for #1/#2/#4 and the new blockViz driver
-# for #3.  NEVER submits sbatch itself -- it calls each driver with
-# --dry-run (default) or lets each driver submit (--submit).
+# one bench driver per comparison.  NEVER submits sbatch itself -- it calls
+# each driver with --dry-run (default) or lets each driver submit (--submit).
 #
-# THE FOUR COMPARISONS (all full-577-way, hg38 source/reference):
+# THE SIX COMPARISONS (all full-577-way, hg38 source/reference):
 #   1. MAF extraction   : tui (view -U query --noAncestors) vs tai (view) vs hal (hal2maf)
 #                         vs bigmaf (bigMafToMaf)   -> taffy_view_bench_slurm.sh  [all -> hg38 leaf MAF]
 #   2. base liftover    : taffy lift on the BASE .tui vs halLiftover
@@ -15,6 +14,10 @@
 #                                                    -> taffy_blockviz_bench_slurm.sh
 #   4. chained liftover : taffy lift on the CHAINED .tui vs UCSC liftOver
 #                                                    -> taffy_lift_bench_slurm.sh
+#   5. view sample      : random genome-wide MAF extraction (the #1 tools)
+#                                                    -> taffy_view_sample_bench_slurm.sh
+#   6. depth summary    : taffy lift --bigwig (depth bigWig) vs bigMafSummary
+#                                                    -> uni_depth_summary_bench_slurm.sh
 #
 # THE HAL CAP, applied to the existing (#1/#2) scripts
 # ----------------------------------------------------
@@ -83,6 +86,8 @@ CHAINED_TUI=""         # chained .tui for #3 blockViz + #4 chained-lift
 HAL=""                 # full 577-way .hal (hal2maf / halLiftover / blockVizBed)
 HG38_MAF=""            # hg38-anchored MAF (.maf.gz + .tai) for #1 view's tai cells
 BIGBED=""              # bigmaf bigBed for #1 view's bb cells
+DEPTH_BW=""            # universal-depth bigWig for #6 (uni_depth_bigwig_slurm.sh output)
+SUMMARY_BB=""          # hg38 bigMafSummary bigBed for #6 (bigBedToBed baseline)
 CHAINS_DIR=""          # dir of UCSC chains named <REF>_vs_<genome_id>.chain.gz (#2 + #4)
 TREE=""                # species tree .nwk (plots' divergence x-axis)
 PANEL="$HERE/vgp577_hg38_panel.tsv"   # target-genome panel (-L)
@@ -113,6 +118,10 @@ HAL_MAX_SIZE=10000000           # the cap: hal tools skipped above this (bp) in 
 VIEW_SAMPLE_SIZES="100,100000,200000,300000,400000,500000,600000,700000,800000,900000,1000000"  # #5 sizes (bp): linear 100->1M, 11 pts
 VIEW_SAMPLE_N=10                # #5 random genome-wide regions per size
 VIEW_SAMPLE_SEED=20260620       # #5 RNG seed (reproducible; same regions for every tool)
+# -- #6 depth-summary bench (zoom-out: depth bigWig lift vs bigMafSummary) --
+DEPTH_SUMMARY_SIZES="1000000,20000000,40000000,60000000,80000000,100000000,120000000,140000000,160000000,180000000,200000000"  # #6 sizes (bp): linear 1M->200M, 11 pts
+DEPTH_SUMMARY_N=10              # #6 random hg38 regions per size
+DEPTH_SUMMARY_SEED=20260620     # #6 RNG seed
 
 # -- SLURM / runtime --
 T_TOTAL=32
@@ -128,7 +137,7 @@ ACCOUNT=""
 OUTROOT="$PWD/577_slide_bench"  # parent of the four per-comparison OUTDIRs
 
 # -- Which comparisons to run (all on by default) --
-DO_1=1; DO_2=1; DO_3=1; DO_4=1; DO_5=1
+DO_1=1; DO_2=1; DO_3=1; DO_4=1; DO_5=1; DO_6=1
 
 # -- Mode --
 SUBMIT=0                        # default DRY-RUN; --submit lets each driver actually sbatch
@@ -164,11 +173,13 @@ run_577_slide_bench.sh -- drive all four 577-way / hg38 slide comparisons
                     the network instead of copying them to local scratch.
                     Skips the big stage-in (fast functional smoke), but the
                     timings go disk-bound -- not for the real measurement run.
-  --only LIST       Comma list of comparisons to run: 1,2,3,4,5 (default all).
-                    5 = cmp5_view_sample (random genome-wide view bench).
+  --only LIST       Comma list of comparisons to run: 1,2,3,4,5,6 (default all).
+                    5 = cmp5_view_sample (random genome-wide view bench);
+                    6 = cmp6_depth_summary (depth bigWig vs bigMafSummary).
   -o DIR            Output root (default $OUTROOT); each comparison gets a
                     subdir cmp1_view / cmp2_baselift / cmp3_blockviz /
-                    cmp4_chainlift under it.
+                    cmp4_chainlift / cmp5_view_sample / cmp6_depth_summary
+                    under it.
 
   Input paths (REQUIRED for the comparisons you run):
     --baseTui FILE     base universal MAF (.uni.maf.gz + .tui)  [#1 #2 #4*]
@@ -179,6 +190,8 @@ run_577_slide_bench.sh -- drive all four 577-way / hg38 slide comparisons
     --hal FILE         full 577-way .hal                        [#1 #2 #3]
     --hg38Maf FILE     hg38-anchored MAF (.maf.gz + .tai)       [#1]
     --bigbed FILE      bigmaf bigBed                            [#1]
+    --depthBw FILE     universal-depth bigWig                   [#6]
+    --summaryBb FILE   hg38 bigMafSummary bigBed                [#6]
     --chains DIR       UCSC chains dir                          [#2 #4]
     --tree FILE        species tree .nwk                        [#1 #2 #4 plots]
     --panel FILE       target panel -L (default $PANEL)
@@ -217,6 +230,8 @@ while [[ $# -gt 0 ]]; do
         --hal)            HAL="$2"; shift 2;;
         --hg38Maf)        HG38_MAF="$2"; shift 2;;
         --bigbed)         BIGBED="$2"; shift 2;;
+        --depthBw)        DEPTH_BW="$2"; shift 2;;
+        --summaryBb)      SUMMARY_BB="$2"; shift 2;;
         --chains)         CHAINS_DIR="$2"; shift 2;;
         --tree)           TREE="$2"; shift 2;;
         --panel)          PANEL="$2"; shift 2;;
@@ -249,12 +264,12 @@ done
 
 # --only N,M,... selects which comparisons run.
 if [[ -n "${ONLY:-}" ]]; then
-    DO_1=0; DO_2=0; DO_3=0; DO_4=0; DO_5=0
+    DO_1=0; DO_2=0; DO_3=0; DO_4=0; DO_5=0; DO_6=0
     IFS=',' read -r -a _only <<< "$ONLY"
     for c in "${_only[@]}"; do
         case "$c" in
-            1) DO_1=1;; 2) DO_2=1;; 3) DO_3=1;; 4) DO_4=1;; 5) DO_5=1;;
-            *) echo "ERROR: --only takes 1..5 (got '$c')" >&2; exit 1;;
+            1) DO_1=1;; 2) DO_2=1;; 3) DO_3=1;; 4) DO_4=1;; 5) DO_5=1;; 6) DO_6=1;;
+            *) echo "ERROR: --only takes 1..6 (got '$c')" >&2; exit 1;;
         esac
     done
 fi
@@ -268,6 +283,8 @@ if [[ "$TEST" -eq 1 ]]; then
     LIFT_SIZES="1000,100000"
     VIEW_SAMPLE_SIZES="1000,100000"   # #5 smoke: 2 small sizes
     VIEW_SAMPLE_N=2                    # #5 smoke: 2 random regions per size
+    DEPTH_SUMMARY_SIZES="1000000,10000000"   # #6 smoke: 2 small zoom-out sizes
+    DEPTH_SUMMARY_N=2                  # #6 smoke: 2 random regions per size
     VIEW_MAX_SIZE=100000        # cap #1's view ladder for the smoke (else it runs the
                                 # whole-chrom log-decade ladder + needs the chrom length)
     LIFT_N_INTERVALS=5
@@ -298,7 +315,8 @@ VIEW_DRV="$HERE/taffy_view_bench_slurm.sh"
 LIFT_DRV="$HERE/taffy_lift_bench_slurm.sh"
 BLOCKVIZ_DRV="$HERE/taffy_blockviz_bench_slurm.sh"
 SAMPLE_DRV="$HERE/taffy_view_sample_bench_slurm.sh"
-for d in "$VIEW_DRV" "$LIFT_DRV" "$BLOCKVIZ_DRV" "$SAMPLE_DRV"; do
+DEPTH_SUMMARY_DRV="$HERE/uni_depth_summary_bench_slurm.sh"
+for d in "$VIEW_DRV" "$LIFT_DRV" "$BLOCKVIZ_DRV" "$SAMPLE_DRV" "$DEPTH_SUMMARY_DRV"; do
     [[ -f "$d" ]] || { echo "ERROR: driver not found: $d" >&2; exit 1; }
 done
 
@@ -323,7 +341,7 @@ echo "   mode:        $([[ $SUBMIT -eq 1 ]] && echo SUBMIT || echo 'DRY-RUN (no 
 echo "   out root:    $OUTROOT"
 echo "   panel:       $PANEL"
 echo "   halMaxSize:  $HAL_MAX_SIZE bp"
-echo "   run:         #1=$DO_1 #2=$DO_2 #3=$DO_3 #4=$DO_4"
+echo "   run:         #1=$DO_1 #2=$DO_2 #3=$DO_3 #4=$DO_4 #5=$DO_5 #6=$DO_6"
 echo "================================================================"
 
 # Helper: echo + run a driver invocation (array-safe).
@@ -482,6 +500,29 @@ if [[ "$DO_5" -eq 1 ]]; then
     [[ -n "$HAL_TIME_BUDGET" ]] && V5_FLAGS+=( --halTimeBudget "$HAL_TIME_BUDGET" )
     run_driver env TAFFY="$TAFFY" bash "$SAMPLE_DRV" "${V5_FLAGS[@]}" "${COMMON_FLAGS[@]}"
     echo ">> #5: random-sample view ($VIEW_SAMPLE_N regions/size, sizes $VIEW_SAMPLE_SIZES; taf.tui/tai/hal2maf/bigMafToMaf -> hg38 MAF); hal2maf to --halMaxSize=$HAL_MAX_SIZE" >&2
+fi
+
+# ======================================================================
+# #6 -- zoom-out summary latency: depth bigWig lift vs bigMafSummary.
+#       The high-zoom companion to #5 (1Mb-200Mb).  Times `taffy lift
+#       --bigwig` on the CHAINED .tui over the universal-depth bigWig
+#       ("ours") against bigMafSummary via bigBedToBed ("theirs"); wall
+#       time only.  Reuses the chained .tui (#3/#4) for the lift and the
+#       hg38 MAF (#1) as the region-sampling --chromSrc.
+# ======================================================================
+if [[ "$DO_6" -eq 1 ]]; then
+    O6="$OUTROOT/cmp6_depth_summary"
+    [[ -n "$CHAINED_TUI" ]] || { echo "ERROR(#6): need --chainedTui (the lift opens <it>.tui)" >&2; exit 1; }
+    [[ -n "$DEPTH_BW"    ]] || { echo "ERROR(#6): need --depthBw (the universal-depth bigWig)" >&2; exit 1; }
+    [[ -n "$SUMMARY_BB"  ]] || { echo "ERROR(#6): need --summaryBb (the hg38 bigMafSummary bigBed)" >&2; exit 1; }
+    [[ -n "$HG38_MAF"    ]] || { echo "ERROR(#6): need --hg38Maf (the region-sampling --chromSrc)" >&2; exit 1; }
+    V6_FLAGS=( -i "$CHAINED_TUI" -d "$DEPTH_BW" -b "$SUMMARY_BB"
+        --chromSrc "$HG38_MAF" --refGenome "$HAL_GENOME" -o "$O6"
+        --sizes "$DEPTH_SUMMARY_SIZES" --nSamples "$DEPTH_SUMMARY_N" --seed "$DEPTH_SUMMARY_SEED"
+        -T "$T_TOTAL" --timeBudget "$TIME_BUDGET"
+        --time "$SBATCH_TIME" --mem "$SBATCH_MEM" )
+    run_driver env TAFFY="$TAFFY" bash "$DEPTH_SUMMARY_DRV" "${V6_FLAGS[@]}" "${COMMON_FLAGS[@]}"
+    echo ">> #6: depth-summary (depth bigWig lift vs bigMafSummary; $DEPTH_SUMMARY_N regions/size, sizes $DEPTH_SUMMARY_SIZES) -> hg38 zoom-out" >&2
 fi
 
 echo
