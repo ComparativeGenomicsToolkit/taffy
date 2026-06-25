@@ -131,17 +131,22 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-for v in UNI_TAF HG38 HAL BB OUTDIR; do
+for v in UNI_TAF BB OUTDIR; do
     [[ -n "${!v}" ]] || { echo "ERROR: missing required input \$$v" >&2; usage 1; }
 done
+# -m (hg38 MAF -> tai cell) and -H (HAL -> hal2maf cell) are OPTIONAL: omit
+# either and that tool is simply not staged or run.  cmp5 of the slide bench
+# uses only the universal .tui (taf.tui) and the bigMaf (bb).
 [[ -n "$TAFFY"      ]] || { echo "ERROR: taffy not on PATH (set \$TAFFY)" >&2; exit 1; }
 [[ -n "$HAL2MAF"    ]] || { echo "WARN: hal2maf not found; that tool will be skipped" >&2; }
 [[ -n "$BIGMAF2MAF" ]] || { echo "WARN: bigMafToMaf not found; that tool will be skipped" >&2; }
 [[ -f "$UNI_TAF"        ]] || { echo "ERROR: $UNI_TAF not found" >&2; exit 1; }
 [[ -f "${UNI_TAF}.tui"  ]] || { echo "ERROR: $UNI_TAF has no .tui sibling" >&2; exit 1; }
-[[ -f "$HG38"       ]] || { echo "ERROR: $HG38 not found" >&2; exit 1; }
-[[ -f "${HG38}.tai" ]] || { echo "ERROR: $HG38 has no .tai sibling" >&2; exit 1; }
-[[ -f "$HAL"        ]] || { echo "ERROR: $HAL not found" >&2; exit 1; }
+if [[ -n "$HG38" ]]; then
+    [[ -f "$HG38"       ]] || { echo "ERROR: $HG38 not found" >&2; exit 1; }
+    [[ -f "${HG38}.tai" ]] || { echo "ERROR: $HG38 has no .tai sibling" >&2; exit 1; }
+fi
+[[ -z "$HAL" || -f "$HAL" ]] || { echo "ERROR: $HAL not found" >&2; exit 1; }
 [[ -f "$BB"         ]] || { echo "ERROR: $BB not found" >&2; exit 1; }
 
 [[ "$SIZES_CSV" =~ ^[0-9]+(,[0-9]+)*$ ]] || { echo "ERROR: --sizes must be a CSV of integers (got '$SIZES_CSV')" >&2; exit 1; }
@@ -165,8 +170,8 @@ echo ">> taffy:         $TAFFY"
 echo ">> hal2maf:       ${HAL2MAF:-(skip)}"
 echo ">> bigMafToMaf:   ${BIGMAF2MAF:-(skip)}"
 echo ">> uni TAF:       $UNI_TAF  (+.tui)"
-echo ">> hg38 MAF:      $HG38 (+.tai)"
-echo ">> HAL:           $HAL"
+echo ">> hg38 MAF:      ${HG38:-(none -- tai cell skipped)}"
+echo ">> HAL:           ${HAL:-(none -- hal2maf cell skipped)}"
 echo ">> bigMaf:        $BB"
 echo ">> ref genome:    $REF_GENOME (tui/tai NAME.chrN, hal refGenome, bb bare chrN)"
 echo ">> sizes:         $SIZES_CSV bp"
@@ -315,8 +320,8 @@ if [[ "\$STAGE_LOCAL" -eq 1 ]]; then
     # up OLDER than its .gz.  Touch the staged indexes last so they're newer.
     for ix in "\$STAGE_DIR"/*.tai "\$STAGE_DIR"/*.tui; do [[ -f "\$ix" ]] && touch "\$ix"; done
     UNI_TAF="\$STAGE_DIR/\$(basename "\$UNI_TAF")"
-    HG38="\$STAGE_DIR/\$(basename "\$HG38")"
-    HAL="\$STAGE_DIR/\$(basename "\$HAL")"
+    [[ -n "\$HG38" ]] && HG38="\$STAGE_DIR/\$(basename "\$HG38")"
+    [[ -n "\$HAL"  ]] && HAL="\$STAGE_DIR/\$(basename "\$HAL")"
     BB="\$STAGE_DIR/\$(basename "\$BB")"
     echo "stage: all inputs staged + size-verified to \$STAGE_DIR" >&2
 fi
@@ -420,7 +425,8 @@ for N in "\${SIZES[@]}"; do
           ) > "\${rowfiles[\$key]}" &
         pids[\$key]=\$!; register_pid \$! \$TAFFY_T
 
-        # tai: hg38-anchored MAF
+        # tai: hg38-anchored MAF (only when a --maf/.tai was provided)
+        if [[ -n "\$HG38" ]]; then
         key="tai_\${sample}"
         rowfiles[\$key]="\$LOGDIR/row_tai_\${N}_\${sample}.tsv"
         acquire_slot \$TAFFY_T
@@ -428,9 +434,10 @@ for N in "\${SIZES[@]}"; do
             "\$TAFFY" view -i "\$HG38" -r "\$region" -m -T "\$TAFFY_T" \\
           ) > "\${rowfiles[\$key]}" &
         pids[\$key]=\$!; register_pid \$! \$TAFFY_T
+        fi
 
         # hal: hal2maf (respect HAL_MAX_SIZE)
-        if [[ -n "\$HAL2MAF" ]] && { [[ -z "\$HAL_MAX_SIZE" ]] || (( N <= HAL_MAX_SIZE )); }; then
+        if [[ -n "\$HAL" ]] && [[ -n "\$HAL2MAF" ]] && { [[ -z "\$HAL_MAX_SIZE" ]] || (( N <= HAL_MAX_SIZE )); }; then
             key="hal_\${sample}"
             rowfiles[\$key]="\$LOGDIR/row_hal_\${N}_\${sample}.tsv"
             acquire_slot 1

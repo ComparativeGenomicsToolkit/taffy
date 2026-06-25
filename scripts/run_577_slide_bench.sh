@@ -188,8 +188,8 @@ run_577_slide_bench.sh -- drive all four 577-way / hg38 slide comparisons
                         chrom enumeration; the chained .tui drives the lift)
     --chainedTui FILE  chained .tui (..._g10000.tui)            [#3 #4]
     --hal FILE         full 577-way .hal                        [#1 #2 #3]
-    --hg38Maf FILE     hg38-anchored MAF (.maf.gz + .tai)       [#1]
-    --bigbed FILE      bigmaf bigBed                            [#1]
+    --hg38Maf FILE     hg38-anchored MAF (.maf.gz + .tai)       [#1 #6]
+    --bigbed FILE      bigmaf bigBed                            [#1 #5]
     --depthBw FILE     universal-depth bigWig                   [#6]
     --summaryBb FILE   hg38 bigMafSummary bigBed                [#6]
     --chains DIR       UCSC chains dir                          [#2 #4]
@@ -488,18 +488,17 @@ if [[ "$DO_5" -eq 1 ]]; then
     elif [[ -n "$BASE_TUI_MAF" ]]; then V5_SRC="$BASE_TUI_MAF"
     fi
     [[ -n "$V5_SRC" ]] || { echo "ERROR(#5): need --baseTuiTaf (or --baseTui) for the universal .tui source" >&2; exit 1; }
-    for v in HG38_MAF HAL BIGBED; do
-        [[ -n "${!v}" ]] || { echo "ERROR(#5): missing --$(echo "$v" | tr 'A-Z_' 'a-z')" >&2; exit 1; }
-    done
-    V5_FLAGS=( -u "$V5_SRC" -m "$HG38_MAF" -H "$HAL" -b "$BIGBED" -o "$O5"
+    [[ -n "$BIGBED" ]] || { echo "ERROR(#5): need --bigbed (the bigMaf bigBed)" >&2; exit 1; }
+    # Restricted to the universal .tui (taf.tui) vs bigMaf (bb) -- the low-zoom
+    # mirror of #6 (taffy view vs UCSC bigMaf).  No tai/hal2maf cells, so the
+    # hg38 MAF + the 965GB HAL are neither required nor staged here.
+    V5_FLAGS=( -u "$V5_SRC" -b "$BIGBED" -o "$O5"
         --refGenome "$HAL_GENOME"
         --sizes "$VIEW_SAMPLE_SIZES" --nSamples "$VIEW_SAMPLE_N" --seed "$VIEW_SAMPLE_SEED"
-        --halMaxSize "$HAL_MAX_SIZE"
         -T "$T_TOTAL" --timeBudget "$TIME_BUDGET"
         --time "$SBATCH_TIME" --mem "$SBATCH_MEM" )
-    [[ -n "$HAL_TIME_BUDGET" ]] && V5_FLAGS+=( --halTimeBudget "$HAL_TIME_BUDGET" )
     run_driver env TAFFY="$TAFFY" bash "$SAMPLE_DRV" "${V5_FLAGS[@]}" "${COMMON_FLAGS[@]}"
-    echo ">> #5: random-sample view ($VIEW_SAMPLE_N regions/size, sizes $VIEW_SAMPLE_SIZES; taf.tui/tai/hal2maf/bigMafToMaf -> hg38 MAF); hal2maf to --halMaxSize=$HAL_MAX_SIZE" >&2
+    echo ">> #5: random-sample view ($VIEW_SAMPLE_N regions/size, sizes $VIEW_SAMPLE_SIZES; taf.tui vs bigMaf -> hg38 MAF)" >&2
 fi
 
 # ======================================================================
