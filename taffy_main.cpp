@@ -16,6 +16,7 @@ extern int taf_lift_main(int argc, char *argv[]);
 extern int taf_chain_main(int argc, char *argv[]);
 extern int taf_depth_main(int argc, char *argv[]);
 extern int taf_gerp_stats_main(int argc, char *argv[]);
+extern int taf_merge_bigwig_main(int argc, char *argv[]);
 }
 
 extern int taf_add_gap_bases_main(int argc, char *argv[]);
@@ -37,6 +38,7 @@ void usage() {
     fprintf(stderr, "    tui-chain      build a chained .tui sidecar (merges adjacent runs into longer chains for faster lift)\n");
     fprintf(stderr, "    depth          per-column leaf depth and/or GERP RS conservation -> wig\n");
     fprintf(stderr, "    gerp-stats      depth-correct + percentile-rank gerp output\n");
+    fprintf(stderr, "    merge-bigwig   merge per-shard per-species vector bigWigs (uni0 column slices) into one\n");
     fprintf(stderr, "\n");
 
 #ifdef USE_HTSLIB
@@ -77,6 +79,8 @@ int main(int argc, char *argv[]) {
         return taf_depth_main(argc - 1, argv + 1);
     } else if (strcmp(argv[1], "gerp-stats") == 0) {
         return taf_gerp_stats_main(argc - 1, argv + 1);
+    } else if (strcmp(argv[1], "merge-bigwig") == 0) {
+        return taf_merge_bigwig_main(argc - 1, argv + 1);
     } else {
         fprintf(stderr, "%s is not a valid taffy command\n", argv[1]);
         usage();
