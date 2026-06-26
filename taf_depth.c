@@ -159,6 +159,7 @@ typedef struct {
     float        *values;
     int           n;        // entries buffered in the current batch
     bool          wrote;    // first batch -> bwAddIntervals, later -> bwAppend
+    bool          failed;   // sticky: a flush errored -> stop writing, surface at close
 } UniBW;
 
 static UniBW *unibw_open(const char *path, int64_t T) {
@@ -195,17 +196,22 @@ static UniBW *unibw_open(const char *path, int64_t T) {
 }
 
 static int unibw_flush(UniBW *u) {
+    if (u->failed) return 1;            // sticky: never write to a broken stream again
     if (u->n == 0) return 0;
     int rv = u->wrote
         ? bwAppendIntervals(u->bw, u->starts, u->ends, u->values, (uint32_t) u->n)
         : bwAddIntervals(u->bw, u->chroms, u->starts, u->ends, u->values, (uint32_t) u->n);
     u->wrote = true;
     u->n = 0;
-    if (rv) fprintf(stderr, "taffy depth: bwAdd/AppendIntervals failed (--bigwig)\n");
+    if (rv) {
+        u->failed = true;
+        fprintf(stderr, "taffy depth: bwAdd/AppendIntervals failed (--bigwig)\n");
+    }
     return rv;
 }
 
 static int unibw_add(UniBW *u, int64_t start, int64_t end, float value) {
+    if (u->failed) return 1;
     if (u->n == UNIBW_BATCH && unibw_flush(u)) return 1;
     u->starts[u->n] = (uint64_t) start;
     u->ends[u->n]   = (uint64_t) end;
@@ -231,9 +237,9 @@ static int unibw_close(UniBW *u) {
 // matching the `taffy lift --bigwig` reader.  The column axis is monotone, so this
 // runs off the Phase-C running binner (already sorted, no external sort).  Drops
 // all-unscored bins (awk parity).
-static void gerp_flush_bin(LW *dout, UniBW *ubw, int64_t bin, int64_t sum,
-                           int64_t cnt, int64_t bin_size) {
-    if (sum <= 0 || cnt <= 0) return;
+static int gerp_flush_bin(LW *dout, UniBW *ubw, int64_t bin, int64_t sum,
+                          int64_t cnt, int64_t bin_size) {
+    if (sum <= 0 || cnt <= 0) return 0;
     int64_t start = bin * bin_size;                  // absolute universal column [0,T)
     int64_t end   = start + cnt;
     double  mean  = (double) sum / (double) cnt;
@@ -243,7 +249,8 @@ static void gerp_flush_bin(LW *dout, UniBW *ubw, int64_t bin, int64_t sum,
                          start, end, mean);
         LW_putn(dout, line, (size_t) n);
     }
-    if (ubw != NULL) unibw_add(ubw, start, end, (float) mean);
+    if (ubw != NULL) return unibw_add(ubw, start, end, (float) mean);
+    return 0;
 }
 
 static void score_one_block(const GerpTree *gt, GerpThreadState *ts,
@@ -782,7 +789,10 @@ int taf_depth_main(int argc, char *argv[]) {
     // merge).
     if (bigwigFile != NULL) {
         ubw = unibw_open(bigwigFile, T);
-        if (ubw == NULL) return 1;   // unibw_open already reported the reason
+        if (ubw == NULL) {           // unibw_open already reported the reason
+            remove(bigwigFile);      // drop any partial file it may have created
+            return 1;
+        }
         st_logInfo("taffy depth: writing 64-bit depth bigWig to %s (single uni0 axis, T=%" PRIi64 ")\n",
                    bigwigFile, T);
     }
@@ -918,7 +928,8 @@ int taf_depth_main(int argc, char *argv[]) {
                     for (int64_t k = 0; k < r->bin_n; k++) {
                         int64_t bin = r->bin_first + k;
                         if (bin != cur_bin) {
-                            gerp_flush_bin(dout, ubw, cur_bin, cur_sum, cur_cnt, bin_size);
+                            if (gerp_flush_bin(dout, ubw, cur_bin, cur_sum, cur_cnt, bin_size))
+                                fatal = 1;   // --bigwig write failed (sticky); batch loop exits
                             cur_bin = bin; cur_sum = 0; cur_cnt = 0;
                         }
                         cur_sum += r->bin_sum[k];
@@ -959,7 +970,7 @@ int taf_depth_main(int argc, char *argv[]) {
     // Flush the last --bin bin (the running binner has no successor block to
     // trigger it).
     if (bin_size > 0)
-        gerp_flush_bin(dout, ubw, cur_bin, cur_sum, cur_cnt, bin_size);
+        if (gerp_flush_bin(dout, ubw, cur_bin, cur_sum, cur_cnt, bin_size)) fatal = 1;
 
     if (tui != NULL) tui_destruct(tui);
 
@@ -1002,5 +1013,7 @@ int taf_depth_main(int argc, char *argv[]) {
     if (ubw != NULL) {                 // --bigwig: flush final batch + finalize index
         if (unibw_close(ubw) != 0) fatal = 1;
     }
+    if (fatal && bigwigFile != NULL)   // never leave a truncated/corrupt .bw that looks complete
+        remove(bigwigFile);
     return fatal;
 }
