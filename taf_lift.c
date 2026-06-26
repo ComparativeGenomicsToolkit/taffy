@@ -1620,7 +1620,8 @@ static inline double bw_now_s(void) {
 
 static int bigwig_lift_window(Tui *tui, const char *bigwig_file,
                               const char *target_genome, const char *region,
-                              int64_t bin_size, const char *output_file) {
+                              int64_t bin_size, const char *output_file,
+                              const char *species_name) {
     // Parse region "SEQ:START-END" (SEQ = full genome.sequence, e.g. hg38.chr20).
     char *rcopy = stString_copy(region);
     char *colon = strrchr(rcopy, ':');
@@ -1709,6 +1710,167 @@ static int bigwig_lift_window(Tui *tui, const char *bigwig_file,
         if (output_file) fclose(fh);
         bwClose(bw); bwCleanup(); free(rcopy);
         return 1;
+    }
+
+    // ---------------------------------------------------------------------
+    // VECTOR per-species path.  The bigWig is an N-float vector (one component
+    // per leaf genome).  Read via the ZOOM path (bwStatsVec) -- a raw vector
+    // fetch would pull N floats x every column (~Nx the scalar data).  Each tui
+    // interval [cs,ce) is a contiguous universal run mapping 1:1 to a contiguous
+    // G-bp run; bwStatsVec(sum) gives the per-species covered-column SUM over it,
+    // /(ce-cs) is the per-species coverage fraction, distributed overlap-weighted
+    // into the G-bp output bins (mirrors the scalar per-interval mean).
+    if (bw->vecN > 0) {
+        free(bin_sum); free(bin_len);            // scalar arrays unused here
+        uint32_t Nsp = bw->vecN;
+        char *names_path = stString_print("%s.names", bigwig_file);
+        char **names = st_calloc(Nsp, sizeof(char*));
+        int64_t n_names = 0;
+        FILE *nf = fopen(names_path, "r");
+        if (nf == NULL) {
+            fprintf(stderr, "ERROR: vector --bigwig needs the sidecar '%s' "
+                    "(leaf names, one per line, in component order)\n", names_path);
+            free(names); free(names_path); free(iv);
+            if (output_file) { fclose(fh); } bwClose(bw); bwCleanup(); free(rcopy); return 1;
+        }
+        { char linebuf[1024];
+          while (n_names < (int64_t)Nsp && fgets(linebuf, sizeof linebuf, nf)) {
+              size_t ll = strlen(linebuf);
+              while (ll > 0 && (linebuf[ll-1] == '\n' || linebuf[ll-1] == '\r')) linebuf[--ll] = '\0';
+              if (ll == 0) continue;
+              names[n_names++] = stString_copy(linebuf);
+          } }
+        fclose(nf);
+        if (n_names != (int64_t)Nsp) {
+            fprintf(stderr, "ERROR: sidecar '%s' has %" PRIi64 " names but the bigWig has %u "
+                    "components -- regenerate with `taffy depth --perSpecies`\n",
+                    names_path, n_names, Nsp);
+            for (int64_t i = 0; i < n_names; i++) free(names[i]);
+            free(names); free(names_path); free(iv);
+            if (output_file) { fclose(fh); } bwClose(bw); bwCleanup(); free(rcopy); return 1;
+        }
+        free(names_path);
+        int64_t sc = -1;                         // --species component, or -1 = all N
+        if (species_name != NULL) {
+            for (uint32_t c = 0; c < Nsp; c++)
+                if (strcmp(names[c], species_name) == 0) { sc = (int64_t)c; break; }
+            if (sc < 0) {
+                fprintf(stderr, "ERROR: --species '%s' not among the %u leaf components\n",
+                        species_name, Nsp);
+                for (uint32_t i = 0; i < Nsp; i++) free(names[i]);
+                free(names); free(iv);
+                if (output_file) { fclose(fh); } bwClose(bw); bwCleanup(); free(rcopy); return 1;
+            }
+        }
+        int64_t OUT_N = (sc >= 0) ? 1 : (int64_t)Nsp;
+        double  *bin_acc = nbins ? st_calloc((size_t)nbins * OUT_N, sizeof(double)) : NULL;
+        int64_t *bin_lv  = nbins ? st_calloc((size_t)nbins, sizeof(int64_t)) : NULL;
+        double  *outvec  = st_malloc((size_t)Nsp * sizeof(double));
+        const char *uchrom = bw->cl->chrom[0];
+
+        int64_t n_na = 0, n_clusters = 0, cols_fetched = 0;
+        const int64_t COALESCE_GAP = 1 << 14;   // 16k cols: merge within-cluster gaps (like the scalar path)
+        double t_read = 0, _tl = bw_now_s();
+        int64_t k = 0;
+        while (k < n_iv) {
+            // Coalesce column-adjacent tui intervals into one cluster, so we issue
+            // ONE bulk bwGetOverlappingIntervalsVec per cluster instead of one read
+            // per run -- the 577-way shreds a window into ~120k runs; clustering
+            // collapses that to thousands of reads (mirrors the scalar fast path).
+            int64_t lo = iv[k].start, hi = iv[k].end;
+            int64_t j = k + 1;
+            while (j < n_iv && iv[j].start - hi <= COALESCE_GAP) {
+                if (iv[j].end > hi) hi = iv[j].end;
+                j++;
+            }
+            n_clusters++;
+            cols_fetched += hi - lo;
+            double _tf = bw_now_s();
+            bwOverlappingIntervalsVec_t *ov =
+                bwGetOverlappingIntervalsVec(bw, uchrom, (uint64_t)lo, (uint64_t)hi);
+            t_read += bw_now_s() - _tf;
+
+            int64_t p = 0;   // pointer into ov, advances with the sorted tui intervals
+            for (int64_t m = k; m < j; m++) {
+                int64_t cs = iv[m].start, ce = iv[m].end, L = ce - cs;
+                if (L <= 0) continue;
+                for (int64_t oc = 0; oc < OUT_N; oc++) outvec[oc] = 0.0;
+                int64_t cnt = 0;   // covered universal columns of this run (shared denom)
+                if (ov != NULL) {
+                    while (p < (int64_t)ov->l && (int64_t)ov->end[p] <= cs) p++;
+                    for (int64_t q = p; q < (int64_t)ov->l &&
+                             (int64_t)ov->start[q] < ce; q++) {
+                        int64_t is = (int64_t)ov->start[q], ie = (int64_t)ov->end[q];
+                        int64_t olo = cs > is ? cs : is, ohi = ce < ie ? ce : ie;
+                        int64_t w = ohi - olo, bwid = ie - is;
+                        if (w <= 0 || bwid <= 0) continue;
+                        // stored value[c] is a per-bin covered-column COUNT; /bwid is the
+                        // per-column presence RATE, *w is its contribution over this run's
+                        // overlap (insertion-gap columns are never visited -> never summed).
+                        const float *vq = ov->value + (size_t)q * Nsp;
+                        for (int64_t oc = 0; oc < OUT_N; oc++) {
+                            int64_t c = (sc >= 0) ? sc : oc;
+                            float val = vq[c];
+                            if (!isnan(val)) outvec[oc] += ((double)val / (double)bwid) * (double)w;
+                        }
+                        cnt += w;
+                    }
+                }
+                if (cnt == 0) n_na++;
+                for (int64_t oc = 0; oc < OUT_N; oc++)            // -> per-species coverage fraction [0,1]
+                    outvec[oc] = cnt > 0 ? outvec[oc] / (double)cnt : 0.0;
+
+                int64_t g_lo, g_hi;
+                if (iv[m].rev == 0) { g_lo = iv[m].t_start;         g_hi = iv[m].t_start + L; }
+                else                { g_lo = iv[m].t_start - L + 1; g_hi = iv[m].t_start + 1; }
+                if (g_lo < a) g_lo = a;
+                if (g_hi > b) g_hi = b;
+                if (g_lo >= g_hi) continue;
+                for (int64_t bi = (g_lo - a) / N; bi <= (g_hi - 1 - a) / N; bi++) {
+                    int64_t bl = a + bi * N, bh = bl + N; if (bh > b) bh = b;
+                    int64_t o = (g_hi < bh ? g_hi : bh) - (g_lo > bl ? g_lo : bl);
+                    if (o <= 0) continue;
+                    for (int64_t oc = 0; oc < OUT_N; oc++)
+                        bin_acc[bi * OUT_N + oc] += outvec[oc] * (double)o;
+                    bin_lv[bi] += o;
+                }
+            }
+            if (ov != NULL) bwDestroyOverlappingIntervalsVec(ov);
+            k = j;
+        }
+        double t_loop = bw_now_s() - _tl;
+
+        double _te = bw_now_s();
+        if (sc < 0) {                            // all-N: a column-name header
+            fprintf(fh, "#chrom\tstart\tend");
+            for (uint32_t c = 0; c < Nsp; c++) fprintf(fh, "\t%s", names[c]);
+            fprintf(fh, "\n");
+        }
+        int64_t n_emit = 0;
+        for (int64_t bi = 0; bi < nbins; bi++) {
+            if (bin_lv[bi] <= 0) continue;
+            int64_t bl = a + bi * N, bh = bl + N; if (bh > b) bh = b;
+            fprintf(fh, "%s\t%" PRIi64 "\t%" PRIi64, out_chrom, bl, bh);
+            for (int64_t oc = 0; oc < OUT_N; oc++)
+                fprintf(fh, "\t%.4g", bin_acc[bi * OUT_N + oc] / (double)bin_lv[bi]);
+            fprintf(fh, "\n");
+            n_emit++;
+        }
+        double t_emit = bw_now_s() - _te;
+        st_logInfo("taffy lift --bigwig PROFILE (vector N=%u): bwOpen=%.3f query=%.3f "
+                   "loop=%.3f (read=%.3f compute=%.3f) emit=%.3f s\n",
+                   Nsp, t_open, t_query, t_loop, t_read, t_loop - t_read, t_emit);
+        st_logInfo("taffy lift --bigwig %s:%" PRIi64 "-%" PRIi64 " (vector): %" PRIi64
+                   " intervals in %" PRIi64 " clusters, %" PRIi64 " cols fetched, %"
+                   PRIi64 " uncovered, %" PRIi64 "/%" PRIi64 " bins emitted%s%s\n",
+                   seq, a, b, n_iv, n_clusters, cols_fetched, n_na,
+                   n_emit, nbins, species_name ? ", species=" : "", species_name ? species_name : "");
+
+        for (uint32_t c = 0; c < Nsp; c++) free(names[c]);
+        free(names); free(bin_acc); free(bin_lv); free(outvec); free(iv);
+        if (output_file) fclose(fh);
+        bwClose(bw); bwCleanup(); free(rcopy);
+        return 0;
     }
 
     // Single 64-bit universal axis: no 2e9 chunk-straddle pre-split is needed.
@@ -1820,6 +1982,7 @@ int taf_lift_main(int argc, char *argv[]) {
     char *output_file    = NULL;
     char *bigwig_file    = NULL;   // --bigwig: universal-depth bigWig (query-shim mode)
     char *region         = NULL;   // -r/--region: target window G.chrom:START-END
+    char *species_name   = NULL;   // --species NAME: vector --bigwig, emit only this leaf (default all N)
     int64_t mem_cap_cli  = -1;     // -1 sentinel = "not set on CLI"
     int64_t max_gap      = 0;      // --maxGap (bed mode), 0 = strict abut
     int64_t min_size     = 1;      // --minSize (bed mode), 1 = no filter
@@ -1849,6 +2012,7 @@ int taf_lift_main(int argc, char *argv[]) {
             { "genome",     required_argument, 0, 'g' },
             { "outputFile", required_argument, 0, 'o' },
             { "bigwig",     required_argument, 0, 1007 },
+            { "species",    required_argument, 0, 1008 },
             { "region",     required_argument, 0, 'r' },
             { "memCap",     required_argument, 0, 'm' },
             { "maxGap",     required_argument, 0, 'G' },
@@ -1877,6 +2041,7 @@ int taf_lift_main(int argc, char *argv[]) {
             case 'o': output_file    = optarg; break;
             case 'r': region         = optarg; break;
             case 1007: bigwig_file   = optarg; break;
+            case 1008: species_name  = optarg; break;
             case 'm':
                 mem_cap_cli = lift_parse_size(optarg);
                 if (mem_cap_cli <= 0) {
@@ -2041,7 +2206,7 @@ int taf_lift_main(int argc, char *argv[]) {
             free(tui_p); return 1;
         }
         int rc = bigwig_lift_window(tui, bigwig_file, target_genome, region,
-                                    bin_size, output_file);
+                                    bin_size, output_file, species_name);
         tui_destruct(tui); free(tui_p);
         return rc;
     }
