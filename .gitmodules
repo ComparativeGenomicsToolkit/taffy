@@ -8,3 +8,7 @@
 [submodule "taffy/submodules/ONEcode"]
 	path = taffy/submodules/ONEcode
 	url = https://github.com/glennhickey/ONEcode
+[submodule "taffy/submodules/libBigWig"]
+	path = taffy/submodules/libBigWig
+	url = https://github.com/glennhickey/libBigWig
+	branch = tui-hacks
