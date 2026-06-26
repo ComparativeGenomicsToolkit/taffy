@@ -1714,11 +1714,13 @@ static int bigwig_lift_window(Tui *tui, const char *bigwig_file,
 
     // ---------------------------------------------------------------------
     // VECTOR per-species path.  The bigWig is an N-float vector (one component
-    // per leaf genome).  Read via the ZOOM path (bwStatsVec) -- a raw vector
-    // fetch would pull N floats x every column (~Nx the scalar data).  Each tui
-    // interval [cs,ce) is a contiguous universal run mapping 1:1 to a contiguous
-    // G-bp run; bwStatsVec(sum) gives the per-species covered-column SUM over it,
-    // /(ce-cs) is the per-species coverage fraction, distributed overlap-weighted
+    // per leaf genome).  Each tui run [cs,ce) is a contiguous universal run
+    // mapping 1:1 to a contiguous G-bp run; we bulk-fetch the stored per-column
+    // COUNT records with ONE bwGetOverlappingIntervalsVec per coalesced cluster
+    // of tui runs -- NOT bwStatsVec / the zoom path: a per-run zoom-stat call
+    // would be far slower at the 577-way's ~120k runs per window.  We then sum
+    // each component's covered-column count over the run and divide by the run
+    // span for the per-species coverage fraction, distributed overlap-weighted
     // into the G-bp output bins (mirrors the scalar per-interval mean).
     if (bw->vecN > 0) {
         free(bin_sum); free(bin_len);            // scalar arrays unused here
@@ -1763,12 +1765,22 @@ static int bigwig_lift_window(Tui *tui, const char *bigwig_file,
             }
         }
         int64_t OUT_N = (sc >= 0) ? 1 : (int64_t)Nsp;
+        // The all-N accumulator is nbins x OUT_N doubles, allocated up front; a
+        // fine-binned whole-chromosome all-N query (e.g. --bin 1000 over 250Mb at
+        // N=577) needs ~1GB and st_calloc aborts on OOM, so warn first.  The
+        // browser uses coarse bins (a few thousand) and never trips this; a
+        // coarser --bin or a single --species cuts the memory.
+        if (nbins && (size_t)nbins * (size_t)OUT_N * sizeof(double) > ((size_t)512 << 20))
+            fprintf(stderr, "WARNING: taffy lift --bigwig all-N over %" PRIi64 " bins x %"
+                    PRIi64 " components needs ~%.1f GB; use a coarser --bin or --species\n",
+                    nbins, OUT_N,
+                    (double)((size_t)nbins * (size_t)OUT_N * sizeof(double)) / 1e9);
         double  *bin_acc = nbins ? st_calloc((size_t)nbins * OUT_N, sizeof(double)) : NULL;
         int64_t *bin_lv  = nbins ? st_calloc((size_t)nbins, sizeof(int64_t)) : NULL;
         double  *outvec  = st_malloc((size_t)Nsp * sizeof(double));
         const char *uchrom = bw->cl->chrom[0];
 
-        int64_t n_na = 0, n_clusters = 0, cols_fetched = 0;
+        int64_t n_na = 0, n_clusters = 0, cols_fetched = 0, n_empty = 0;
         const int64_t COALESCE_GAP = 1 << 14;   // 16k cols: merge within-cluster gaps (like the scalar path)
         double t_read = 0, _tl = bw_now_s();
         int64_t k = 0;
@@ -1789,13 +1801,26 @@ static int bigwig_lift_window(Tui *tui, const char *bigwig_file,
             bwOverlappingIntervalsVec_t *ov =
                 bwGetOverlappingIntervalsVec(bw, uchrom, (uint64_t)lo, (uint64_t)hi);
             t_read += bw_now_s() - _tf;
+            // NULL conflates "no overlapping data" with a read error -- the vector
+            // reader returns NULL for both, so we can't tell them apart here and
+            // treat either as 0 coverage.  Count them so a suspicious all-zero
+            // track is at least visible.  (Proper future fix: have the reader
+            // return an empty struct for no-overlap, NULL only for an error.)
+            if (ov == NULL) n_empty++;
 
             int64_t p = 0;   // pointer into ov, advances with the sorted tui intervals
             for (int64_t m = k; m < j; m++) {
                 int64_t cs = iv[m].start, ce = iv[m].end, L = ce - cs;
                 if (L <= 0) continue;
                 for (int64_t oc = 0; oc < OUT_N; oc++) outvec[oc] = 0.0;
-                int64_t cnt = 0;   // covered universal columns of this run (shared denom)
+                // covered universal columns of this run.  ONE shared denominator
+                // across all components is correct ONLY for the DENSE writer:
+                // every component carries a value on every covered run, so the
+                // !isnan guard below never fires and the denominator is identical
+                // for all components.  A future SPARSE format (per-component NaN)
+                // would bias the sparse components and needs a per-component
+                // cnt[oc] -- fix before any sparse format ships.
+                int64_t cnt = 0;
                 if (ov != NULL) {
                     while (p < (int64_t)ov->l && (int64_t)ov->end[p] <= cs) p++;
                     for (int64_t q = p; q < (int64_t)ov->l &&
@@ -1862,8 +1887,10 @@ static int bigwig_lift_window(Tui *tui, const char *bigwig_file,
                    Nsp, t_open, t_query, t_loop, t_read, t_loop - t_read, t_emit);
         st_logInfo("taffy lift --bigwig %s:%" PRIi64 "-%" PRIi64 " (vector): %" PRIi64
                    " intervals in %" PRIi64 " clusters, %" PRIi64 " cols fetched, %"
-                   PRIi64 " uncovered, %" PRIi64 "/%" PRIi64 " bins emitted%s%s\n",
-                   seq, a, b, n_iv, n_clusters, cols_fetched, n_na,
+                   PRIi64 " uncovered, %" PRIi64 " empty clusters (no bigWig data: "
+                   "no-overlap or a possible read error -> reported as 0), %" PRIi64
+                   "/%" PRIi64 " bins emitted%s%s\n",
+                   seq, a, b, n_iv, n_clusters, cols_fetched, n_na, n_empty,
                    n_emit, nbins, species_name ? ", species=" : "", species_name ? species_name : "");
 
         for (uint32_t c = 0; c < Nsp; c++) free(names[c]);

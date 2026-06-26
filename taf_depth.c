@@ -271,8 +271,11 @@ static int gerp_flush_bin(LW *dout, UniBW *ubw, int64_t bin, int64_t sum,
 // --per-species: flush one bin's per-leaf covered-counts (sumvec[N]) as an
 // N-vector record on uni0 [bin*bin_size, +cnt).  Drop a bin where no leaf was
 // present (vsum==0; same intent as the scalar sum<=0 drop).  fbuf is N-float
-// scratch.  dout (--depth alongside --per-species) gets the scalar total-depth
-// mean (= sum of the per-leaf counts / cnt), matching the scalar depth track.
+// scratch.  dout (--depth alongside --per-species) gets the UNGATED scalar
+// total-depth mean (= sum of the per-leaf counts / cnt).  This matches the
+// STANDALONE scalar --depth track only at --minLeaves 1 -- standalone --depth is
+// --minLeaves-gated, so the two diverge at --minLeaves >= 2.  (The per-species
+// bigWig itself is never --minLeaves-gated, by design.)
 static int gerp_flush_bin_vec(LW *dout, UniBW *ubw, int64_t bin,
                               const int64_t *sumvec, int64_t cnt,
                               int64_t bin_size, int64_t N, float *fbuf) {
