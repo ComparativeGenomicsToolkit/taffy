@@ -16,7 +16,7 @@
 #                                                    -> taffy_lift_bench_slurm.sh
 #   5. view sample      : random genome-wide MAF extraction (the #1 tools)
 #                                                    -> taffy_view_sample_bench_slurm.sh
-#   6. depth summary    : taffy lift --bigwig (depth bigWig) vs bigMafSummary
+#   6. depth summary    : taffy lift --bigwig (PER-SPECIES vector bigWig, all-N) vs bigMafSummary
 #                                                    -> uni_depth_summary_bench_slurm.sh
 #
 # THE HAL CAP, applied to the existing (#1/#2) scripts
@@ -86,7 +86,7 @@ CHAINED_TUI=""         # chained .tui for #3 blockViz + #4 chained-lift
 HAL=""                 # full 577-way .hal (hal2maf / halLiftover / blockVizBed)
 HG38_MAF=""            # hg38-anchored MAF (.maf.gz + .tai) for #1 view's tai cells
 BIGBED=""              # bigmaf bigBed for #1 view's bb cells
-DEPTH_BW=""            # universal-depth bigWig for #6 (uni_depth_bigwig_slurm.sh output)
+DEPTH_BW=""            # per-species vector bigWig for #6 (uni_depth_bigwig_slurm.sh output; + .names)
 SUMMARY_BB=""          # hg38 bigMafSummary bigBed for #6 (bigBedToBed baseline)
 CHAINS_DIR=""          # dir of UCSC chains named <REF>_vs_<genome_id>.chain.gz (#2 + #4)
 TREE=""                # species tree .nwk (plots' divergence x-axis)
@@ -190,7 +190,7 @@ run_577_slide_bench.sh -- drive all four 577-way / hg38 slide comparisons
     --hal FILE         full 577-way .hal                        [#1 #2 #3]
     --hg38Maf FILE     hg38-anchored MAF (.maf.gz + .tai)       [#1 #6]
     --bigbed FILE      bigmaf bigBed                            [#1 #5]
-    --depthBw FILE     universal-depth bigWig                   [#6]
+    --depthBw FILE     per-species vector bigWig (+ .names)     [#6]
     --summaryBb FILE   hg38 bigMafSummary bigBed                [#6]
     --chains DIR       UCSC chains dir                          [#2 #4]
     --tree FILE        species tree .nwk                        [#1 #2 #4 plots]
@@ -502,17 +502,18 @@ if [[ "$DO_5" -eq 1 ]]; then
 fi
 
 # ======================================================================
-# #6 -- zoom-out summary latency: depth bigWig lift vs bigMafSummary.
+# #6 -- zoom-out summary latency: per-species bigWig lift vs bigMafSummary.
 #       The high-zoom companion to #5 (1Mb-200Mb).  Times `taffy lift
-#       --bigwig` on the CHAINED .tui over the universal-depth bigWig
-#       ("ours") against bigMafSummary via bigBedToBed ("theirs"); wall
-#       time only.  Reuses the chained .tui (#3/#4) for the lift and the
-#       hg38 MAF (#1) as the region-sampling --chromSrc.
+#       --bigwig` on the CHAINED .tui over the PER-SPECIES vector bigWig
+#       (all-N per-species coverage, "ours") against bigMafSummary via
+#       bigBedToBed ("theirs"); wall time only.  Reuses the chained .tui
+#       (#3/#4) for the lift and the hg38 MAF (#1) as the --chromSrc.
+#       (A scalar total-depth bigWig also works -> lifts as 1 track.)
 # ======================================================================
 if [[ "$DO_6" -eq 1 ]]; then
     O6="$OUTROOT/cmp6_depth_summary"
     [[ -n "$CHAINED_TUI" ]] || { echo "ERROR(#6): need --chainedTui (the lift opens <it>.tui)" >&2; exit 1; }
-    [[ -n "$DEPTH_BW"    ]] || { echo "ERROR(#6): need --depthBw (the universal-depth bigWig)" >&2; exit 1; }
+    [[ -n "$DEPTH_BW"    ]] || { echo "ERROR(#6): need --depthBw (the per-species vector bigWig)" >&2; exit 1; }
     [[ -n "$SUMMARY_BB"  ]] || { echo "ERROR(#6): need --summaryBb (the hg38 bigMafSummary bigBed)" >&2; exit 1; }
     [[ -n "$HG38_MAF"    ]] || { echo "ERROR(#6): need --hg38Maf (the region-sampling --chromSrc)" >&2; exit 1; }
     V6_FLAGS=( -i "$CHAINED_TUI" -d "$DEPTH_BW" -b "$SUMMARY_BB"
@@ -521,7 +522,7 @@ if [[ "$DO_6" -eq 1 ]]; then
         -T "$T_TOTAL" --timeBudget "$TIME_BUDGET"
         --time "$SBATCH_TIME" --mem "$SBATCH_MEM" )
     run_driver env TAFFY="$TAFFY" bash "$DEPTH_SUMMARY_DRV" "${V6_FLAGS[@]}" "${COMMON_FLAGS[@]}"
-    echo ">> #6: depth-summary (depth bigWig lift vs bigMafSummary; $DEPTH_SUMMARY_N regions/size, sizes $DEPTH_SUMMARY_SIZES) -> hg38 zoom-out" >&2
+    echo ">> #6: depth-summary (per-species vector bigWig lift vs bigMafSummary; $DEPTH_SUMMARY_N regions/size, sizes $DEPTH_SUMMARY_SIZES) -> hg38 zoom-out" >&2
 fi
 
 echo

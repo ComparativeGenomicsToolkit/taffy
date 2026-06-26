@@ -9,15 +9,16 @@
 # lifted to the reference via the chained .tui, versus UCSC bigMafSummary.
 #
 # Two tools, each answering the SAME sampled hg38 regions, WALL TIME ONLY:
-#   ours    taffy lift --bigwig   (depth bigWig on the integer universal-column
-#                                  axis -> N-bp binned coverage in ref coords,
-#                                  via the chained .tui)
+#   ours    taffy lift --bigwig   (PER-SPECIES vector bigWig -> all-N per-species
+#                                  coverage in ref coords, via the chained .tui)
 #   theirs  bigBedToBed           (precomputed hg38 bigMafSummary .bb)
 #
-# These produce different artifacts (a depth bedGraph vs a summary BED), so this
-# is a LATENCY comparison of the two zoom-out backends -- not an apples-to-apples
-# content comparison (no accuracy / correlation panels; see the standalone
-# 577_summary_bench for that).
+# Both now serve PER-SPECIES coverage at chromosome scale (ours all-N in one
+# matrix, theirs one row per species), so this is the apples-to-apples zoom-out
+# comparison.  It is a LATENCY comparison: the VALUES use different metrics
+# (ours = coverage fraction, bigMafSummary = scaled-multiz identity), so it is
+# not an accuracy/correlation panel.  (A scalar total-depth bigWig also works but
+# lifts as a single track.)
 #
 # Sampling happens AT RUNTIME on the cluster: N random genome-wide hg38 regions
 # per size, length-weighted over the canonical chroms (chr1..22,X,Y), drawn once
@@ -43,7 +44,9 @@
 set -euo pipefail
 
 ITUI=""                       # chained .tui (zoom-out) OR its stem -> `taffy lift --bigwig -i <stem>`
-DEPTH_BW=""                   # integer-chunked universal-depth bigWig (taffy depth --bin N)
+DEPTH_BW=""                   # PER-SPECIES vector bigWig (taffy depth --perSpecies --bigwig;
+                              # one component/leaf, single uni0 axis) + a <bw>.names sidecar.
+                              # A scalar total-depth bigWig also works but lifts as 1 track.
 BB=""                         # precomputed hg38 bigMafSummary .bb (bigBedToBed)
 CHROM_SRC=""                  # hg38-anchored MAF/TAF for `taffy stats -s` region sampling
 OUTDIR=""
@@ -73,7 +76,9 @@ uni_depth_summary_bench_slurm.sh -- bench zoom-out (summary) wall / RSS / output
 Required:
   -i FILE       Chained .tui (zoom-out) OR its stem.  taffy lift opens <stem>.tui;
                 pass e.g. UNI.taf.gz.chained_g10000.tui (the .tui is stripped).
-  -d FILE       Universal-depth bigWig (integer uni-column axis; taffy depth --bin N)
+  -d FILE       Per-species vector bigWig (taffy depth --perSpecies --bigwig; needs
+                its <bw>.names sidecar -> lift emits all-N).  A scalar total-depth
+                bigWig also works but lifts as 1 track (NOT apples-to-apples).
   -b FILE       Precomputed hg38 bigMafSummary .bb (for bigBedToBed)
   --chromSrc FILE  hg38-anchored MAF/TAF for region sampling (taffy stats -s)
   -o DIR        Output directory
@@ -161,6 +166,22 @@ check_input "$DEPTH_BW"  "depth bigWig"
 check_input "$BB"        "bigMafSummary .bb"
 check_input "$CHROM_SRC" "--chromSrc (sampling source)"
 
+# The per-species vector bigWig (taffy depth --perSpecies --bigwig) carries a
+# <bw>.names sidecar (one leaf name per line, gerp order) that the vector lift
+# reads for the species legend.  Require it for the vector case so a missing
+# sidecar fails here, not mid-run.  A scalar total-depth bigWig (BIGWIG64_MAGIC,
+# no .names) lifts as a single track and is allowed (but is NOT apples-to-apples).
+if [[ -f "$DEPTH_BW" ]]; then
+    case "$(od -An -tx1 -N4 "$DEPTH_BW" 2>/dev/null | tr -d ' \n')" in
+        65fc8f88)  # BIGWIG64VEC_MAGIC -> per-species vector
+            [[ -f "$DEPTH_BW.names" ]] || { echo "ERROR: per-species vector bigWig is missing its sidecar: $DEPTH_BW.names" >&2; exit 1; }
+            echo ">> depth bigWig: PER-SPECIES vector, $(wc -l < "$DEPTH_BW.names") components (lift emits all-N -> apples-to-apples vs bigMafSummary)";;
+        64fc8f88)  # BIGWIG64_MAGIC -> scalar total-depth
+            echo ">> depth bigWig: SCALAR total-depth (1 track); NOT the apples-to-apples per-species comparison";;
+        *) echo ">> WARN: $DEPTH_BW magic unrecognized; expected a 64-bit (vector or scalar) bigWig" >&2;;
+    esac
+fi
+
 [[ "$SIZES_CSV" =~ ^[0-9]+(,[0-9]+)*$ ]] || { echo "ERROR: --sizes must be a CSV of integers (got '$SIZES_CSV')" >&2; exit 1; }
 [[ "$N_SAMPLES" =~ ^[0-9]+$ && "$N_SAMPLES" -ge 1 ]] || { echo "ERROR: --nSamples must be a positive integer" >&2; exit 1; }
 [[ "$SEED" =~ ^[0-9]+$ ]] || { echo "ERROR: --seed must be a non-negative integer" >&2; exit 1; }
@@ -188,7 +209,7 @@ echo ">> local-stage:   $([[ $STAGE_LOCAL -eq 1 ]] && echo "ON (copies .tui/.bw/
 
 if [[ "$STAGE_LOCAL" -eq 1 ]]; then
     STAGE_BYTES=0
-    for f in "$ITUI_FILE" "$DEPTH_BW" "$BB"; do
+    for f in "$ITUI_FILE" "$DEPTH_BW" "$DEPTH_BW.names" "$BB"; do
         [[ -f "$f" ]] && STAGE_BYTES=$(( STAGE_BYTES + $(stat -Lc %s "$f" 2>/dev/null || echo 0) ))
     done
     STAGE_GB=$(( STAGE_BYTES / (1024**3) ))
@@ -297,14 +318,14 @@ if [[ "\$STAGE_LOCAL" -eq 1 ]]; then
           echo "       done: \$(basename "\$src") in \$((SECONDS - t0)) s" >&2 ) &
         stage_pids+=( \$! )
     }
-    stage_bg "\$ITUI_FILE"; stage_bg "\$DEPTH_BW"; stage_bg "\$BB"
+    stage_bg "\$ITUI_FILE"; stage_bg "\$DEPTH_BW"; stage_bg "\$DEPTH_BW.names"; stage_bg "\$BB"
     stage_rc=0
     for p in "\${stage_pids[@]}"; do wait "\$p" || stage_rc=1; done
     [[ "\$stage_rc" -eq 0 ]] || { echo "ERROR: a stage-in cp returned non-zero" >&2; exit 1; }
     # VERIFY each staged copy matches its source byte count.  A cp to a full FS
     # can return 0 yet truncate (write succeeds, flush doesn't); the .tui-based
     # reads then fail cryptically downstream -- catch truncation here.
-    for f in "\$ITUI_FILE" "\$DEPTH_BW" "\$BB"; do
+    for f in "\$ITUI_FILE" "\$DEPTH_BW" "\$DEPTH_BW.names" "\$BB"; do
         [[ -f "\$f" ]] || continue
         ss=\$(stat -Lc %s "\$f" 2>/dev/null); ds=\$(stat -c %s "\$STAGE_DIR/\$(basename "\$f")" 2>/dev/null || echo -1)
         [[ "\$ss" == "\$ds" ]] || { echo "ERROR: staged \$(basename "\$f") is \$ds bytes, source is \$ss -- truncated (scratch full?)" >&2; exit 1; }
