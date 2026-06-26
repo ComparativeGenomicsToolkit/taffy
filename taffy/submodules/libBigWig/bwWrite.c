@@ -81,6 +81,20 @@ int bwCreateHdr(bigWigFile_t *fp, int32_t maxZooms) {
     return 0;
 }
 
+//64-bit vector fork: like bwCreateHdr but marks the file vector (N float components/record).
+//bwWriteHdr then writes BIGWIG64VEC_MAGIC + fieldCount=N.
+int bwCreateHdrVec(bigWigFile_t *fp, int32_t maxZooms, uint32_t N) {
+    int rv;
+    if(N < 1) return 10;
+    rv = bwCreateHdr(fp, maxZooms);
+    if(rv) return rv;
+    //A record is 16 + 4N bytes; it must fit in a data block (after the 32-byte block header).
+    if(32 + 16 + 4*(uint64_t)N > fp->hdr->bufSize) return 11;
+    fp->vecN = N;
+    fp->hdr->fieldCount = (uint16_t) N;
+    return 0;
+}
+
 //return 0 on success
 static int writeAtPos(void *ptr, size_t sz, size_t nmemb, size_t pos, FILE *fp) {
     size_t curpos = ftell(fp);
@@ -185,7 +199,7 @@ static int writeChromList(FILE *fp, chromList_t *cl) {
 //returns 0 on success
 //Still need to fill in indexOffset
 int bwWriteHdr(bigWigFile_t *bw) {
-    uint32_t magic = BIGWIG64_MAGIC;  //64-bit fork: non-standard magic
+    uint32_t magic = bw->vecN ? BIGWIG64VEC_MAGIC : BIGWIG64_MAGIC;  //64-bit fork: non-standard magic (vec variant if vecN)
     uint16_t two = 4;
     FILE *fp;
     const uint8_t pbuff[58] = {0}; // 58 bytes of nothing
@@ -199,6 +213,10 @@ int bwWriteHdr(bigWigFile_t *bw) {
     if(fwrite(&magic, sizeof(uint32_t), 1, fp) != 1) return 4;
     if(fwrite(&two, sizeof(uint16_t), 1, fp) != 1) return 5;
     if(fwrite(p, sizeof(uint8_t), 58, fp) != 58) return 6;
+    if(bw->vecN) {  //64-bit vector fork: store N in fieldCount (offset 0x20)
+        uint16_t fc = (uint16_t) bw->vecN;
+        if(writeAtPos(&fc, sizeof(uint16_t), 1, 0x20, fp)) return 12;
+    }
 
     //Empty zoom headers
     if(bw->hdr->nLevels) {
@@ -329,7 +347,7 @@ static int flushBuffer(bigWigFile_t *fp) {
     //Determine the number of items (32-byte header; records: bedGraph 20, varStep 12, fixedStep 4)
     switch(wb->ltype) {
     case 1:
-        nItems = (wb->l-32)/20;
+        nItems = (wb->l-32) / (fp->vecN ? (16 + 4*fp->vecN) : 20);  //64-bit vector fork: stride 16+4N
         break;
     case 2:
         nItems = (wb->l-32)/12;
@@ -458,6 +476,94 @@ int bwAppendIntervals(bigWigFile_t *fp, const uint64_t *start, const uint64_t *e
     }
     wb->end = end[i-1];
 
+    return 0;
+}
+
+//64-bit vector fork: type-1 bedGraph packer with N float components/record (stride 16+4N).
+//values is n*N flattened (interval i, component c at values[i*N+c]); sorted, non-overlapping.
+int bwAddIntervalsVec(bigWigFile_t *fp, const char* const* chrom, const uint64_t *start, const uint64_t *end, const float *values, uint32_t n) {
+    uint32_t tid = 0, i, N, rec;
+    const char *lastChrom = NULL;
+    bwWriteBuffer_t *wb = fp->writeBuffer;
+    if(!n) return 0;
+    if(!fp->isWrite) return 1;
+    if(!wb) return 2;
+    if(!fp->vecN) return 14;  //not a vector file
+    N = fp->vecN; rec = 16 + 4*N;
+
+    if(wb->ltype != 1) if(flushBuffer(fp)) return 3;
+    if(wb->l + 32 + rec > fp->hdr->bufSize) if(flushBuffer(fp)) return 4;
+    lastChrom = chrom[0];
+    tid = bwGetTid(fp, chrom[0]);
+    if(tid == (uint32_t) -1) return 5;
+    if(tid != wb->tid) {
+        if(flushBuffer(fp)) return 6;
+        wb->tid = tid;
+        wb->start = start[0];
+        wb->end = end[0];
+    }
+
+    wb->ltype = 1;
+    if(wb->l <= 32) {
+        wb->l = 32;   //reserve the 32-byte block header
+        wb->start = start[0];
+        wb->span = 0;
+        wb->step = 0;
+    }
+    if(!memcpy((char*)wb->p+wb->l, start, sizeof(uint64_t))) return 7;
+    if(!memcpy((char*)wb->p+wb->l+8, end, sizeof(uint64_t))) return 8;
+    if(!memcpy((char*)wb->p+wb->l+16, values, sizeof(float)*N)) return 9;
+    updateStats(fp, end[0]-start[0], values[0]);
+    wb->l += rec;
+
+    for(i=1; i<n; i++) {
+        if(strcmp(chrom[i],lastChrom) != 0) {
+            wb->end = end[i-1];
+            flushBuffer(fp);
+            lastChrom = chrom[i];
+            tid = bwGetTid(fp, chrom[i]);
+            if(tid == (uint32_t) -1) return 10;
+            wb->tid = tid;
+            wb->start = start[i];
+        }
+        if(wb->l+rec > fp->hdr->bufSize) {
+            wb->end = end[i-1];
+            flushBuffer(fp);
+            wb->start = start[i];
+        }
+        if(!memcpy((char*)wb->p+wb->l, &(start[i]), sizeof(uint64_t))) return 11;
+        if(!memcpy((char*)wb->p+wb->l+8, &(end[i]), sizeof(uint64_t))) return 12;
+        if(!memcpy((char*)wb->p+wb->l+16, values + (size_t)i*N, sizeof(float)*N)) return 13;
+        updateStats(fp, end[i]-start[i], values[(size_t)i*N]);
+        wb->l += rec;
+    }
+    wb->end = end[i-1];
+    return 0;
+}
+
+int bwAppendIntervalsVec(bigWigFile_t *fp, const uint64_t *start, const uint64_t *end, const float *values, uint32_t n) {
+    uint32_t i, N, rec;
+    bwWriteBuffer_t *wb = fp->writeBuffer;
+    if(!n) return 0;
+    if(!fp->isWrite) return 1;
+    if(!wb) return 2;
+    if(wb->ltype != 1) return 3;
+    if(!fp->vecN) return 7;
+    N = fp->vecN; rec = 16 + 4*N;
+
+    for(i=0; i<n; i++) {
+        if(wb->l+rec > fp->hdr->bufSize) {
+            if(i>0) wb->end = end[i-1];
+            flushBuffer(fp);
+            wb->start = start[i];
+        }
+        if(!memcpy((char*)wb->p+wb->l, &(start[i]), sizeof(uint64_t))) return 4;
+        if(!memcpy((char*)wb->p+wb->l+8, &(end[i]), sizeof(uint64_t))) return 5;
+        if(!memcpy((char*)wb->p+wb->l+16, values + (size_t)i*N, sizeof(float)*N)) return 6;
+        updateStats(fp, end[i]-start[i], values[(size_t)i*N]);
+        wb->l += rec;
+    }
+    wb->end = end[i-1];
     return 0;
 }
 
@@ -816,6 +922,7 @@ int makeZoomLevels(bigWigFile_t *fp) {
     uint32_t multiplier = 4;
     uint64_t zoom = 10, maxZoom = 0;  //64-bit fork (H1): chrom lengths are u64
     uint16_t nLevels = 0;
+    size_t zrec = fp->vecN ? (24 + 4*(size_t)fp->vecN) : 40;  //vector fork: zoom-summary record size (24+4N vs scalar 40)
 
     meanBinSize = ((double) fp->writeBuffer->runningWidthSum)/(fp->writeBuffer->nEntries);
     //In reality, one level is skipped
@@ -860,10 +967,11 @@ int makeZoomLevels(bigWigFile_t *fp) {
     for(i=0; i<fp->hdr->nLevels; i++) {
         fp->writeBuffer->firstZoomBuffer[i] = calloc(1, sizeof(bwZoomBuffer_t));
         if(!fp->writeBuffer->firstZoomBuffer[i]) goto error;
-        //64-bit fork: zoom records are 40 bytes (chromId u32@0, start u64@4, end u64@12, ...)
-        fp->writeBuffer->firstZoomBuffer[i]->p = calloc(fp->hdr->bufSize/40, 40);
+        //64-bit fork: zoom records are 40 bytes scalar (chromId u32@0, start u64@4, end u64@12, ...)
+        //or 24+4N bytes vector (...nBases u32@20, N float sums @24); zrec selects.
+        fp->writeBuffer->firstZoomBuffer[i]->p = calloc(fp->hdr->bufSize/zrec, zrec);
         if(!fp->writeBuffer->firstZoomBuffer[i]->p) goto error;
-        fp->writeBuffer->firstZoomBuffer[i]->m = (fp->hdr->bufSize/40)*40;
+        fp->writeBuffer->firstZoomBuffer[i]->m = (fp->hdr->bufSize/zrec)*zrec;
         {
             uint8_t *zp = (uint8_t*)fp->writeBuffer->firstZoomBuffer[i]->p;
             *(uint32_t*)(zp+0) = 0;   //chromId
@@ -1040,9 +1148,122 @@ error:
     return 2;
 }
 
+//vector fork: append one grid-aligned per-component-SUM zoom record (24+4N) to level k's buffer chain.
+static int appendZoomRecVec(bigWigFile_t *fp, uint32_t k, uint32_t N, uint32_t tid,
+                            uint64_t binStart, uint64_t binEnd, uint32_t nBases, const double *sumv) {
+    size_t zrec = 24 + 4*(size_t)N, c;
+    bwZoomBuffer_t *buf = fp->writeBuffer->lastZoomBuffer[k];
+    if(buf->l + zrec > buf->m) {
+        bwZoomBuffer_t *nb = calloc(1, sizeof(bwZoomBuffer_t));
+        size_t cap;
+        if(!nb) return 1;
+        cap = fp->hdr->bufSize/zrec;
+        if(cap < 1) cap = 1;
+        nb->p = calloc(cap, zrec);
+        if(!nb->p) { free(nb); return 1; }
+        nb->m = cap*zrec;
+        buf->next = nb;
+        fp->writeBuffer->lastZoomBuffer[k] = nb;
+        fp->writeBuffer->nNodes[k] += 1;
+        buf = nb;
+    }
+    {
+        uint8_t *r = (uint8_t*)buf->p + buf->l;
+        *(uint32_t*)(r+0)  = tid;
+        *(uint64_t*)(r+4)  = binStart;
+        *(uint64_t*)(r+12) = binEnd;
+        *(uint32_t*)(r+20) = nBases;
+        for(c=0;c<N;c++) *(float*)(r+24+4*(size_t)c) = (float) sumv[c];
+        buf->l += zrec;
+    }
+    return 0;
+}
+
+//vector fork: build the per-component-SUM zoom pyramid by re-reading the data (grid-aligned bins).
+//Each interval contributes value_c*overlap to each grid bin [b*zoom,(b+1)*zoom) it overlaps; one
+//record per non-empty bin per level.  Re-read in windows; an interval is processed once, in the
+//window holding its start.  Mirrors constructZoomLevels but with N per-component sums.
+int constructZoomLevelsVec(bigWigFile_t *fp) {
+    uint32_t N = fp->vecN, k, c, ci;
+    uint16_t nL = fp->hdr->nLevels;
+    int rv = 1;
+    int64_t *curBin = NULL;
+    uint64_t *curStart = NULL, *curEnd = NULL;
+    uint32_t *curN = NULL, *curTid = NULL;
+    double *curSum = NULL;   //nL*N running per-component sums for the open bin
+    bwOverlappingIntervalsVec_t *iv = NULL;
+    const uint64_t W = 50000000ULL;  //re-read window (bounded memory)
+
+    curBin   = malloc((size_t)nL*sizeof(int64_t));
+    curStart = malloc((size_t)nL*sizeof(uint64_t));
+    curEnd   = malloc((size_t)nL*sizeof(uint64_t));
+    curN     = calloc(nL, sizeof(uint32_t));
+    curTid   = calloc(nL, sizeof(uint32_t));
+    curSum   = calloc((size_t)nL*N, sizeof(double));
+    if(!curBin || !curStart || !curEnd || !curN || !curTid || !curSum) goto done;
+    for(k=0;k<nL;k++) curBin[k] = -1;
+
+    for(ci=0; ci<fp->cl->nKeys; ci++) {
+        uint64_t len = fp->cl->len[ci], w;
+        for(w=0; w<len; w += W) {
+            uint64_t we = (w+W < len) ? w+W : len, j;
+            iv = bwGetOverlappingIntervalsVec(fp, fp->cl->chrom[ci], w, we);
+            if(!iv) goto done;   //vector fork: NULL is error-only here (empty window -> non-NULL n=0); propagate
+            for(j=0; j<iv->l; j++) {
+                uint64_t s = iv->start[j], e = iv->end[j], st;
+                const float *v = iv->value + (size_t)j*N;
+                if(s < w || s >= we) continue;   //process each interval once, in its start's window
+                for(k=0;k<nL;k++) {
+                    uint64_t zoom = fp->hdr->zoomHdrs->level[k];
+                    st = s;
+                    while(st < e) {
+                        int64_t b = (int64_t)(st / zoom);
+                        uint64_t binEnd = (uint64_t)(b+1)*zoom, ov;
+                        if(binEnd > len) binEnd = len;
+                        ov = ((e < binEnd) ? e : binEnd) - st;
+                        if(curBin[k] != b || curTid[k] != ci) {
+                            if(curBin[k] >= 0) {
+                                if(appendZoomRecVec(fp, k, N, curTid[k], curStart[k], curEnd[k], curN[k], curSum + (size_t)k*N)) goto done;
+                            }
+                            curBin[k] = b; curTid[k] = ci;
+                            curStart[k] = (uint64_t)b*zoom;
+                            curEnd[k] = binEnd;
+                            curN[k] = 0;
+                            for(c=0;c<N;c++) curSum[(size_t)k*N+c] = 0.0;
+                        }
+                        for(c=0;c<N;c++) curSum[(size_t)k*N+c] += (double)ov * (double)v[c];
+                        curN[k] += (uint32_t) ov;
+                        st += ov;
+                    }
+                }
+            }
+            bwDestroyOverlappingIntervalsVec(iv);
+            iv = NULL;
+        }
+    }
+    //flush the final open bin per level (the grid-aligned build has no successor to trigger it)
+    for(k=0;k<nL;k++) {
+        if(curBin[k] >= 0) {
+            if(appendZoomRecVec(fp, k, N, curTid[k], curStart[k], curEnd[k], curN[k], curSum + (size_t)k*N)) goto done;
+        }
+    }
+    //make an index for each zoom level (mirrors constructZoomLevels)
+    for(k=0;k<nL;k++) {
+        fp->hdr->zoomHdrs->idx[k] = calloc(1, sizeof(bwRTree_t));
+        if(!fp->hdr->zoomHdrs->idx[k]) goto done;
+        fp->hdr->zoomHdrs->idx[k]->blockSize = fp->writeBuffer->blockSize;
+    }
+    rv = 0;
+done:
+    if(iv) bwDestroyOverlappingIntervalsVec(iv);
+    free(curBin); free(curStart); free(curEnd); free(curN); free(curTid); free(curSum);
+    return rv;
+}
+
 //Get all of the intervals and add them to the appropriate zoomBuffer
 int constructZoomLevels(bigWigFile_t *fp) {
     bwOverlapIterator_t *it = NULL;
+    if(fp->vecN) return constructZoomLevelsVec(fp);
     double *sum = NULL, *sumsq = NULL;
     uint32_t i, j, k;
 
@@ -1097,6 +1318,7 @@ int writeZoomLevels(bigWigFile_t *fp) {
     bwZoomBuffer_t *zb, *zb2;
     bwWriteBuffer_t *wb = fp->writeBuffer;
     uLongf sz;
+    size_t zrec = fp->vecN ? (24 + 4*(size_t)fp->vecN) : 40;  //vector fork: zoom record size
 
     for(i=0; i<fp->hdr->nLevels; i++) {
         if(i) {
@@ -1125,7 +1347,7 @@ int writeZoomLevels(bigWigFile_t *fp) {
             //first start u64@4, last end u64@+12}. Last record begins at zb->l-40.
             {
                 uint8_t *zp = (uint8_t*)zb->p;
-                uint8_t *lastr = zp + zb->l - 40;
+                uint8_t *lastr = zp + zb->l - zrec;
                 if(addIndexEntry(fp, *(uint32_t*)(zp+0), *(uint32_t*)(lastr+0),
                                      *(uint64_t*)(zp+4), *(uint64_t*)(lastr+12),
                                      bwTell(fp)-sz, sz)) return 4;
@@ -1169,7 +1391,7 @@ int writeZoomLevels(bigWigFile_t *fp) {
         if(fwrite(&(root->chrIdxEnd[root->nChildren-1]), sizeof(uint32_t), 1, fp->URL->x.fp) != 1) return 10;
         if(fwrite(&(root->baseEnd[root->nChildren-1]), sizeof(uint64_t), 1, fp->URL->x.fp) != 1) return 11;  //64-bit fork (L1)
         if(fwrite(&idxSize, sizeof(uint64_t), 1, fp->URL->x.fp) != 1) return 12;
-        four = fp->hdr->bufSize/40;
+        four = fp->hdr->bufSize/zrec;
         if(fwrite(&four, sizeof(uint32_t), 1, fp->URL->x.fp) != 1) return 13;
         four = 0;
         if(fwrite(&four, sizeof(uint32_t), 1, fp->URL->x.fp) != 1) return 14; //padding

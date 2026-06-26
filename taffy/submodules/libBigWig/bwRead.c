@@ -132,7 +132,7 @@ static void bwHdrRead(bigWigFile_t *bw) {
         fprintf(stderr, "[bwHdrRead] standard 32-bit bigWig (BIGWIG_MAGIC) is not supported by this 64-bit libBigWig fork; regenerate it with the 64-bit writer (e.g. `taffy depth --bigwig`).\n");
         goto error;
     }
-    if(magic != BIGWIG64_MAGIC && magic != BIGBED_MAGIC) goto error;  //64-bit fork
+    if(magic != BIGWIG64_MAGIC && magic != BIGWIG64VEC_MAGIC && magic != BIGBED_MAGIC) goto error;  //64-bit fork
 
     if(bwRead((void*) &(bw->hdr->version), sizeof(uint16_t), 1, bw) != 1) goto error; //0x4
     if(bwRead((void*) &(bw->hdr->nLevels), sizeof(uint16_t), 1, bw) != 1) goto error; //0x6
@@ -140,6 +140,7 @@ static void bwHdrRead(bigWigFile_t *bw) {
     if(bwRead((void*) &(bw->hdr->dataOffset), sizeof(uint64_t), 1, bw) != 1) goto error; //0x10
     if(bwRead((void*) &(bw->hdr->indexOffset), sizeof(uint64_t), 1, bw) != 1) goto error; //0x18
     if(bwRead((void*) &(bw->hdr->fieldCount), sizeof(uint16_t), 1, bw) != 1) goto error; //0x20
+    if(magic == BIGWIG64VEC_MAGIC) bw->vecN = bw->hdr->fieldCount;  //64-bit vector fork: N float components per record
     if(bwRead((void*) &(bw->hdr->definedFieldCount), sizeof(uint16_t), 1, bw) != 1) goto error; //0x22
     if(bwRead((void*) &(bw->hdr->sqlOffset), sizeof(uint64_t), 1, bw) != 1) goto error; //0x24
     if(bwRead((void*) &(bw->hdr->summaryOffset), sizeof(uint64_t), 1, bw) != 1) goto error; //0x2c

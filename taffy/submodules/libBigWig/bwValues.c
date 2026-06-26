@@ -568,6 +568,122 @@ bwOverlappingIntervals_t *bwGetOverlappingIntervals(bigWigFile_t *fp, const char
     return output;
 }
 
+//================ 64-bit vector fork: N-float vector intervals (VECTOR_FORMAT.md) ================
+void bwDestroyOverlappingIntervalsVec(bwOverlappingIntervalsVec_t *o) {
+    if(!o) return;
+    if(o->start) free(o->start);
+    if(o->end) free(o->end);
+    if(o->value) free(o->value);
+    free(o);
+}
+
+static bwOverlappingIntervalsVec_t *pushIntervalsVec(bwOverlappingIntervalsVec_t *o, uint64_t start, uint64_t end, const float *value) {
+    uint32_t c, N = o->N;
+    if(o->l+1 >= o->m) {
+        uint64_t *ns, *ne; float *nv;   //realloc into temps so OOM doesn't orphan the old block
+        o->m = roundup(o->l+1);
+        ns = realloc(o->start, o->m * sizeof(uint64_t));
+        if(!ns) goto error;
+        o->start = ns;
+        ne = realloc(o->end, o->m * sizeof(uint64_t));
+        if(!ne) goto error;
+        o->end = ne;
+        nv = realloc(o->value, o->m * (size_t)N * sizeof(float));
+        if(!nv) goto error;
+        o->value = nv;
+    }
+    o->start[o->l] = start;
+    o->end[o->l] = end;
+    for(c=0; c<N; c++) o->value[(size_t)o->l*N + c] = value[c];
+    o->l++;
+    return o;
+
+error:
+    bwDestroyOverlappingIntervalsVec(o);
+    return NULL;
+}
+
+//Decode type-1 vector records (stride 16+4N) from the overlapping blocks.
+static bwOverlappingIntervalsVec_t *bwGetOverlappingIntervalsVecCore(bigWigFile_t *fp, bwOverlapBlock_t *o, uint32_t tid, uint64_t ostart, uint64_t oend) {
+    uint64_t i;
+    uint16_t j;
+    int compressed = 0, rv;
+    uLongf sz = fp->hdr->bufSize, tmp;
+    void *buf = NULL, *compBuf = NULL;
+    uint64_t start, end;
+    uint8_t *p;
+    uint32_t N = fp->vecN, rec = 16 + 4*N;
+    bwDataHeader_t hdr;
+    bwOverlappingIntervalsVec_t *output = calloc(1, sizeof(bwOverlappingIntervalsVec_t));
+
+    if(!output) goto error;
+    output->N = N;
+    if(!o) return output;
+    if(!o->n) return output;
+
+    if(sz) {
+        compressed = 1;
+        buf = malloc(sz);
+    }
+    sz = 0;
+
+    for(i=0; i<o->n; i++) {
+        if(bwSetPos(fp, o->offset[i])) goto error;
+        if(sz < o->size[i]) {
+            compBuf = realloc(compBuf, o->size[i]);
+            sz = o->size[i];
+        }
+        if(!compBuf) goto error;
+        if(bwRead(compBuf, o->size[i], 1, fp) != 1) goto error;
+        if(compressed) {
+            tmp = fp->hdr->bufSize;
+            rv = uncompress(buf, (uLongf *) &tmp, compBuf, o->size[i]);
+            if(rv != Z_OK) goto error;
+        } else {
+            buf = compBuf;
+        }
+
+        bwFillDataHdr(&hdr, buf);
+        p = ((uint8_t*) buf) + 32;
+        if(hdr.tid != tid) continue;
+        if(hdr.type != 1) goto error;   //vectors are type-1 bedGraph only
+
+        for(j=0; j<hdr.nItems; j++) {
+            start = *(uint64_t*)p;
+            end = *(uint64_t*)(p+8);
+            if(!(end <= ostart || start >= oend)) {
+                if(!pushIntervalsVec(output, start, end, (const float*)(p+16))) { output = NULL; goto error; }
+            }
+            p += rec;
+        }
+    }
+
+    if(compressed && buf) free(buf);
+    if(compBuf) free(compBuf);
+    return output;
+
+error:
+    fprintf(stderr, "[bwGetOverlappingIntervalsVecCore] Got an error\n");
+    if(output) bwDestroyOverlappingIntervalsVec(output);
+    if(compressed && buf) free(buf);
+    if(compBuf) free(compBuf);
+    return NULL;
+}
+
+bwOverlappingIntervalsVec_t *bwGetOverlappingIntervalsVec(bigWigFile_t *fp, const char *chrom, uint64_t start, uint64_t end) {
+    bwOverlappingIntervalsVec_t *output;
+    uint32_t tid;
+    bwOverlapBlock_t *blocks;
+    if(!fp->vecN) return NULL;   //not a vector file
+    tid = bwGetTid(fp, chrom);
+    if(tid == (uint32_t) -1) return NULL;
+    blocks = bwGetOverlappingBlocks(fp, chrom, start, end);
+    if(!blocks) return NULL;
+    output = bwGetOverlappingIntervalsVecCore(fp, blocks, tid, start, end);
+    destroyBWOverlapBlock(blocks);
+    return output;
+}
+
 //Like above, but for bigBed files
 bbOverlappingEntries_t *bbGetOverlappingEntries(bigWigFile_t *fp, const char *chrom, uint64_t start, uint64_t end, int withString) {
     bbOverlappingEntries_t *output;

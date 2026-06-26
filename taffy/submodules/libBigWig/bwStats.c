@@ -541,3 +541,121 @@ double *bwStats(bigWigFile_t *fp, const char *chrom, uint64_t start, uint64_t en
     if(level == -1) return bwStatsFromFull(fp, chrom, start, end, nBins, type);
     return bwStatsFromZoom(fp, level, tid, start, end, nBins, type);
 }
+
+//================ 64-bit vector fork: per-component stats (VECTOR_FORMAT.md) ================
+//Data-level only (zoom deferred).  out is nBins*N (bin b, component c at out[b*N+c]).
+//type sum:  out[b*N+c] = sum over overlapping intervals of value_c * overlap_bases.
+//type mean: that / covered bases.  Uncovered bin -> 0 (sum) / NaN (mean).
+//vector fork: accumulate per-component sums (+ covered bases) over [start,end) from a zoom level's
+//overlapping blocks.  out[c] += rec_sum_c * scalar; *cov += rec_nBases * scalar (scalar = getScalar
+//fractional overlap).  Mirrors getVals for the 24+4N record.  Returns 0 on success, 1 on error.
+static int accumZoomVec(bigWigFile_t *fp, bwOverlapBlock_t *o, uint32_t tid, uint64_t start, uint64_t end,
+                        uint32_t N, double *out, double *cov) {
+    size_t zrec = 24 + 4*(size_t)N;
+    void *buf = NULL, *compBuf = NULL;
+    int compressed = (fp->hdr->bufSize > 0), ret = 1;
+    uint64_t i;
+    if(compressed) { buf = malloc(fp->hdr->bufSize); if(!buf) return 1; }
+    for(i=0; i<o->n; i++) {
+        uint8_t *p, *pend;
+        uLongf usz;
+        if(bwSetPos(fp, o->offset[i])) goto done;
+        compBuf = malloc(o->size[i]);
+        if(!compBuf) goto done;
+        if(bwRead(compBuf, o->size[i], 1, fp) != 1) goto done;
+        if(compressed) {
+            usz = fp->hdr->bufSize;
+            if(uncompress(buf, &usz, compBuf, o->size[i]) != Z_OK) goto done;
+        } else { buf = compBuf; usz = o->size[i]; }
+        for(p = (uint8_t*)buf, pend = p + usz; p + zrec <= pend; p += zrec) {
+            uint32_t vtid = *(uint32_t*)(p+0);
+            uint64_t vs = *(uint64_t*)(p+4), ve = *(uint64_t*)(p+12);
+            if(vtid == tid) {
+                if((start <= vs && end > vs) || (start < ve && start >= vs)) {
+                    double scalar = getScalar(start, end, vs, ve);
+                    uint32_t c;
+                    for(c=0;c<N;c++) out[c] += scalar * (double)(*(float*)(p+24+4*(size_t)c));
+                    *cov += scalar * (double)(*(uint32_t*)(p+20));
+                }
+                if(vs > end) break;
+            } else if(vtid > tid) break;
+        }
+        free(compBuf); compBuf = NULL;
+        if(!compressed) buf = NULL;
+    }
+    ret = 0;
+done:
+    if(compBuf) free(compBuf);
+    if(compressed && buf) free(buf);
+    return ret;
+}
+
+int bwStatsVec(bigWigFile_t *fp, const char *chrom, uint64_t start, uint64_t end, uint32_t nBins, enum bwStatsType type, double *out) {
+    uint32_t b, c, N;
+    uint64_t i, pos, end2;
+    bwOverlappingIntervalsVec_t *ints;
+    if(!fp->vecN || !out || !nBins) return 1;
+    if(type != sum && type != mean) return 2;
+    N = fp->vecN;
+
+    //vector fork: coarse query -> use the per-component-SUM zoom pyramid (mirrors bwStatsFromZoom)
+    if(fp->hdr->nLevels && end > start) {
+        int basesPerBin = (int)((end - start)/nBins);
+        int32_t level = determineZoomLevel(fp, basesPerBin);
+        if(level >= 0) {
+            uint32_t tid = bwGetTid(fp, chrom);
+            if(tid != (uint32_t)-1) {
+                if(!fp->hdr->zoomHdrs->idx[level])
+                    fp->hdr->zoomHdrs->idx[level] = bwReadIndex(fp, fp->hdr->zoomHdrs->indexOffset[level]);
+                if(fp->hdr->zoomHdrs->idx[level]) {
+                    for(b=0, pos=start; b<nBins; b++) {
+                        bwOverlapBlock_t *blocks;
+                        double cov = 0.0;
+                        end2 = start + (uint64_t)(((double)(end-start)*(b+1))/((double)nBins));
+                        for(c=0;c<N;c++) out[(size_t)b*N+c] = 0.0;
+                        blocks = walkRTreeNodes(fp, fp->hdr->zoomHdrs->idx[level]->root, tid, pos, end2);
+                        if(blocks) {
+                            int arv = accumZoomVec(fp, blocks, tid, pos, end2, N, out + (size_t)b*N, &cov);
+                            destroyBWOverlapBlock(blocks);
+                            if(arv) return 3;   //vector fork: I/O/OOM mid-zoom-stat -> fail, don't return partial sums
+                        }
+                        if(type == mean) {
+                            if(cov > 0.0) for(c=0;c<N;c++) out[(size_t)b*N+c] /= cov;
+                            else          for(c=0;c<N;c++) out[(size_t)b*N+c] = strtod("NaN", NULL);
+                        }
+                        pos = end2;
+                    }
+                    return 0;
+                }
+            }
+        }
+    }
+
+    pos = start;
+    for(b=0; b<nBins; b++) {
+        end2 = start + (uint64_t)(((double)(end-start)*(b+1))/((double) nBins));
+        for(c=0; c<N; c++) out[(size_t)b*N + c] = 0.0;
+        ints = bwGetOverlappingIntervalsVec(fp, chrom, pos, end2);
+        if(ints && ints->l) {
+            double cov = 0.0;
+            for(i=0; i<ints->l; i++) {
+                uint64_t s = ints->start[i], e = ints->end[i];
+                if(s < pos) s = pos;
+                if(e > end2) e = end2;
+                if(e <= s) continue;
+                double ov = (double)(e - s);
+                cov += ov;
+                for(c=0; c<N; c++) out[(size_t)b*N + c] += ov * (double) ints->value[(size_t)i*N + c];
+            }
+            if(type == mean) {
+                if(cov > 0.0) for(c=0; c<N; c++) out[(size_t)b*N + c] /= cov;
+                else          for(c=0; c<N; c++) out[(size_t)b*N + c] = strtod("NaN", NULL);
+            }
+        } else if(type == mean) {
+            for(c=0; c<N; c++) out[(size_t)b*N + c] = strtod("NaN", NULL);
+        }
+        if(ints) bwDestroyOverlappingIntervalsVec(ints);
+        pos = end2;
+    }
+    return 0;
+}

@@ -78,6 +78,8 @@ typedef void CURL;
 #define BIGWIG_MAGIC 0x888FFC26
 /*! @brief The magic number of a 64-bit-coordinate bigWig (this non-standard fork only). */
 #define BIGWIG64_MAGIC 0x888FFC64
+/*! @brief The magic number of a 64-bit-coordinate VECTOR bigWig (N floats/record; this fork only). See VECTOR_FORMAT.md. */
+#define BIGWIG64VEC_MAGIC 0x888FFC65
 /*!
  * The magic number of a bigBed file.
  */
@@ -217,6 +219,7 @@ typedef struct {
     bwWriteBuffer_t *writeBuffer; /**<The buffer used for writing.*/
     int isWrite; /**<0: Opened for reading, 1: Opened for writing.*/
     int type; /**<0: bigWig, 1: bigBed.*/
+    uint32_t vecN; /**<64-bit vector fork: 0 = scalar, >=1 = N float components per record*/
 } bigWigFile_t;
 
 /*!
@@ -229,6 +232,19 @@ typedef struct {
     uint64_t *end; /**<The end positions (0-based half open) (64-bit fork)*/
     float *value; /**<The value associated with each position*/
 } bwOverlappingIntervals_t;
+
+/*!
+ * @brief Holds interval:vector associations (64-bit vector fork).
+ * value is l*N flattened: interval i, component c at value[i*N + c].
+ */
+typedef struct {
+    uint64_t l; /**<Number of intervals held*/
+    uint64_t m; /**<Capacity in intervals*/
+    uint64_t *start; /**<Start positions (0-based half open)*/
+    uint64_t *end; /**<End positions (0-based half open)*/
+    float *value; /**<l*N floats, flattened (value[i*N + c])*/
+    uint32_t N; /**<Components per interval*/
+} bwOverlappingIntervalsVec_t;
 
 /*!
  * @brief Holds interval:str associations
@@ -370,6 +386,14 @@ void bbDestroyOverlappingEntries(bbOverlappingEntries_t *o);
  * @see bwGetValues
  */
 bwOverlappingIntervals_t *bwGetOverlappingIntervals(bigWigFile_t *fp, const char *chrom, uint64_t start, uint64_t end);
+
+//64-bit vector fork: N-float vector bigWig (see VECTOR_FORMAT.md). values are n*N flattened (interval i, component c at [i*N+c]).
+int bwCreateHdrVec(bigWigFile_t *fp, int32_t maxZooms, uint32_t N);
+int bwAddIntervalsVec(bigWigFile_t *fp, const char* const* chrom, const uint64_t *start, const uint64_t *end, const float *values, uint32_t n);
+int bwAppendIntervalsVec(bigWigFile_t *fp, const uint64_t *start, const uint64_t *end, const float *values, uint32_t n);
+bwOverlappingIntervalsVec_t *bwGetOverlappingIntervalsVec(bigWigFile_t *fp, const char *chrom, uint64_t start, uint64_t end);
+void bwDestroyOverlappingIntervalsVec(bwOverlappingIntervalsVec_t *o);
+int bwStatsVec(bigWigFile_t *fp, const char *chrom, uint64_t start, uint64_t end, uint32_t nBins, enum bwStatsType type, double *out);
 
 /*!
  * @brief Return bigBed entries overlapping an interval.
