@@ -21,6 +21,7 @@
 #include "tui.h"
 #include "gerp.h"
 #include "sonLib.h"
+#include "bigWig.h"   // in-tree 64-bit universal-depth bigWig writer (--bigwig)
 #include <unistd.h>
 #include <ctype.h>
 #include <getopt.h>
@@ -121,11 +122,10 @@ typedef struct {
     uint8_t      *leaf_csets;
 } GerpThreadState;
 
-// The wig is keyed on the raw universal column [0,T), 2e9-CHUNKED into chroms
-// uni<c/TUI_UNI_CHUNK> at position c%TUI_UNI_CHUNK (0-based for the --bin
-// bedGraph, 1-based for the per-column wig; see TUI_UNI_CHUNK in tui.h; the
-// --bin bedGraph matches the `taffy lift --bigwig` reader).  2e9 < 2^31 keeps
-// every chunk a buildable signed-32-bit wigToBigWig chrom, so there is no T
+// The wig is keyed on the raw universal column [0,T) on a single 64-bit axis,
+// emitted as chrom uni0 (0-based for the --bin bedGraph, 1-based for the
+// per-column wig; the --bin bedGraph matches the `taffy lift --bigwig` reader).
+// The 64-bit libBigWig fork stores absolute columns directly, so there is no T
 // limit.  Requires the .tui (for T / column coords).
 
 // Emit one `variableStep chrom=<chrom>` header to the rs and/or depth buffer.
@@ -143,27 +143,107 @@ static void gerp_emit_wig_header(GerpBlockResult *res, const char *chrom,
     }
 }
 
-// --bin integer coords: write one binned bedGraph line for the mean depth over
-// the bin's columns.  The bin spans global universal columns [bin*N, bin*N+cnt);
-// it is emitted 2e9-CHUNKED into chrom uni<chunk>, 0-based local position
-// [start, start+cnt), where chunk = (bin*N)/TUI_UNI_CHUNK and start = (bin*N) %
-// TUI_UNI_CHUNK.  Because TUI_UNI_CHUNK is a multiple of N (enforced at parse) no
-// bin straddles a chunk boundary, so the whole bin lives in one chunk and
-// start+cnt <= TUI_UNI_CHUNK < 2^31.  This matches the `taffy lift --bigwig`
-// reader, which does chunk=col/TUI_UNI_CHUNK, base=chunk*TUI_UNI_CHUNK and treats
-// the stored coords as 0-based.  The column axis is monotone, so this runs off
-// the Phase-C running binner (already sorted, no external sort).  Drops
+// ---- In-tree 64-bit universal-depth bigWig writer (single chrom uni0) -------
+// Writes the binned depth DIRECTLY as a 64-bit bigWig on the single uni0 axis
+// [0,T), replacing the external 32-bit `wigToBigWig` step (which cannot hold a
+// >2^31 universal axis and is anyway misparsed by the 64-bit lift reader).
+// Intervals arrive from the Phase-C running binner already sorted and
+// non-overlapping; they are batched and streamed via the fork's
+// bwAddIntervals (first batch) / bwAppendIntervals (rest).
+#define UNIBW_BATCH 65536
+typedef struct {
+    bigWigFile_t *bw;
+    const char  **chroms;   // UNIBW_BATCH pointers, all "uni0"
+    uint64_t     *starts;
+    uint64_t     *ends;
+    float        *values;
+    int           n;        // entries buffered in the current batch
+    bool          wrote;    // first batch -> bwAddIntervals, later -> bwAppend
+} UniBW;
+
+static UniBW *unibw_open(const char *path, int64_t T) {
+    if (bwInit(1 << 17) != 0) {
+        fprintf(stderr, "taffy depth: bwInit failed (--bigwig)\n");
+        return NULL;
+    }
+    bigWigFile_t *bw = bwOpen((char *) path, NULL, "w");
+    if (bw == NULL) {
+        fprintf(stderr, "taffy depth: cannot open --bigwig file: %s\n", path);
+        bwCleanup();
+        return NULL;
+    }
+    if (bwCreateHdr(bw, 10)) {   // 10 zoom levels for browser zoom-out
+        fprintf(stderr, "taffy depth: bwCreateHdr failed (--bigwig)\n");
+        bwClose(bw); bwCleanup(); return NULL;
+    }
+    const char *cn[1] = { "uni0" };
+    uint64_t    cl[1] = { (uint64_t) T };       // single axis, length T (= --sizes)
+    bw->cl = bwCreateChromList(cn, cl, 1);
+    if (bw->cl == NULL || bwWriteHdr(bw)) {
+        fprintf(stderr, "taffy depth: bwWriteHdr failed (--bigwig)\n");
+        bwClose(bw); bwCleanup(); return NULL;
+    }
+    UniBW *u  = st_calloc(1, sizeof(UniBW));
+    u->bw     = bw;
+    u->chroms = st_malloc(UNIBW_BATCH * sizeof(char *));
+    for (int i = 0; i < UNIBW_BATCH; i++) u->chroms[i] = "uni0";
+    u->starts = st_malloc(UNIBW_BATCH * sizeof(uint64_t));
+    u->ends   = st_malloc(UNIBW_BATCH * sizeof(uint64_t));
+    u->values = st_malloc(UNIBW_BATCH * sizeof(float));
+    u->n = 0; u->wrote = false;
+    return u;
+}
+
+static int unibw_flush(UniBW *u) {
+    if (u->n == 0) return 0;
+    int rv = u->wrote
+        ? bwAppendIntervals(u->bw, u->starts, u->ends, u->values, (uint32_t) u->n)
+        : bwAddIntervals(u->bw, u->chroms, u->starts, u->ends, u->values, (uint32_t) u->n);
+    u->wrote = true;
+    u->n = 0;
+    if (rv) fprintf(stderr, "taffy depth: bwAdd/AppendIntervals failed (--bigwig)\n");
+    return rv;
+}
+
+static int unibw_add(UniBW *u, int64_t start, int64_t end, float value) {
+    if (u->n == UNIBW_BATCH && unibw_flush(u)) return 1;
+    u->starts[u->n] = (uint64_t) start;
+    u->ends[u->n]   = (uint64_t) end;
+    u->values[u->n] = value;
+    u->n++;
+    return 0;
+}
+
+static int unibw_close(UniBW *u) {
+    if (u == NULL) return 0;
+    int rv = unibw_flush(u);
+    bwClose(u->bw);
+    bwCleanup();
+    free(u->chroms); free(u->starts); free(u->ends); free(u->values);
+    free(u);
+    return rv;
+}
+
+// --bin integer coords: emit one binned record for the mean depth over the bin's
+// columns to the bedGraph text (--depth, %.4g) and/or the 64-bit bigWig
+// (--bigwig, float mean) -- either output may be NULL.  The bin spans absolute
+// universal columns [bin*N, bin*N+cnt) on chrom uni0 at 0-based [start, start+cnt),
+// matching the `taffy lift --bigwig` reader.  The column axis is monotone, so this
+// runs off the Phase-C running binner (already sorted, no external sort).  Drops
 // all-unscored bins (awk parity).
-static void gerp_flush_bin(LW *dout, int64_t bin, int64_t sum, int64_t cnt,
-                           int64_t bin_size) {
+static void gerp_flush_bin(LW *dout, UniBW *ubw, int64_t bin, int64_t sum,
+                           int64_t cnt, int64_t bin_size) {
     if (sum <= 0 || cnt <= 0) return;
-    int64_t start  = bin * bin_size;                 // global universal column
-    int64_t chunk  = start / TUI_UNI_CHUNK;          // 2e9-chunk index
-    int64_t lstart = start - chunk * TUI_UNI_CHUNK;   // 0-based local position
-    char line[96];
-    int n = snprintf(line, sizeof line, "uni%" PRId64 "\t%" PRId64 "\t%" PRId64 "\t%.4g\n",
-                     chunk, lstart, lstart + cnt, (double)sum / (double)cnt);
-    LW_putn(dout, line, (size_t)n);
+    int64_t start = bin * bin_size;                  // absolute universal column [0,T)
+    int64_t end   = start + cnt;
+    double  mean  = (double) sum / (double) cnt;
+    if (dout != NULL) {
+        char line[96];
+        int n = snprintf(line, sizeof line, "uni0\t%" PRId64 "\t%" PRId64 "\t%.4g\n",
+                         start, end, mean);
+        LW_putn(dout, line, (size_t) n);
+    }
+    if (ubw != NULL) unibw_add(ubw, start, end, (float) mean);
 }
 
 static void score_one_block(const GerpTree *gt, GerpThreadState *ts,
@@ -220,8 +300,7 @@ static void score_one_block(const GerpTree *gt, GerpThreadState *ts,
     // column is actually written -- so a block with no scored column (all
     // < min_leaves, common for ancestor-heavy universal-MAF blocks) writes
     // NOTHING rather than a dangling empty header (which wigToBigWig rejects).
-    // The per-base integer wig keys on the chunked "uni<chunk>" chrom; one
-    // block lies wholly within one chunk (blocks are << 2e9 columns), so a
+    // The per-base integer wig keys on the single 64-bit chrom "uni0", so a
     // single lazy header per block is correct.  rs and depth trigger on the
     // same column, so their (chrom,pos) structure stays byte-identical
     // (gerp-stats invariant).  No --rs leaves the rs buffer empty.
@@ -269,8 +348,8 @@ static void score_one_block(const GerpTree *gt, GerpThreadState *ts,
             // and drops a bin with no scored column.  The block's columns are
             // contiguous, so the touched bins form one contiguous range
             // [bin_first, bin_first+bin_n).  bin is the GLOBAL universal-column
-            // bin index over [0,T); the 2e9 chunk split happens only at emit
-            // time in gerp_flush_bin.
+            // bin index over [0,T); gerp_flush_bin emits it on the single uni0
+            // axis at absolute columns.
             int64_t bin = (block_start_col + col) / bin_size;
             if (res->bin_n == 0) {
                 res->bin_first  = bin;
@@ -291,17 +370,12 @@ static void score_one_block(const GerpTree *gt, GerpThreadState *ts,
             if (scored) { res->bin_sum[idx] += depth; res->cols_scored++; }
             res->bin_cnt[idx]++;   // every column -> bin-mean denominator
         } else if (scored) {
-            // Integer universal-column wig, 2e9-CHUNKED: chrom uni<chunk>,
-            // 1-based local position (gcol % TUI_UNI_CHUNK)+1.  A block is far
-            // smaller than 2e9 columns, so it lies wholly within one chunk and
-            // the single lazy header per block names the right chunk.
+            // Integer universal-column wig on the single 64-bit axis: chrom uni0,
+            // 1-based absolute position gcol+1.
             int64_t gcol  = block_start_col + col;
-            int64_t chunk = gcol / TUI_UNI_CHUNK;
-            int64_t wig_pos = (gcol - chunk * TUI_UNI_CHUNK) + 1;  // 1-based local
+            int64_t wig_pos = gcol + 1;  // 1-based absolute column
             if (!hdr_emitted) {
-                char uchrom[24];
-                snprintf(uchrom, sizeof uchrom, "uni%" PRId64, chunk);
-                gerp_emit_wig_header(res, uchrom, !depth_only, want_depth);
+                gerp_emit_wig_header(res, "uni0", !depth_only, want_depth);
                 hdr_emitted = true;
             }
             if (!depth_only) gerpbuf_put_score(&res->rs, wig_pos, rs, 4);
@@ -329,13 +403,15 @@ static void usage(void) {
     fprintf(stderr, "Outputs -- at least one required, each opt-in:\n");
     fprintf(stderr, "  --depth FILE : Per-column (or --bin binned) count of non-gap leaves at each column.\n");
     fprintf(stderr, "  --rs FILE    : Per-column GERP RS conservation score (Hartigan tree walk).  Needs a tree.\n");
-    fprintf(stderr, "Output is on the UNIVERSAL-COLUMN axis: the raw column [0,T) 2e9-chunked into chroms\n");
-    fprintf(stderr, "  uni0,uni1,... at 0-based (bedGraph) / 1-based (per-column wig) position c%%2e9.  Monotone\n");
-    fprintf(stderr, "  (already sorted; no downstream sort/merge) and never exceeds a 32-bit wig coord.  Requires .tui.\n");
-    fprintf(stderr, "--bin N : Emit --depth as a ready-to-use binned bedGraph (mean depth per N-bp bin) instead of\n");
-    fprintf(stderr, "          per-column.  N must divide 2e9 (so no bin straddles a chunk).  Only bins --depth (not --rs).\n");
-    fprintf(stderr, "--sizes FILE : Also write the chrom-sizes file for the chunked uni axis (uni0..uniK from T),\n");
-    fprintf(stderr, "          ready for `wigToBigWig --depth.bg --sizes out.bw`.  Requires .tui.\n");
+    fprintf(stderr, "Output is on the UNIVERSAL-COLUMN axis: the raw column [0,T) on a single 64-bit chrom\n");
+    fprintf(stderr, "  uni0 at 0-based (bedGraph) / 1-based (per-column wig) absolute position c.  Monotone\n");
+    fprintf(stderr, "  (already sorted; no downstream sort/merge).  Requires the 64-bit libBigWig fork + .tui.\n");
+    fprintf(stderr, "--bin N : Emit the binned depth (mean depth per N-bp bin) instead of per-column.  Bins\n");
+    fprintf(stderr, "          --depth and/or --bigwig (not --rs).\n");
+    fprintf(stderr, "--bigwig FILE : Write the binned depth DIRECTLY as a 64-bit bigWig on the single uni0\n");
+    fprintf(stderr, "          axis (in-tree, no external wigToBigWig -- which is 32-bit and cannot hold a\n");
+    fprintf(stderr, "          >2^31 axis).  This is the file `taffy lift --bigwig` reads.  Requires --bin.\n");
+    fprintf(stderr, "--sizes FILE : Also write the chrom-sizes file for the single uni0 axis (uni0 = T).\n");
     fprintf(stderr, "-c --useCompression : Bgzip the output(s).\n");
     fprintf(stderr, "-t --tree : Newick tree override.  Default: the `# hal` tree comment in the input header.\n");
     fprintf(stderr, "   --columnRange LO-HI : Restrict to a universal-column range (half-open, 0-based; HI <= T\n");
@@ -365,6 +441,7 @@ enum {
     OPT_DEPTH,
     OPT_SIZES,
     OPT_BIN,
+    OPT_BIGWIG,
 };
 
 static int parse_paralog_policy(const char *s, GerpParalogPolicy *out) {
@@ -384,7 +461,8 @@ int taf_depth_main(int argc, char *argv[]) {
     char *depthFile      = NULL;   // --depth : leaf-depth wig (opt-in)
     char *treeFile       = NULL;
     char *columnRangeArg = NULL;
-    char *sizesFile      = NULL;   // --sizes : chrom-sizes for the chunked uni axis
+    char *sizesFile      = NULL;   // --sizes : chrom-size for the single uni0 axis
+    char *bigwigFile     = NULL;   // --bigwig: in-tree 64-bit depth bigWig (single uni0 axis)
     bool use_compression = false;
     double branch_scale  = 1.0;
     int64_t min_leaves   = 2;
@@ -409,6 +487,7 @@ int taf_depth_main(int argc, char *argv[]) {
             { "keepParalogs",   no_argument,       0, OPT_KEEP_PARALOGS },
             { "threads",        required_argument, 0, 'T' },
             { "bin",            required_argument, 0, OPT_BIN },
+            { "bigwig",         required_argument, 0, OPT_BIGWIG },
             { "help",           no_argument,       0, 'h' },
             { 0, 0, 0, 0 }
         };
@@ -437,6 +516,7 @@ int taf_depth_main(int argc, char *argv[]) {
             case OPT_KEEP_PARALOGS: paralog_policy = GERP_PARALOG_FIRST; break;
             case OPT_COLUMN_RANGE:  columnRangeArg = optarg; break;
             case OPT_BIN:           bin_size       = atoll(optarg); break;
+            case OPT_BIGWIG:        bigwigFile     = optarg; break;
             case 'h': usage(); return 0;
             default:  usage(); return 1;
         }
@@ -506,9 +586,16 @@ int taf_depth_main(int argc, char *argv[]) {
     }
     st_logInfo("taffy depth: tree has %" PRIi64 " leaves\n", gerp_tree_n_leaves(gt));
 
-    // At least one output must be requested -- each is opt-in.
-    if (rsFile == NULL && depthFile == NULL) {
-        fprintf(stderr, "taffy depth: need at least one output -- pass --rs FILE and/or --depth FILE\n");
+    // At least one output must be requested -- each is opt-in.  --bigwig is a
+    // binned-depth output too (the in-tree 64-bit writer), so it counts.
+    if (rsFile == NULL && depthFile == NULL && bigwigFile == NULL) {
+        fprintf(stderr, "taffy depth: need at least one output -- pass --rs FILE, --depth FILE and/or --bigwig FILE\n");
+        return 1;
+    }
+    // --bigwig writes the BINNED depth directly as a 64-bit bigWig, so it requires
+    // --bin (the bigWig stores per-bin mean depth on the single uni0 axis).
+    if (bigwigFile != NULL && bin_size <= 0) {
+        fprintf(stderr, "taffy depth: --bigwig requires --bin N (it writes the binned depth)\n");
         return 1;
     }
     if (bin_size < 0) {
@@ -517,27 +604,19 @@ int taf_depth_main(int argc, char *argv[]) {
     }
     if (bin_size > 0) {
         // --bin bins the leaf-depth output (mean depth per bin).  It does not
-        // bin RS, so require --depth and forbid --rs.
-        if (depthFile == NULL) {
-            fprintf(stderr, "taffy depth: --bin requires --depth FILE (it bins the depth output)\n");
+        // bin RS, so require a binned depth sink (--depth and/or --bigwig) and
+        // forbid --rs.
+        if (depthFile == NULL && bigwigFile == NULL) {
+            fprintf(stderr, "taffy depth: --bin requires --depth FILE and/or --bigwig FILE (it bins the depth output)\n");
             return 1;
         }
         if (rsFile != NULL) {
-            fprintf(stderr, "taffy depth: --bin only bins --depth; drop --rs (or run RS separately)\n");
-            return 1;
-        }
-        // TUI_UNI_CHUNK (2e9) must be a multiple of the bin width so no bin
-        // straddles a chunk boundary -- the per-line chunk selection in
-        // gerp_flush_bin is correct only then (true for N=1000).
-        if (TUI_UNI_CHUNK % bin_size != 0) {
-            fprintf(stderr, "taffy depth: --bin N must divide %lld (the uni-axis chunk size), so no bin\n"
-                            "  straddles a chunk boundary (got N=%lld)\n",
-                    (long long)TUI_UNI_CHUNK, (long long)bin_size);
+            fprintf(stderr, "taffy depth: --bin only bins --depth/--bigwig; drop --rs (or run RS separately)\n");
             return 1;
         }
     }
-    // --sizes writes the chunked uni-axis chrom sizes, derived purely from T; it
-    // needs the .tui (which the universal-column output requires anyway).
+    // --sizes writes the single uni0-axis chrom size (= T), derived purely from
+    // the .tui (which the universal-column output requires anyway).
 
     // Outputs -- each opt-in (validated above: at least one is set).  There is
     // no stdout default; a wig is written only to its named file.
@@ -562,6 +641,7 @@ int taf_depth_main(int argc, char *argv[]) {
         }
         dout = LW_construct(dout_fh, use_compression);
     }
+    UniBW *ubw = NULL;     // --bigwig (opened below, once T is known)
 
     // Per-thread state.  One GerpScratch + entries[] + leaf_csets per
     // worker.  entries[] grows on demand as blocks come in; leaf_csets is
@@ -619,8 +699,7 @@ int taf_depth_main(int argc, char *argv[]) {
         // The --bin path runs a column-monotone running binner, so a shard must
         // begin/end ON bin boundaries -- else its first/last bin is processed
         // mid-bin and two shards emit overlapping records for the boundary bin
-        // (wigToBigWig rejects).  (Combined with TUI_UNI_CHUNK % bin == 0, this
-        // also keeps shard edges on chunk-safe positions.)  HI == T is the lone
+        // (wigToBigWig rejects).  HI == T is the lone
         // exception (the axis end, no shard above it); it is allowed below once
         // T is loaded, since T is rarely bin-aligned (e.g. 577 T % 1000 == 721).
         if (bin_size > 0 && lo % bin_size != 0) {
@@ -631,10 +710,11 @@ int taf_depth_main(int argc, char *argv[]) {
         }
     }
 
-    // The output is the universal-column axis (chunked uni0..uniK), which needs
+    // The output is the universal-column axis (single chrom uni0), which needs
     // T and the per-block column coords from the .tui -- so the .tui is ALWAYS
     // required.  Load it once up front.
     Tui *tui = NULL;
+    int64_t T = 0;   // total universal columns = single uni0 axis length; set once below
     {
         if (inputFile == NULL) {
             fprintf(stderr, "taffy depth: requires -i <file> with a .tui index (cannot index stdin)\n");
@@ -656,7 +736,7 @@ int taf_depth_main(int argc, char *argv[]) {
         free(tui_fn);
         st_logInfo("taffy depth: loaded .tui index (universal MAF mode)\n");
 
-        int64_t T = tui_total_columns(tui);
+        T = tui_total_columns(tui);
         if (have_col_range) {
             if (col_range_iv.end > T) {
                 fprintf(stderr, "taffy depth: --columnRange %" PRIi64 "-%" PRIi64
@@ -677,42 +757,43 @@ int taf_depth_main(int argc, char *argv[]) {
             st_logInfo("taffy depth: column-range mode, [%" PRIi64 ", %" PRIi64 ") of T=%" PRIi64 "\n",
                        col_range_iv.start, col_range_iv.end, T);
         }
-        st_logInfo("taffy depth: universal-column output, chunked uni0..uni%" PRIi64
-                   " (CHUNK=%lld), T=%" PRIi64 "\n",
-                   T ? (T - 1) / TUI_UNI_CHUNK : 0, (long long)TUI_UNI_CHUNK, T);
+        st_logInfo("taffy depth: universal-column output, single axis uni0, T=%" PRIi64 "\n", T);
 
-        // --sizes: emit the chunked uni-axis chrom-sizes file (a pure function of
-        // T and TUI_UNI_CHUNK; no block scan).  Full chunks = 2e9, last = T mod
-        // 2e9; if T is an exact multiple, the last chunk is uni{K-1} (NO trailing
-        // zero-length chunk -- wigToBigWig rejects a 0-size chrom).  T == 0 -> no
-        // lines.  Ready for `wigToBigWig out.bg out.sizes out.bw`.
+        // --sizes: emit the single uni0-axis chrom-sizes file (one line: uni0 T),
+        // a pure function of T (no block scan).  T == 0 -> no lines.  Ready for
+        // `wigToBigWig out.bg out.sizes out.bw`.
         if (sizesFile != NULL) {
             FILE *sf = fopen(sizesFile, "w");
             if (sf == NULL) {
                 fprintf(stderr, "taffy depth: cannot open --sizes file: %s\n", sizesFile);
                 return 1;
             }
-            if (T > 0) {
-                int64_t nchunks = (T + TUI_UNI_CHUNK - 1) / TUI_UNI_CHUNK;  // ceil
-                for (int64_t k = 0; k < nchunks; k++) {
-                    int64_t size_k = (k < nchunks - 1)
-                                     ? TUI_UNI_CHUNK
-                                     : (T - (nchunks - 1) * TUI_UNI_CHUNK);
-                    fprintf(sf, "uni%" PRIi64 "\t%" PRIi64 "\n", k, size_k);
-                }
-            }
+            if (T > 0) fprintf(sf, "uni0\t%" PRIi64 "\n", T);
             fclose(sf);
             st_logInfo("taffy depth: wrote uni-axis sizes to %s\n", sizesFile);
         }
+    }
+
+    // --bigwig: open the in-tree 64-bit depth bigWig now that T (the single
+    // uni0 axis length) is known.  Requires --bin (validated above), so the
+    // Phase-C running binner drives unibw_add via gerp_flush_bin.  NB: under
+    // --columnRange (SLURM sharding) each shard writes only its column slice;
+    // merging per-shard bigWigs is a separate step (the whole-axis run needs no
+    // merge).
+    if (bigwigFile != NULL) {
+        ubw = unibw_open(bigwigFile, T);
+        if (ubw == NULL) return 1;   // unibw_open already reported the reason
+        st_logInfo("taffy depth: writing 64-bit depth bigWig to %s (single uni0 axis, T=%" PRIi64 ")\n",
+                   bigwigFile, T);
     }
 
     // One pass: column-range mode (a direct column-slice iterator) or whole-file
     // streaming (tui_it == NULL).  Empty column-range -> 0 iterations (a success
     // no-op for a SLURM shard that ended up with a zero slice).
     // --bin running binner: depth accumulates across blocks (in column order)
-    // into the current universal-column bin; emitted (chunked) when the bin
-    // advances.  The bin index is GLOBAL over [0,T); the 2e9-chunk split happens
-    // only at emit time in gerp_flush_bin.
+    // into the current universal-column bin; emitted when the bin advances.  The
+    // bin index is GLOBAL over [0,T); gerp_flush_bin emits on the single uni0
+    // axis at absolute columns.
     int64_t cur_bin = -1, cur_sum = 0, cur_cnt = 0;
 
     int64_t n_iter = empty_col_range ? 0 : 1;
@@ -832,12 +913,12 @@ int taf_depth_main(int argc, char *argv[]) {
                 if (bin_size > 0) {
                     // --bin: columns are monotone, so merge this block's per-bin
                     // partials into the running binner (the boundary bin is shared
-                    // with the previous block) and flush (chunked) when the GLOBAL
-                    // bin index advances.  Output is already sorted.
+                    // with the previous block) and flush when the GLOBAL bin index
+                    // advances.  Output is already sorted.
                     for (int64_t k = 0; k < r->bin_n; k++) {
                         int64_t bin = r->bin_first + k;
                         if (bin != cur_bin) {
-                            gerp_flush_bin(dout, cur_bin, cur_sum, cur_cnt, bin_size);
+                            gerp_flush_bin(dout, ubw, cur_bin, cur_sum, cur_cnt, bin_size);
                             cur_bin = bin; cur_sum = 0; cur_cnt = 0;
                         }
                         cur_sum += r->bin_sum[k];
@@ -878,7 +959,7 @@ int taf_depth_main(int argc, char *argv[]) {
     // Flush the last --bin bin (the running binner has no successor block to
     // trigger it).
     if (bin_size > 0)
-        gerp_flush_bin(dout, cur_bin, cur_sum, cur_cnt, bin_size);
+        gerp_flush_bin(dout, ubw, cur_bin, cur_sum, cur_cnt, bin_size);
 
     if (tui != NULL) tui_destruct(tui);
 
@@ -917,6 +998,9 @@ int taf_depth_main(int argc, char *argv[]) {
     if (dout != NULL) {
         LW_destruct(dout, false);
         if (depthFile != NULL) fclose(dout_fh);
+    }
+    if (ubw != NULL) {                 // --bigwig: flush final batch + finalize index
+        if (unibw_close(ubw) != 0) fatal = 1;
     }
     return fatal;
 }

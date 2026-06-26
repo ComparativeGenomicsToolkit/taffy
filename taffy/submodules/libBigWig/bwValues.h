@@ -22,9 +22,9 @@ typedef struct bwRTreeNode_t {
     //1 byte of padding
     uint16_t nChildren; /**<The number of children of this node, all lists have this length.*/
     uint32_t *chrIdxStart; /**<A list of the starting chromosome indices of each child.*/
-    uint32_t *baseStart; /**<A list of the start position of each child.*/
+    uint64_t *baseStart; /**<A list of the start position of each child. (64-bit fork: positions widened)*/
     uint32_t *chrIdxEnd; /**<A list of the end chromosome indices of each child.*/
-    uint32_t *baseEnd; /**<A list of the end position of each child.*/
+    uint64_t *baseEnd; /**<A list of the end position of each child. (64-bit fork: positions widened)*/
     uint64_t *dataOffset; /**<For leaves, the offset to the on-disk data. For twigs, the offset to the child node.*/
     union {
         uint64_t *size; /**<Leaves only: The size of the data block.*/
@@ -40,9 +40,9 @@ typedef struct {
     uint32_t blockSize; /**<The maximum number of children a node can have*/
     uint64_t nItems; /**<The total number of data blocks pointed to by the tree. This is completely redundant.*/
     uint32_t chrIdxStart; /**<The index to the first chromosome described.*/
-    uint32_t baseStart; /**<The first position on chrIdxStart with a value.*/
+    uint64_t baseStart; /**<The first position on chrIdxStart with a value. (64-bit fork)*/
     uint32_t chrIdxEnd; /**<The index of the last chromosome with an entry.*/
-    uint32_t baseEnd; /**<The last position on chrIdxEnd with an entry.*/
+    uint64_t baseEnd; /**<The last position on chrIdxEnd with an entry. (64-bit fork)*/
     uint64_t idxSize; /**<This is actually the offset of the index rather than the size?!? Yes, it's completely redundant.*/
     uint32_t nItemsPerSlot; /**<This is always 1!*/
     //There's 4 bytes of padding in the file here
@@ -66,8 +66,8 @@ typedef struct {
  */
 typedef struct {
     uint32_t tid; /**<The chromosome ID.*/
-    uint32_t start; /**<The start position of a block*/
-    uint32_t end; /**<The end position of a block*/
+    uint64_t start; /**<The start position of a block (64-bit fork: position widened)*/
+    uint64_t end; /**<The end position of a block (64-bit fork: position widened)*/
     uint32_t step; /**<The step size of the values*/
     uint32_t span; /**<The span of each data value*/
     uint8_t type; /**<The block type: 1, bedGraph; 2, variable step; 3, fixed step.*/

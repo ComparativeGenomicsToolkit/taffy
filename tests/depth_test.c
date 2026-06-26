@@ -317,9 +317,8 @@ static void test_depth_requires_output(CuTest *tc) {
     CuAssertTrue(tc, rc != 0);
 }
 
-// Universal-column output: 2e9-chunked chroms uni0,uni1,... monotone 4-col
-// bedGraph; needs a .tui.  evolverMammals (T << 2e9) all lands in chunk uni0.
-// Also exercises --sizes (uni0\t<size>).
+// Universal-column output: single 64-bit chrom uni0, monotone 4-col bedGraph;
+// needs a .tui.  Also exercises --sizes (uni0\t<size>).
 static void test_depth_integer_coords_cli(CuTest *tc) {
     const char *maf = "./tests/evolverMammals.maf";
     st_system("rm -f %s.tui ./tests/depth.int.bg ./tests/depth.int.sizes", maf);  // clean slate
@@ -327,75 +326,20 @@ static void test_depth_integer_coords_cli(CuTest *tc) {
     int rc = st_system("./bin/taffy depth -i %s --bin 1000 "
                        "--depth ./tests/depth.int.bg >/dev/null 2>&1", maf);
     CuAssertTrue(tc, rc != 0);
-    // Build the universal index, then --bin emits chunked chroms uni0,uni1,...
+    // Build the universal index, then --bin emits the single chrom uni0.
     CuAssertIntEquals(tc, 0, st_system("./bin/taffy index -i %s -u", maf));
     rc = st_system("./bin/taffy depth -i %s --bin 1000 "
                    "--minLeaves 1 --depth ./tests/depth.int.bg "
                    "--sizes ./tests/depth.int.sizes", maf);
     CuAssertIntEquals(tc, 0, rc);
     CuAssertIntEquals(tc, 0, st_system(
-        "awk '$1!~/^uni[0-9]+$/||NF!=4||$3<=$2{exit 1}' ./tests/depth.int.bg"));
-    // --sizes lists at least uni0 with a positive size; evolverMammals fits one chunk.
+        "awk '$1!~/^uni0$/||NF!=4||$3<=$2{exit 1}' ./tests/depth.int.bg"));
+    // --sizes lists uni0 with a positive size (the single axis).
     CuAssertIntEquals(tc, 0, st_system("test -s ./tests/depth.int.sizes"));
     CuAssertIntEquals(tc, 0, st_system(
-        "awk '$1!~/^uni[0-9]+$/||NF!=2||$2<=0{exit 1}' ./tests/depth.int.sizes"));
+        "awk '$1!~/^uni0$/||NF!=2||$2<=0{exit 1}' ./tests/depth.int.sizes"));
     CuAssertIntEquals(tc, 0, st_system("grep -q '^uni0\t' ./tests/depth.int.sizes"));
     st_system("rm -f %s.tui ./tests/depth.int.bg ./tests/depth.int.sizes", maf);
-}
-
-// Regression test for the 2e9 chunk-boundary straddle bug in `taffy lift
-// --bigwig`: a tui_query interval crossing a chunk boundary must be split into
-// per-chunk pieces with the source (t_start/rev) mapping preserved, so the lift
-// fetches each chunk fully instead of silently dropping post-boundary columns.
-static void test_tui_split_intervals_on_chunks(CuTest *tc) {
-    const int64_t C = 1000;   // small chunk for readability
-    int64_t no = -1;
-
-    // nothing straddles -> NULL (caller keeps its array, no copy)
-    TuiInterval a[] = { {0, 500, 100, 0}, {1000, 1500, 200, 0} };
-    CuAssertPtrEquals(tc, NULL, tui_split_intervals_on_chunks(a, 2, C, &no));
-
-    // forward interval [900,1100) (t_start 900) -> [900,1000)@900 + [1000,1100)@1000
-    TuiInterval b[] = { {900, 1100, 900, 0} };
-    TuiInterval *o = tui_split_intervals_on_chunks(b, 1, C, &no);
-    CuAssertPtrNotNull(tc, o);
-    CuAssertTrue(tc, no == 2);
-    CuAssertTrue(tc, o[0].start==900  && o[0].end==1000 && o[0].t_start==900  && o[0].rev==0);
-    CuAssertTrue(tc, o[1].start==1000 && o[1].end==1100 && o[1].t_start==1000 && o[1].rev==0);
-    free(o);
-
-    // reverse interval [900,1100) (t_start 5000, G descends): the pieces must keep
-    // col->G, e.g. col 1050 -> 5000-(1050-900)=4850 via either the whole interval
-    // or the second piece -- the exact thing the straddle bug got wrong.
-    TuiInterval c[] = { {900, 1100, 5000, 1} };
-    o = tui_split_intervals_on_chunks(c, 1, C, &no);
-    CuAssertTrue(tc, no == 2);
-    CuAssertTrue(tc, o[0].start==900  && o[0].t_start==5000 && o[0].rev==1);
-    CuAssertTrue(tc, o[1].start==1000 && o[1].t_start==4900 && o[1].rev==1);
-    CuAssertTrue(tc, o[1].t_start - (1050 - o[1].start) == 5000 - (1050 - 900));
-    free(o);
-
-    // spans three chunks: [500,2500) forward -> 3 pieces, t_start = column offset
-    TuiInterval d[] = { {500, 2500, 0, 0} };
-    o = tui_split_intervals_on_chunks(d, 1, C, &no);
-    CuAssertTrue(tc, no == 3);
-    CuAssertTrue(tc, o[0].start==500  && o[0].end==1000 && o[0].t_start==0);
-    CuAssertTrue(tc, o[1].start==1000 && o[1].end==2000 && o[1].t_start==500);
-    CuAssertTrue(tc, o[2].start==2000 && o[2].end==2500 && o[2].t_start==1500);
-    free(o);
-
-    // ends exactly on a boundary -> wholly in one chunk -> no split
-    TuiInterval e[] = { {0, 1000, 0, 0} };
-    CuAssertPtrEquals(tc, NULL, tui_split_intervals_on_chunks(e, 1, C, &no));
-
-    // the real 2e9 production chunk size
-    TuiInterval f[] = { {1999999000, 2000001000, 1999999000, 0} };
-    o = tui_split_intervals_on_chunks(f, 1, 2000000000LL, &no);
-    CuAssertTrue(tc, no == 2);
-    CuAssertTrue(tc, o[0].start == 1999999000LL && o[0].end == 2000000000LL);
-    CuAssertTrue(tc, o[1].start == 2000000000LL && o[1].end == 2000001000LL);
-    CuAssertTrue(tc, o[1].t_start == 2000000000LL);   // G at the first uni1 column
-    free(o);
 }
 
 CuSuite* depth_test_suite(void) {
@@ -412,6 +356,5 @@ CuSuite* depth_test_suite(void) {
     SUITE_ADD_TEST(suite, test_char_wrapper_matches_cset);
     SUITE_ADD_TEST(suite, test_depth_requires_output);
     SUITE_ADD_TEST(suite, test_depth_integer_coords_cli);
-    SUITE_ADD_TEST(suite, test_tui_split_intervals_on_chunks);
     return suite;
 }

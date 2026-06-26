@@ -2019,37 +2019,6 @@ stHash *tui_sequence_lengths(Tui *tui) {
     return out;
 }
 
-// Split intervals that cross a chunk boundary (multiple of chunk_size) into
-// per-chunk pieces; the t_start/rev source mapping carries through linearly
-// (forward G ascends with the column, reverse descends, both linear in the
-// column offset from the interval start).  Returns NULL when nothing straddles.
-// See the declaration in tui.h; unit-tested in tests/depth_test.c.
-TuiInterval *tui_split_intervals_on_chunks(const TuiInterval *iv, int64_t n,
-                                           int64_t chunk_size, int64_t *out_n) {
-    int64_t n_extra = 0;
-    for (int64_t m = 0; m < n; m++)
-        n_extra += (iv[m].end - 1) / chunk_size - iv[m].start / chunk_size;
-    if (n_extra <= 0) return NULL;   // no interval straddles -- caller keeps iv
-    TuiInterval *out = st_malloc((size_t)(n + n_extra) * sizeof(TuiInterval));
-    int64_t w = 0;
-    for (int64_t m = 0; m < n; m++) {
-        int64_t cs = iv[m].start, ce = iv[m].end;
-        int64_t c0 = cs / chunk_size, c1 = (ce - 1) / chunk_size;
-        if (c0 == c1) { out[w++] = iv[m]; continue; }
-        for (int64_t c = c0; c <= c1; c++) {
-            int64_t ps = (c == c0) ? cs : c * chunk_size;
-            int64_t pe = (c == c1) ? ce : (c + 1) * chunk_size;
-            TuiInterval piece = iv[m];
-            piece.start = ps; piece.end = pe;
-            piece.t_start = (iv[m].rev == 0) ? iv[m].t_start + (ps - cs)
-                                             : iv[m].t_start - (ps - cs);
-            out[w++] = piece;
-        }
-    }
-    *out_n = w;
-    return out;
-}
-
 // Length of one sequence by full name, via a single binary search of the
 // name-sorted directory.  O(log n_d) seeks, no whole-directory hash.  The
 // targeted form of tui_sequence_lengths -- the blockViz full-chrom-length

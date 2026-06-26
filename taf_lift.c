@@ -25,9 +25,9 @@
 #include <unistd.h>
 #include <stdlib.h>
 
-// The uni<chunk> depth-bigWig axis chunk size (TUI_UNI_CHUNK) is defined in
-// tui.h so the BUILDER (taffy depth) and this READER cannot drift; see the
-// comment there for the 2e9-not-4e9 (signed-32-bit) rationale.
+// The universal-column depth bigWig is on a single 64-bit chrom uni0 (absolute
+// columns [0,T)); the BUILDER (taffy depth) and this READER share that one axis
+// via the 64-bit libBigWig fork -- no 2e9 chunking.
 
 static void usage(void) {
     fprintf(stderr, "taffy lift [options]\n");
@@ -37,7 +37,7 @@ static void usage(void) {
     fprintf(stderr, "-b --bed       [FILE_NAME] : Input BED3+ in ancestor row-0 coords (chrom = full genome.sequence).  Exactly one of -w / -b is required.\n");
     fprintf(stderr, "-g --genome    [STRING]    : REQUIRED Target genome name (e.g. hg38)\n");
     fprintf(stderr, "-o --outputFile [FILE_NAME] : Output (wig if input was wig, BED if input was BED; default stdout)\n");
-    fprintf(stderr, "--bigwig [FILE_NAME]       : QUERY-SHIM mode: read a universal-depth bigWig along a target window and emit it in target-genome coords as an N-bp binned bedGraph.  The bigWig must be on the integer universal-column axis (chroms uni0,uni1,..., 2e9-chunked) produced by `taffy depth --bin N`.  Requires -r and -B; mutually exclusive with -w/-b.\n");
+    fprintf(stderr, "--bigwig [FILE_NAME]       : QUERY-SHIM mode: read a universal-depth bigWig along a target window and emit it in target-genome coords as an N-bp binned bedGraph.  The bigWig must be on the integer universal-column axis (single 64-bit chrom uni0) produced by `taffy depth --bin N`.  Requires -r and -B; mutually exclusive with -w/-b.\n");
     fprintf(stderr, "-r --region    [SEQ:S-E]   : (--bigwig mode) Target window genome.sequence:START-END (0-based half-open), e.g. hg38.chr20:1000000-2000000.\n");
     fprintf(stderr, "-m --memCap    [SIZE]      : (wig mode) Max in-memory output buffer before spilling to disk; suffix K/M/G allowed (default 2G).  Env TAFFY_LIFT_BUDGET_MB also honored (CLI wins).\n");
     fprintf(stderr, "-G --maxGap    [INT]       : (bed mode) Merge two adjacent target rows when the gap between them is <= INT bp.  Default 0 (touch / overlap only).  Max 2^60.  The merged interval spans the un-lifted gap region (no UCSC liftOver / halLiftover analogue).  Downstream tools that count target coverage will overcount by up to INT * number-of-merges.\n");
@@ -1606,8 +1606,8 @@ static int bed_lift_main_impl(Tui *tui, TuiGenomeLift *gl,
 }
 
 // taffy lift --bigwig: the universal-summary query shim.  Given a target leaf
-// window G.chrom:[a,b), read the universal depth (a uni<chunk> bigWig keyed on
-// integer universal columns) along that window and emit it in G coordinates,
+// window G.chrom:[a,b), read the universal depth (a single-chrom uni0 bigWig keyed
+// on integer universal columns) along that window and emit it in G coordinates,
 // binned to N-bp windows.  Because the queried genome is BOTH the source and
 // the target, ONE tui_query gives the whole map -- each interval carries the
 // column<->G-bp correspondence (t_start/rev) -- so there is no second-genome
@@ -1674,12 +1674,19 @@ static int bigwig_lift_window(Tui *tui, const char *bigwig_file,
     int64_t nbins = (b > a) ? (b - a + N - 1) / N : 0;
     double  *bin_sum = nbins ? st_calloc((size_t)nbins, sizeof(double))  : NULL;
     int64_t *bin_len = nbins ? st_calloc((size_t)nbins, sizeof(int64_t)) : NULL;
-    // Axis check: the depth bigWig is the integer universal-column axis -- chroms
-    // named "uni<chunk>" (uni0, uni1, ...; see TUI_UNI_CHUNK in tui.h).  The named
-    // row-0 ancestor axis is no longer produced by `taffy depth`, so a non-uni
-    // chrom is an error rather than a fallback.
+    // Axis check: the depth bigWig is the integer universal-column axis -- a
+    // single 64-bit chrom named "uni0".  The named row-0 ancestor axis is no
+    // longer produced by `taffy depth`, so a non-uni chrom is an error rather
+    // than a fallback.
     bool integer_axis = false;
-    if (bw->cl != NULL && bw->cl->nKeys > 0 && bw->cl->chrom[0] != NULL) {
+    // The single 64-bit axis is exactly ONE chrom named "uni0".  Requiring
+    // nKeys==1 also rejects a pre-1c MULTI-chrom universal bigWig (uni0,uni1,...,
+    // uniK from the old 2e9 chunking): its chrom[0] is "uni0" so a chrom[0]-only
+    // check would pass, then absolute-column queries for columns >=2e9 (which
+    // lived on uni1..uniK) would miss uni0 and silently return a partial-zero
+    // track.  Reject it -- matching the project's "old artifacts must be
+    // regenerated" policy -- rather than miscompute.
+    if (bw->cl != NULL && bw->cl->nKeys == 1 && bw->cl->chrom[0] != NULL) {
         const char *c0 = bw->cl->chrom[0];
         // Require "uni" followed by >=1 digit.  A bare "uni" chrom (no digit)
         // must NOT be taken for the integer axis -- it would synthesize uni0/uni1
@@ -1692,9 +1699,10 @@ static int bigwig_lift_window(Tui *tui, const char *bigwig_file,
     }
     if (!integer_axis) {
         fprintf(stderr, "ERROR: --bigwig expects the integer universal-column axis "
-                "(chroms uni0,uni1,...) produced by `taffy depth --bin N`; "
-                "the first chrom is '%s'.  Named ancestor-coordinate depth bigWigs are no "
-                "longer supported.\n",
+                "(a single 64-bit chrom uni0) produced by `taffy depth --bin N --bigwig`; "
+                "this file has %" PRIi64 " chrom(s), first '%s'.  Standard 32-bit and pre-1c "
+                "multi-chrom (uni0,uni1,...) depth bigWigs are no longer supported -- regenerate.\n",
+                (bw->cl != NULL) ? (int64_t)bw->cl->nKeys : (int64_t)0,
                 (bw->cl != NULL && bw->cl->nKeys > 0 && bw->cl->chrom[0] != NULL)
                     ? bw->cl->chrom[0] : "(none)");
         free(bin_sum); free(bin_len); free(iv);
@@ -1703,18 +1711,7 @@ static int bigwig_lift_window(Tui *tui, const char *bigwig_file,
         return 1;
     }
 
-    // Pre-split any tui interval that crosses a 2e9 chunk boundary so every
-    // interval lies within a single uni<chunk>.  bwGetOverlappingIntervals
-    // queries ONE chrom, and libBigWig SILENTLY CLAMPS an over-range request --
-    // so without this, a straddling interval's post-boundary columns (which live
-    // on the next chunk) are dropped and the interval is emitted with a PARTIAL
-    // mean, not even flagged uncovered.  (Returns NULL when nothing straddles --
-    // the common case -- so we keep the original array with no copy.)
-    {
-        int64_t n2 = 0;
-        TuiInterval *iv2 = tui_split_intervals_on_chunks(iv, n_iv, TUI_UNI_CHUNK, &n2);
-        if (iv2 != NULL) { free(iv); iv = iv2; n_iv = n2; }
-    }
+    // Single 64-bit universal axis: no 2e9 chunk-straddle pre-split is needed.
 
     int64_t n_na = 0, n_clusters = 0, cols_fetched = 0;
     double t_fetch = 0, _tl = bw_now_s();
@@ -1728,24 +1725,21 @@ static int bigwig_lift_window(Tui *tui, const char *bigwig_file,
     // each interval's overlap-weighted mean depth.  Both lists are sorted, so the
     // merge is linear and the per-column work is gone.
     const int64_t COALESCE_GAP = 1 << 14;   // 16k cols: merge within-cluster gaps
+    const char *uchrom = bw->cl->chrom[0];  // single 64-bit universal axis (uni0)
     int64_t k = 0;
     while (k < n_iv) {
-        int64_t chunk = iv[k].start / TUI_UNI_CHUNK;
         int64_t lo = iv[k].start, hi = iv[k].end;
         int64_t j = k + 1;
-        while (j < n_iv && iv[j].start / TUI_UNI_CHUNK == chunk &&
-               iv[j].start - hi <= COALESCE_GAP) {
+        while (j < n_iv && iv[j].start - hi <= COALESCE_GAP) {
             if (iv[j].end > hi) hi = iv[j].end;
             j++;
         }
         n_clusters++;
         cols_fetched += hi - lo;
-        int64_t base = chunk * TUI_UNI_CHUNK;
-        char uchrom[24];
-        snprintf(uchrom, sizeof uchrom, "uni%" PRIi64, chunk);
+        int64_t base = 0;   // absolute columns on the single axis (no chunk offset)
         double _tf = bw_now_s();
         bwOverlappingIntervals_t *ov =
-            bwGetOverlappingIntervals(bw, uchrom, (uint32_t)(lo - base), (uint32_t)(hi - base));
+            bwGetOverlappingIntervals(bw, uchrom, (uint64_t)lo, (uint64_t)hi);
         t_fetch += bw_now_s() - _tf;
 
         int64_t p = 0;     // pointer into ov, advances with the sorted tui intervals

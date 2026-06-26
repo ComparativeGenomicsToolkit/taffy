@@ -128,7 +128,11 @@ static void bwHdrRead(bigWigFile_t *bw) {
     if(!bw->hdr) return;
 
     if(bwRead((void*) &magic, sizeof(uint32_t), 1, bw) != 1) goto error; //0x0
-    if(magic != BIGWIG_MAGIC && magic != BIGBED_MAGIC) goto error;
+    if(magic == BIGWIG_MAGIC) {  //64-bit fork: a standard 32-bit bigWig would be silently misparsed by the u64 R-tree/interval readers -- reject it loudly
+        fprintf(stderr, "[bwHdrRead] standard 32-bit bigWig (BIGWIG_MAGIC) is not supported by this 64-bit libBigWig fork; regenerate it with the 64-bit writer (e.g. `taffy depth --bigwig`).\n");
+        goto error;
+    }
+    if(magic != BIGWIG64_MAGIC && magic != BIGBED_MAGIC) goto error;  //64-bit fork
 
     if(bwRead((void*) &(bw->hdr->version), sizeof(uint16_t), 1, bw) != 1) goto error; //0x4
     if(bwRead((void*) &(bw->hdr->nLevels), sizeof(uint16_t), 1, bw) != 1) goto error; //0x6
@@ -193,7 +197,7 @@ static uint64_t readChromLeaf(bigWigFile_t *bw, chromList_t *cl, uint32_t valueS
     for(i=0; i<nVals; i++) {
         if(bwRead((void*) chrom, sizeof(char), valueSize, bw) != valueSize) goto error;
         if(bwRead((void*) &idx, sizeof(uint32_t), 1, bw) != 1) goto error;
-        if(bwRead((void*) &(cl->len[idx]), sizeof(uint32_t), 1, bw) != 1) goto error;
+        if(bwRead((void*) &(cl->len[idx]), sizeof(uint64_t), 1, bw) != 1) goto error;  //64-bit fork: chromSize u64
         cl->chrom[idx] = bwStrdup(chrom);
         if(!(cl->chrom[idx])) goto error;
     }
@@ -257,7 +261,7 @@ static chromList_t *bwReadChromList(bigWigFile_t *bw) {
 
     cl->nKeys = itemCount;
     cl->chrom = calloc(itemCount, sizeof(char*));
-    cl->len = calloc(itemCount, sizeof(uint32_t));
+    cl->len = calloc(itemCount, sizeof(uint64_t));  //64-bit fork: cl->len is u64* (B1: was sizeof(uint32_t) -> heap overflow)
     if(!cl->chrom) goto error;
     if(!cl->len) goto error;
 
