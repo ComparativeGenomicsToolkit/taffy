@@ -198,6 +198,11 @@ int64_t gerp_tree_n_leaves(const GerpTree *gt) {
     return gt->n_leaves;
 }
 
+const char *gerp_tree_leaf_name(const GerpTree *gt, int64_t leaf_id) {
+    if (gt == NULL || leaf_id < 0 || leaf_id >= gt->n_leaves) return NULL;
+    return gt->leaf_name[leaf_id];
+}
+
 /////////////////////////////////////////////////////////////////////////////
 // Per-column scoring
 //

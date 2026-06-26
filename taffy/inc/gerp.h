@@ -61,6 +61,11 @@ bool gerp_tree_is_ancestor(const GerpTree *gt, const char *name);
 /* Number of leaves in the parsed tree. */
 int64_t gerp_tree_n_leaves(const GerpTree *gt);
 
+/* Name of leaf `leaf_id` (0-based post-order leaf index = the per-species
+ * vector component order).  Borrowed pointer into the tree's label storage;
+ * NULL if leaf_id is out of range. */
+const char *gerp_tree_leaf_name(const GerpTree *gt, int64_t leaf_id);
+
 /*
  * Walk up the tree from the node labelled `name` until we hit a node
  * whose label is in `targets` (a stSet of char* labels, e.g. the

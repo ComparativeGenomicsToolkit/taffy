@@ -108,6 +108,7 @@ typedef struct {
     int64_t  bin_first;
     int64_t *bin_sum;
     int64_t *bin_cnt;
+    int64_t *bin_sum_vec;   // --per-species: [bin_cap * n_leaves] per-bin per-leaf covered-column counts (NULL otherwise)
     int64_t  bin_cap;
     int64_t  bin_n;
 } GerpBlockResult;
@@ -156,13 +157,17 @@ typedef struct {
     const char  **chroms;   // UNIBW_BATCH pointers, all "uni0"
     uint64_t     *starts;
     uint64_t     *ends;
-    float        *values;
+    float        *values;   // UNIBW_BATCH * N floats (N=1 scalar, N=#leaves --per-species)
+    uint32_t      N;        // vector width: 1 = scalar bigWig, >1 = per-species vector bigWig
     int           n;        // entries buffered in the current batch
     bool          wrote;    // first batch -> bwAddIntervals, later -> bwAppend
     bool          failed;   // sticky: a flush errored -> stop writing, surface at close
 } UniBW;
 
-static UniBW *unibw_open(const char *path, int64_t T) {
+// N = vector width: 1 writes a scalar 64-bit bigWig (mean depth); N>1 writes the
+// per-species vector bigWig (N covered-counts/interval) via the fork's vector API.
+static UniBW *unibw_open(const char *path, int64_t T, uint32_t N) {
+    if (N < 1) N = 1;
     if (bwInit(1 << 17) != 0) {
         fprintf(stderr, "taffy depth: bwInit failed (--bigwig)\n");
         return NULL;
@@ -173,8 +178,9 @@ static UniBW *unibw_open(const char *path, int64_t T) {
         bwCleanup();
         return NULL;
     }
-    if (bwCreateHdr(bw, 10)) {   // 10 zoom levels for browser zoom-out
-        fprintf(stderr, "taffy depth: bwCreateHdr failed (--bigwig)\n");
+    int hdrRv = (N > 1) ? bwCreateHdrVec(bw, 10, N) : bwCreateHdr(bw, 10);  // 10 zoom levels
+    if (hdrRv) {
+        fprintf(stderr, "taffy depth: bwCreateHdr%s failed (--bigwig)\n", N > 1 ? "Vec" : "");
         bwClose(bw); bwCleanup(); return NULL;
     }
     const char *cn[1] = { "uni0" };
@@ -186,11 +192,12 @@ static UniBW *unibw_open(const char *path, int64_t T) {
     }
     UniBW *u  = st_calloc(1, sizeof(UniBW));
     u->bw     = bw;
+    u->N      = N;
     u->chroms = st_malloc(UNIBW_BATCH * sizeof(char *));
     for (int i = 0; i < UNIBW_BATCH; i++) u->chroms[i] = "uni0";
     u->starts = st_malloc(UNIBW_BATCH * sizeof(uint64_t));
     u->ends   = st_malloc(UNIBW_BATCH * sizeof(uint64_t));
-    u->values = st_malloc(UNIBW_BATCH * sizeof(float));
+    u->values = st_malloc((size_t) UNIBW_BATCH * N * sizeof(float));
     u->n = 0; u->wrote = false;
     return u;
 }
@@ -198,9 +205,16 @@ static UniBW *unibw_open(const char *path, int64_t T) {
 static int unibw_flush(UniBW *u) {
     if (u->failed) return 1;            // sticky: never write to a broken stream again
     if (u->n == 0) return 0;
-    int rv = u->wrote
-        ? bwAppendIntervals(u->bw, u->starts, u->ends, u->values, (uint32_t) u->n)
-        : bwAddIntervals(u->bw, u->chroms, u->starts, u->ends, u->values, (uint32_t) u->n);
+    int rv;
+    if (u->N > 1) {                     // per-species vector bigWig
+        rv = u->wrote
+            ? bwAppendIntervalsVec(u->bw, u->starts, u->ends, u->values, (uint32_t) u->n)
+            : bwAddIntervalsVec(u->bw, u->chroms, u->starts, u->ends, u->values, (uint32_t) u->n);
+    } else {                            // scalar bigWig
+        rv = u->wrote
+            ? bwAppendIntervals(u->bw, u->starts, u->ends, u->values, (uint32_t) u->n)
+            : bwAddIntervals(u->bw, u->chroms, u->starts, u->ends, u->values, (uint32_t) u->n);
+    }
     u->wrote = true;
     u->n = 0;
     if (rv) {
@@ -210,12 +224,13 @@ static int unibw_flush(UniBW *u) {
     return rv;
 }
 
-static int unibw_add(UniBW *u, int64_t start, int64_t end, float value) {
+// vals points to u->N floats (1 for scalar mean, N for the per-species vector).
+static int unibw_add(UniBW *u, int64_t start, int64_t end, const float *vals) {
     if (u->failed) return 1;
     if (u->n == UNIBW_BATCH && unibw_flush(u)) return 1;
     u->starts[u->n] = (uint64_t) start;
     u->ends[u->n]   = (uint64_t) end;
-    u->values[u->n] = value;
+    memcpy(u->values + (size_t) u->n * u->N, vals, (size_t) u->N * sizeof(float));
     u->n++;
     return 0;
 }
@@ -249,7 +264,34 @@ static int gerp_flush_bin(LW *dout, UniBW *ubw, int64_t bin, int64_t sum,
                          start, end, mean);
         LW_putn(dout, line, (size_t) n);
     }
-    if (ubw != NULL) return unibw_add(ubw, start, end, (float) mean);
+    if (ubw != NULL) { float mf = (float) mean; return unibw_add(ubw, start, end, &mf); }
+    return 0;
+}
+
+// --per-species: flush one bin's per-leaf covered-counts (sumvec[N]) as an
+// N-vector record on uni0 [bin*bin_size, +cnt).  Drop a bin where no leaf was
+// present (vsum==0; same intent as the scalar sum<=0 drop).  fbuf is N-float
+// scratch.  dout (--depth alongside --per-species) gets the scalar total-depth
+// mean (= sum of the per-leaf counts / cnt), matching the scalar depth track.
+static int gerp_flush_bin_vec(LW *dout, UniBW *ubw, int64_t bin,
+                              const int64_t *sumvec, int64_t cnt,
+                              int64_t bin_size, int64_t N, float *fbuf) {
+    if (cnt <= 0) return 0;
+    int64_t vsum = 0;
+    for (int64_t c = 0; c < N; c++) vsum += sumvec[c];
+    if (vsum <= 0) return 0;
+    int64_t start = bin * bin_size;
+    int64_t end   = start + cnt;
+    if (dout != NULL) {
+        char line[96];
+        int n = snprintf(line, sizeof line, "uni0\t%" PRId64 "\t%" PRId64 "\t%.4g\n",
+                         start, end, (double) vsum / (double) cnt);
+        LW_putn(dout, line, (size_t) n);
+    }
+    if (ubw != NULL) {
+        for (int64_t c = 0; c < N; c++) fbuf[c] = (float) sumvec[c];
+        return unibw_add(ubw, start, end, fbuf);
+    }
     return 0;
 }
 
@@ -258,7 +300,7 @@ static void score_one_block(const GerpTree *gt, GerpThreadState *ts,
                             GerpParalogPolicy policy, int64_t min_leaves,
                             double branch_scale, bool want_depth,
                             bool depth_only, int64_t block_start_col,
-                            int64_t bin_size) {
+                            int64_t bin_size, bool per_species) {
     gerpbuf_reset(&res->rs);
     if (want_depth) gerpbuf_reset(&res->depth);
     res->cols_scored = 0;
@@ -368,14 +410,28 @@ static void score_one_block(const GerpTree *gt, GerpThreadState *ts,
                     while (nc <= idx) nc *= 2;
                     res->bin_sum = st_realloc(res->bin_sum, (size_t)nc * sizeof(int64_t));
                     res->bin_cnt = st_realloc(res->bin_cnt, (size_t)nc * sizeof(int64_t));
+                    if (per_species)
+                        res->bin_sum_vec = st_realloc(res->bin_sum_vec,
+                                                      (size_t)nc * n_leaves * sizeof(int64_t));
                     res->bin_cap = nc;
                 }
                 res->bin_sum[idx] = 0;
                 res->bin_cnt[idx] = 0;
+                if (per_species)
+                    memset(res->bin_sum_vec + idx * n_leaves, 0,
+                           (size_t)n_leaves * sizeof(int64_t));
                 res->bin_n        = idx + 1;
             }
             if (scored) { res->bin_sum[idx] += depth; res->cols_scored++; }
             res->bin_cnt[idx]++;   // every column -> bin-mean denominator
+            if (per_species) {
+                // per-species coverage: count EVERY column where a leaf is present,
+                // regardless of total depth / min_leaves (a species is covered
+                // independent of others).  O(n_leaves) per column.
+                int64_t *bv = res->bin_sum_vec + idx * n_leaves;
+                for (int64_t i = 0; i < n_leaves; i++)
+                    if (ts->leaf_csets[i]) bv[i]++;
+            }
         } else if (scored) {
             // Integer universal-column wig on the single 64-bit axis: chrom uni0,
             // 1-based absolute position gcol+1.
@@ -449,6 +505,7 @@ enum {
     OPT_SIZES,
     OPT_BIN,
     OPT_BIGWIG,
+    OPT_PER_SPECIES,
 };
 
 static int parse_paralog_policy(const char *s, GerpParalogPolicy *out) {
@@ -476,6 +533,7 @@ int taf_depth_main(int argc, char *argv[]) {
     GerpParalogPolicy paralog_policy = GERP_PARALOG_UNION;
     int n_threads        = 1;
     int64_t bin_size     = 0;
+    bool per_species     = false;  // --perSpecies: write a per-leaf vector bigWig (N components)
 
     while (1) {
         static struct option long_options[] = {
@@ -495,6 +553,7 @@ int taf_depth_main(int argc, char *argv[]) {
             { "threads",        required_argument, 0, 'T' },
             { "bin",            required_argument, 0, OPT_BIN },
             { "bigwig",         required_argument, 0, OPT_BIGWIG },
+            { "perSpecies",     no_argument,       0, OPT_PER_SPECIES },
             { "help",           no_argument,       0, 'h' },
             { 0, 0, 0, 0 }
         };
@@ -524,6 +583,7 @@ int taf_depth_main(int argc, char *argv[]) {
             case OPT_COLUMN_RANGE:  columnRangeArg = optarg; break;
             case OPT_BIN:           bin_size       = atoll(optarg); break;
             case OPT_BIGWIG:        bigwigFile     = optarg; break;
+            case OPT_PER_SPECIES:   per_species    = true;   break;
             case 'h': usage(); return 0;
             default:  usage(); return 1;
         }
@@ -603,6 +663,10 @@ int taf_depth_main(int argc, char *argv[]) {
     // --bin (the bigWig stores per-bin mean depth on the single uni0 axis).
     if (bigwigFile != NULL && bin_size <= 0) {
         fprintf(stderr, "taffy depth: --bigwig requires --bin N (it writes the binned depth)\n");
+        return 1;
+    }
+    if (per_species && bigwigFile == NULL) {
+        fprintf(stderr, "taffy depth: --perSpecies requires --bigwig FILE (it writes the per-species vector bigWig)\n");
         return 1;
     }
     if (bin_size < 0) {
@@ -788,13 +852,34 @@ int taf_depth_main(int argc, char *argv[]) {
     // merging per-shard bigWigs is a separate step (the whole-axis run needs no
     // merge).
     if (bigwigFile != NULL) {
-        ubw = unibw_open(bigwigFile, T);
+        uint32_t bwN = per_species ? (uint32_t) n_leaves : 1;
+        ubw = unibw_open(bigwigFile, T, bwN);
         if (ubw == NULL) {           // unibw_open already reported the reason
             remove(bigwigFile);      // drop any partial file it may have created
             return 1;
         }
-        st_logInfo("taffy depth: writing 64-bit depth bigWig to %s (single uni0 axis, T=%" PRIi64 ")\n",
-                   bigwigFile, T);
+        if (per_species) {
+            // sidecar <bigwig>.names: one leaf name per line in gerp post-order
+            // (= the vector component order), so the lift/browser can map
+            // component c -> species without re-deriving the tree.
+            char namesPath[4096];
+            snprintf(namesPath, sizeof namesPath, "%s.names", bigwigFile);
+            FILE *nf = fopen(namesPath, "w");
+            if (nf == NULL) {
+                fprintf(stderr, "taffy depth: cannot open per-species names sidecar: %s\n", namesPath);
+                unibw_close(ubw); remove(bigwigFile); return 1;
+            }
+            for (int64_t i = 0; i < n_leaves; i++) {
+                const char *nm = gerp_tree_leaf_name(gt, i);
+                fprintf(nf, "%s\n", nm ? nm : "");
+            }
+            fclose(nf);
+            st_logInfo("taffy depth: writing per-species vector bigWig to %s (%" PRIi64
+                       " leaves, single uni0 axis, T=%" PRIi64 ")\n", bigwigFile, n_leaves, T);
+        } else {
+            st_logInfo("taffy depth: writing 64-bit depth bigWig to %s (single uni0 axis, T=%" PRIi64 ")\n",
+                       bigwigFile, T);
+        }
     }
 
     // One pass: column-range mode (a direct column-slice iterator) or whole-file
@@ -805,6 +890,12 @@ int taf_depth_main(int argc, char *argv[]) {
     // bin index is GLOBAL over [0,T); gerp_flush_bin emits on the single uni0
     // axis at absolute columns.
     int64_t cur_bin = -1, cur_sum = 0, cur_cnt = 0;
+    int64_t *cur_sum_vec = NULL;   // --perSpecies: running per-leaf counts for the open bin
+    float   *fbuf = NULL;          // --perSpecies: N-float scratch for unibw_add
+    if (per_species) {
+        cur_sum_vec = st_calloc((size_t) n_leaves, sizeof(int64_t));
+        fbuf        = st_malloc((size_t) n_leaves * sizeof(float));
+    }
 
     int64_t n_iter = empty_col_range ? 0 : 1;
     for (int64_t iter = 0; iter < n_iter && !fatal; iter++) {
@@ -892,7 +983,7 @@ int taf_depth_main(int argc, char *argv[]) {
                 score_one_block(gt, &ts[t], batch_aln[i], &results[i],
                                 paralog_policy, min_leaves, branch_scale,
                                 want_depth, depth_only,
-                                batch_col[i], bin_size);
+                                batch_col[i], bin_size, per_species);
             }
 
             // Phase C: serial emit + accounting in batch order.
@@ -928,11 +1019,18 @@ int taf_depth_main(int argc, char *argv[]) {
                     for (int64_t k = 0; k < r->bin_n; k++) {
                         int64_t bin = r->bin_first + k;
                         if (bin != cur_bin) {
-                            if (gerp_flush_bin(dout, ubw, cur_bin, cur_sum, cur_cnt, bin_size))
-                                fatal = 1;   // --bigwig write failed (sticky); batch loop exits
+                            int frv = per_species
+                                ? gerp_flush_bin_vec(dout, ubw, cur_bin, cur_sum_vec, cur_cnt, bin_size, n_leaves, fbuf)
+                                : gerp_flush_bin(dout, ubw, cur_bin, cur_sum, cur_cnt, bin_size);
+                            if (frv) fatal = 1;   // --bigwig write failed (sticky); batch loop exits
                             cur_bin = bin; cur_sum = 0; cur_cnt = 0;
+                            if (per_species) memset(cur_sum_vec, 0, (size_t) n_leaves * sizeof(int64_t));
                         }
-                        cur_sum += r->bin_sum[k];
+                        if (per_species)
+                            for (int64_t c = 0; c < n_leaves; c++)
+                                cur_sum_vec[c] += r->bin_sum_vec[k * n_leaves + c];
+                        else
+                            cur_sum += r->bin_sum[k];
                         cur_cnt += r->bin_cnt[k];
                     }
                 } else {
@@ -969,8 +1067,12 @@ int taf_depth_main(int argc, char *argv[]) {
 
     // Flush the last --bin bin (the running binner has no successor block to
     // trigger it).
-    if (bin_size > 0)
-        if (gerp_flush_bin(dout, ubw, cur_bin, cur_sum, cur_cnt, bin_size)) fatal = 1;
+    if (bin_size > 0) {
+        int frv = per_species
+            ? gerp_flush_bin_vec(dout, ubw, cur_bin, cur_sum_vec, cur_cnt, bin_size, n_leaves, fbuf)
+            : gerp_flush_bin(dout, ubw, cur_bin, cur_sum, cur_cnt, bin_size);
+        if (frv) fatal = 1;
+    }
 
     if (tui != NULL) tui_destruct(tui);
 
@@ -987,10 +1089,13 @@ int taf_depth_main(int argc, char *argv[]) {
         if (want_depth) gerpbuf_destroy(&results[i].depth);
         free(results[i].bin_sum);
         free(results[i].bin_cnt);
+        free(results[i].bin_sum_vec);
     }
     free(results);
     free(batch_aln);
     free(batch_col);
+    free(cur_sum_vec);
+    free(fbuf);
     for (int t = 0; t < n_threads; t++) {
         gerp_scratch_destruct(ts[t].sc);
         free(ts[t].entries);
