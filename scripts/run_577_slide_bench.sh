@@ -115,11 +115,11 @@ HAL_MAX_SIZE=10000000           # the cap: hal tools skipped above this (bp) in 
                                 # 500k -> 10M so hal2maf reaches 1M/10M (a few more data points);
                                 # HAL_TIME_BUDGET governs whether the big ones complete vs time out.
 # -- #5 random-sample view bench --
-VIEW_SAMPLE_SIZES="100,100000,200000,300000,400000,500000,600000,700000,800000,900000,1000000"  # #5 sizes (bp): linear 100->1M, 11 pts
+VIEW_SAMPLE_SIZES="100,10000,20000,30000,40000,50000,60000,70000,80000,90000,100000"  # #5 sizes (bp): 100bp anchor + linear 10k->100k, 11 pts (max query 100kb)
 VIEW_SAMPLE_N=10                # #5 random genome-wide regions per size
 VIEW_SAMPLE_SEED=20260620       # #5 RNG seed (reproducible; same regions for every tool)
 # -- #6 depth-summary bench (zoom-out: depth bigWig lift vs bigMafSummary) --
-DEPTH_SUMMARY_SIZES="1000000,20000000,40000000,60000000,80000000,100000000,120000000,140000000,160000000,180000000,200000000"  # #6 sizes (bp): linear 1M->200M, 11 pts
+DEPTH_SUMMARY_SIZES="100000,14000000,29000000,43000000,57000000,71000000,86000000,100000000,114000000,129000000,143000000,157000000,171000000,186000000,200000000"  # #6 sizes (bp): linear 100kb->200Mb, 15 pts
 DEPTH_SUMMARY_N=10              # #6 random hg38 regions per size
 DEPTH_SUMMARY_SEED=20260620     # #6 RNG seed
 
