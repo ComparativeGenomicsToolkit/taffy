@@ -105,8 +105,8 @@ ${srcDir}/remote_io.o : ${srcDir}/remote_io.c ${libHeaders}
 ${BINDIR}/stTafTests : ${libTests} taf_merge_bigwig.o ${LIBDIR}/libstTaf.a ${stTafDependencies}
 	${CC} ${CFLAGS} ${LDFLAGS} -I${blockVizDir}/inc -o ${BINDIR}/stTafTests ${libTests} taf_merge_bigwig.o ${LIBDIR}/libstTaf.a ${LDLIBS}
 
-${BINDIR}/taffy : taf_norm.o taf_add_gap_bases.o taf_index.o taf_view.o taf_sort.o taf_stats.o taf_coverage.o taf_annotate.o taf_lift.o taf_chain.o taf_depth.o taf_gerp_stats.o taf_merge_bigwig.o taffy_main.o ${LIBDIR}/libstTaf.a ${libHeaders} ${stTafDependencies}
-	${CXX} ${CPPFLAGS} ${CXXFLAGS} taf_norm.o taf_add_gap_bases.o taf_index.o taf_view.o taf_sort.o taf_stats.o taf_coverage.o taf_annotate.o taf_lift.o taf_chain.o taf_depth.o taf_gerp_stats.o taf_merge_bigwig.o taffy_main.o -o ${BINDIR}/taffy ${LIBDIR}/libstTaf.a ${LDLIBS}
+${BINDIR}/taffy : taf_norm.o taf_add_gap_bases.o taf_index.o taf_view.o taf_sort.o taf_stats.o taf_coverage.o taf_annotate.o taf_lift.o taf_chain.o taf_depth.o taf_gerp_stats.o taf_merge_bigwig.o taf_summary.o taffy_main.o ${LIBDIR}/libstTaf.a ${libHeaders} ${stTafDependencies}
+	${CXX} ${CPPFLAGS} ${CXXFLAGS} taf_norm.o taf_add_gap_bases.o taf_index.o taf_view.o taf_sort.o taf_stats.o taf_coverage.o taf_annotate.o taf_lift.o taf_chain.o taf_depth.o taf_gerp_stats.o taf_merge_bigwig.o taf_summary.o taffy_main.o -o ${BINDIR}/taffy ${LIBDIR}/libstTaf.a ${LDLIBS}
 
 ${BINDIR}/taffyBlockVizTest : ${blockVizDir}/tests/taffyBlockVizTest.cpp ${LIBDIR}/libstTaf.a ${blockVizDir}/inc/taffyBlockViz.h ${stTafDependencies}
 	${CXX} ${CPPFLAGS} ${CXXFLAGS} -I${blockVizDir}/inc ${blockVizDir}/tests/taffyBlockVizTest.cpp -o ${BINDIR}/taffyBlockVizTest ${LIBDIR}/libstTaf.a ${LDLIBS}
@@ -149,6 +149,9 @@ taf_depth.o : taf_depth.c ${stTafDependencies} ${libHeaders}
 
 taf_merge_bigwig.o : taf_merge_bigwig.c ${stTafDependencies} ${libHeaders}
 	${CC} ${CFLAGS} ${CFLAGS} -o taf_merge_bigwig.o -c taf_merge_bigwig.c
+
+taf_summary.o : taf_summary.c ${stTafDependencies} ${libHeaders}
+	${CC} ${CFLAGS} ${CFLAGS} -o taf_summary.o -c taf_summary.c
 
 taf_gerp_stats.o : taf_gerp_stats.c ${stTafDependencies} ${libHeaders}
 	${CC} ${CFLAGS} ${CFLAGS} -o taf_gerp_stats.o -c taf_gerp_stats.c
