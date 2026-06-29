@@ -57,6 +57,7 @@
 #include "line_iterator.h"
 #include "sonLib.h"
 #include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <getopt.h>
 #include <inttypes.h>
@@ -322,6 +323,14 @@ typedef struct {
     stHash   *refMap;      /* genome name -> RefState* (key aliases ->name) */
     stList   *refList;     /* RefStates in first-seen order */
     const char *tmpDir;
+    /* shard mode (--shard i/N): emit raw records as TEXT (chrom/src NAMES, not
+     * the per-shard interned ids) to <outDir>/<ref>.shard<idx>.recs, so a later
+     * --shardMerge re-interns consistently.  restrictRef != NULL (the -r genome)
+     * masters only that one genome; NULL (with --allRefs) masters every leaf. */
+    int          shardMode;
+    const char  *outDir;
+    int          shardIdx;
+    const char  *restrictRef;
 } AllRefsCtx;
 
 static RefState *get_refstate(AllRefsCtx *cx, const char *g) {
@@ -352,6 +361,26 @@ static inline void put_ref_rec(RefState *rs, const char *tmpDir, uint32_t chromI
     rs->n_recs++;
 }
 
+/* Emit one record: shard mode writes it as TEXT (chrom/src NAMES) to this
+ * reference's <outDir>/<ref>.shard<idx>.recs (so --shardMerge can re-intern
+ * across independently-interned shards); %.17g round-trips the score double
+ * exactly (the region merge length-weight-averages, so precision must survive).
+ * Normal mode writes the compact packed record to the per-reference scan-temp. */
+static inline void emit_ref_rec(AllRefsCtx *cx, RefState *rs, const char *chrom, uint32_t chromId,
+                                int64_t start, int64_t end, const char *srcName, uint32_t srcId, double score) {
+    if (cx->shardMode) {
+        if (rs->wfp == NULL) {
+            snprintf(rs->tmp_path, PATH_MAX, "%s/%s.shard%d.recs", cx->outDir, rs->name, cx->shardIdx);
+            rs->wfp = fopen(rs->tmp_path, "w");
+            if (rs->wfp == NULL) { fprintf(stderr, "taffy summary: cannot create shard temp %s\n", rs->tmp_path); exit(1); }
+        }
+        fprintf(rs->wfp, "%s\t%" PRId64 "\t%" PRId64 "\t%s\t%.17g\n", chrom, start, end, srcName, score);
+        rs->n_recs++;
+    } else {
+        put_ref_rec(rs, cx->tmpDir, chromId, (uint32_t) start, (uint32_t) end, srcId, score);
+    }
+}
+
 /* Mirror of score_block, but EVERY leaf row is a master routed to its own
  * RefState.  For a given reference the emitted record SET equals the single-ref
  * score_block(ref=that genome) set, so each per-reference bed matches a
@@ -361,6 +390,7 @@ static void score_block_allrefs(AllRefsCtx *cx, Alignment *aln) {
     for (Alignment_Row *ref = aln->row; ref != NULL; ref = ref->n_row) {
         const char *rg = gerp_tree_resolve_genome(cx->gt, ref->sequence_name);
         if (rg == NULL || gerp_tree_is_ancestor(cx->gt, rg)) continue;   /* leaf masters only */
+        if (cx->restrictRef != NULL && strcmp(rg, cx->restrictRef) != 0) continue;  /* shard -r: one master */
         if (ref->length < minSeqSize || ref->length <= 0 || ref->sequence_length < minSeqSize) continue;
         RefState *rs = get_refstate(cx, rg);
         rs->n_with_ref++;
@@ -387,7 +417,7 @@ static void score_block_allrefs(AllRefsCtx *cx, Alignment *aln) {
                 if (cur == NULL) { cur = st_malloc(sizeof(double)); *cur = sc; stHash_insert(best, (void *) gname, cur); }
                 else if (sc > *cur) *cur = sc;
             } else {
-                put_ref_rec(rs, cx->tmpDir, chromId, (uint32_t) rstart, (uint32_t) rend, srcId, sc); rs->raw_n++;
+                emit_ref_rec(cx, rs, chrom, chromId, rstart, rend, g, srcId, sc); rs->raw_n++;
             }
         }
         if (single_cover) {
@@ -396,7 +426,7 @@ static void score_block_allrefs(AllRefsCtx *cx, Alignment *aln) {
             while ((gname = stHash_getNext(hit)) != NULL) {
                 double *cur = stHash_search(best, gname);
                 uint32_t srcId = intern_id(cx->srcInt, gname);
-                put_ref_rec(rs, cx->tmpDir, chromId, (uint32_t) rstart, (uint32_t) rend, srcId, *cur); rs->raw_n++;
+                emit_ref_rec(cx, rs, chrom, chromId, rstart, rend, gname, srcId, *cur); rs->raw_n++;
             }
             stHash_destructIterator(hit);
             stHash_destruct(best);
@@ -578,9 +608,118 @@ static int64_t rebucket_and_finalize(RefState *rs, Interner *srcInt,
     return n_out;
 }
 
+/* ===================================================================== */
+/* column-range sharding (phase 1): split blocks, gather, merge           */
+/* ===================================================================== */
+/* Re-open the input and skip its header, leaving the LI positioned at the first
+ * block.  Used by --shard's count + scan passes (phase 1 reads sequentially and
+ * skips out-of-group blocks; phase 2 will .tai-seek to the byte range instead). */
+static LI *reopen_input(const char *inputFile, int *fmt, bool *rle) {
+    FILE *f = fopen(inputFile, "r");
+    if (f == NULL) { fprintf(stderr, "taffy summary: cannot reopen %s\n", inputFile); exit(1); }
+    LI *li = LI_construct(f);
+    *fmt = check_input_format(LI_peek_at_next_line(li));
+    Tag *h = (*fmt == 0) ? taf_read_header_2(li, rle) : maf_read_header(li);
+    if (h) tag_destruct(h);
+    return li;
+}
+
+/* If `fn` is <ref>.shard<digits>.recs, return a malloc'd copy of <ref>; else
+ * NULL.  Genome accessions contain dots but not ".shard", so we strip from the
+ * right: ".recs", then digits, then ".shard". */
+static char *parse_shard_ref(const char *fn) {
+    size_t len = strlen(fn);
+    const char *suf = ".recs"; size_t sl = strlen(suf);
+    if (len < sl || strcmp(fn + len - sl, suf) != 0) return NULL;
+    const char *p = fn + len - sl;                 /* at ".recs" */
+    const char *q = p;
+    while (q > fn && isdigit((unsigned char) q[-1])) q--;   /* skip shard index digits */
+    if (q == p) return NULL;                        /* need >=1 digit */
+    const char *sh = ".shard"; size_t shl = strlen(sh);
+    if ((size_t)(q - fn) < shl || strncmp(q - shl, sh, shl) != 0) return NULL;
+    size_t reflen = (size_t)((q - shl) - fn);
+    if (reflen == 0) return NULL;
+    char *ref = st_malloc(reflen + 1);
+    memcpy(ref, fn, reflen); ref[reflen] = 0;
+    return ref;
+}
+
+/* --shardMerge: for each reference R, gather <dir>/R.shard*.recs (text: chrom
+ * start end src score), re-intern the names, bucket by chrom, and finalize to
+ * <dir>/R.bed.  Reuses finalize_reference, so each R.bed equals the non-sharded
+ * run (compared as a sorted set -- the per-reference sort is global). */
+static void do_shard_merge(const char *dir, Interner *srcInt, const char *tmpDir, int nThreads) {
+    DIR *d = opendir(dir);
+    if (d == NULL) { fprintf(stderr, "taffy summary --shardMerge: cannot open dir %s\n", dir); exit(1); }
+    stHash *byRef = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, free,
+                                      (void (*)(void *)) stList_destruct);
+    stList *refOrder = stList_construct();    /* ref names (alias byRef keys) in first-seen order */
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        char *ref = parse_shard_ref(de->d_name);
+        if (ref == NULL) continue;
+        stList *files = stHash_search(byRef, ref);
+        if (files == NULL) {
+            files = stList_construct3(0, free);
+            stHash_insert(byRef, ref, files);     /* byRef owns ref via key destructor */
+            stList_append(refOrder, ref);         /* alias only */
+        } else free(ref);
+        stList_append(files, stString_copy(de->d_name));
+    }
+    closedir(d);
+
+    int nrefs = stList_length(refOrder);
+    int64_t total_out = 0;
+    char path[PATH_MAX];
+    for (int ri = 0; ri < nrefs; ri++) {
+        const char *ref = stList_get(refOrder, ri);
+        stList *files = stHash_search(byRef, (void *) ref);
+        Interner *chromInt = interner_new();
+        BucketSet bs = { NULL, 0, 0 };
+        int64_t raw = 0;
+        for (int fi = 0; fi < stList_length(files); fi++) {
+            snprintf(path, sizeof path, "%s/%s", dir, (char *) stList_get(files, fi));
+            FILE *f = fopen(path, "r");
+            if (f == NULL) { fprintf(stderr, "taffy summary: cannot read %s\n", path); exit(1); }
+            char *line = NULL; size_t lcap = 0; ssize_t ll;
+            while ((ll = getline(&line, &lcap, f)) > 0) {
+                if (line[ll - 1] == '\n') line[ll - 1] = 0;
+                char *t1 = strchr(line, '\t'); if (!t1) continue; *t1 = 0;
+                char *s_start = t1 + 1; char *t2 = strchr(s_start, '\t'); if (!t2) continue; *t2 = 0;
+                char *s_end = t2 + 1; char *t3 = strchr(s_end, '\t'); if (!t3) continue; *t3 = 0;
+                char *src = t3 + 1; char *t4 = strchr(src, '\t'); if (!t4) continue; *t4 = 0;
+                char *s_score = t4 + 1;
+                uint32_t chromId = intern_id(chromInt, line);   /* line[] now = chrom */
+                uint32_t srcId = intern_id(srcInt, src);
+                Bucket *bk = get_bucket(&bs, chromId, tmpDir);
+                put_rec(bk, chromId, (uint32_t) strtoll(s_start, NULL, 10),
+                        (uint32_t) strtoll(s_end, NULL, 10), srcId, strtod(s_score, NULL));
+                raw++;
+            }
+            free(line);
+            fclose(f);
+        }
+        snprintf(path, sizeof path, "%s/%s.bed", dir, ref);
+        FILE *out = fopen(path, "w");
+        if (out == NULL) { fprintf(stderr, "taffy summary: cannot write %s\n", path); exit(1); }
+        int64_t no = finalize_reference(&bs, chromInt, srcInt, tmpDir, nThreads, out);
+        fclose(out);
+        free(bs.arr);
+        interner_free(chromInt);
+        total_out += no;
+        fprintf(stderr, "  %s: %" PRId64 " raw recs -> %" PRId64 " merged rows\n", ref, raw, no);
+    }
+    fprintf(stderr, "taffy summary --shardMerge: %d references, %" PRId64 " total merged rows (%d threads)\n",
+            nrefs, total_out, nThreads);
+    stList_destruct(refOrder);
+    stHash_destruct(byRef);
+}
+
 int taf_summary_main(int argc, char *argv[]) {
     char *inputFile = NULL, *outputFile = NULL, *refGenome = NULL, *tmpDir = NULL;
     int allRefs = 0;
+    int shardIdx = -1, shardN = 0, shardMergeMode = 0;   /* column-range sharding */
+    int64_t totalBlocks = 0;                             /* --totalBlocks: skip the count pass */
 
     static struct option lopts[] = {
         {"mergeGap",        required_argument, 0, 'g'},
@@ -591,6 +730,9 @@ int taf_summary_main(int argc, char *argv[]) {
         {"tmp",             required_argument, 0, 'T'},
         {"threads",         required_argument, 0, 'p'},
         {"allRefs",         no_argument,       0, 'A'},
+        {"shard",           required_argument, 0, 1001},
+        {"shardMerge",      no_argument,       0, 1002},
+        {"totalBlocks",     required_argument, 0, 1003},
         {"help",            no_argument,       0, 'h'},
         {0,0,0,0}
     };
@@ -601,6 +743,13 @@ int taf_summary_main(int argc, char *argv[]) {
             case 'r': refGenome  = optarg; break;
             case 'o': outputFile = optarg; break;
             case 'A': allRefs    = 1; break;
+            case 1001:   /* --shard i/N */
+                if (sscanf(optarg, "%d/%d", &shardIdx, &shardN) != 2 || shardN <= 0 || shardIdx < 0 || shardIdx >= shardN) {
+                    fprintf(stderr, "taffy summary: --shard must be i/N with 0<=i<N\n"); return 1;
+                }
+                break;
+            case 1002: shardMergeMode = 1; break;
+            case 1003: totalBlocks = atoll(optarg); break;
             case 'g': mergeGap   = atoi(optarg); break;
             case 's': minSize    = atoi(optarg); break;
             case 'S': maxSize    = atoi(optarg); break;
@@ -619,6 +768,10 @@ int taf_summary_main(int argc, char *argv[]) {
                   "  -o FILE   output bed (default stdout); with --allRefs, an output DIRECTORY\n"
                   "  --allRefs  ONE scan emits a bed per LEAF genome to <-o DIR>/<genome>.bed\n"
                   "            (every leaf is a master; -r is ignored)\n"
+                  "  --shard i/N  (column-range sharding) process only block-group i of N, with\n"
+                  "            -r or --allRefs; writes <-o DIR>/<ref>.shard<i>.recs (no merge)\n"
+                  "  --shardMerge  combine <-o DIR>/*.shard*.recs -> <-o DIR>/<ref>.bed\n"
+                  "  --totalBlocks N  skip --shard's block-count pass (orchestrator counts once)\n"
                   "  --tmp DIR (TMPDIR|/tmp)  scratch dir for the packed per-chrom buckets (needs\n"
                   "            room for ~the packed record volume); bounds peak RAM\n"
                   "  --threads N (ncores)  parallel per-chrom sort+merge workers\n"
@@ -629,18 +782,34 @@ int taf_summary_main(int argc, char *argv[]) {
                 return (c == 'h') ? 0 : 1;
         }
     }
-    if (inputFile == NULL) {
-        fprintf(stderr, "taffy summary: -i is required\n");
-        return 1;
-    }
-    if (allRefs) {
+    if (shardMergeMode) {
         if (outputFile == NULL) {
-            fprintf(stderr, "taffy summary: --allRefs requires -o <output directory>\n");
+            fprintf(stderr, "taffy summary --shardMerge: requires -o <shard directory>\n");
             return 1;
         }
-    } else if (refGenome == NULL) {
-        fprintf(stderr, "taffy summary: -r is required (or use --allRefs)\n");
-        return 1;
+    } else {
+        if (inputFile == NULL) {
+            fprintf(stderr, "taffy summary: -i is required\n");
+            return 1;
+        }
+        if (shardIdx >= 0) {               /* --shard: scan one block-group */
+            if (outputFile == NULL) {
+                fprintf(stderr, "taffy summary --shard: requires -o <shard directory>\n");
+                return 1;
+            }
+            if (!allRefs && refGenome == NULL) {
+                fprintf(stderr, "taffy summary --shard: needs -r <ref> or --allRefs\n");
+                return 1;
+            }
+        } else if (allRefs) {
+            if (outputFile == NULL) {
+                fprintf(stderr, "taffy summary: --allRefs requires -o <output directory>\n");
+                return 1;
+            }
+        } else if (refGenome == NULL) {
+            fprintf(stderr, "taffy summary: -r is required (or use --allRefs)\n");
+            return 1;
+        }
     }
     if (chainOverlapFrac < 0.0 || chainOverlapFrac > 1.0) {
         fprintf(stderr, "taffy summary: --chainOverlapFrac must be in [0,1]\n");
@@ -656,6 +825,14 @@ int taf_summary_main(int argc, char *argv[]) {
     }
 
     scorer_init();
+
+    /* --shardMerge needs no input MAF: gather the text shard temps -> per-ref beds */
+    if (shardMergeMode) {
+        Interner *msrc = interner_new();
+        do_shard_merge(outputFile, msrc, tmpDir, nThreads);
+        interner_free(msrc);
+        return 0;
+    }
 
     FILE *in_fh = fopen(inputFile, "r");
     if (in_fh == NULL) { fprintf(stderr, "taffy summary: cannot open %s\n", inputFile); return 1; }
@@ -681,6 +858,67 @@ int taf_summary_main(int argc, char *argv[]) {
     }
 
     Interner *srcInt = interner_new();   /* species ids -- shared across references */
+
+    if (shardIdx >= 0) {
+        /* -------- --shard i/N: emit per-reference TEXT records for the block
+         * group [lo,hi) to <outDir>/<ref>.shard<i>.recs (no sort/merge here;
+         * --shardMerge reunites them).  Phase 1 reads sequentially and SKIPS
+         * out-of-group blocks; a later phase will .tai-seek to the byte range. */
+        if (mkdir(outputFile, 0777) != 0 && errno != EEXIST) {
+            fprintf(stderr, "taffy summary: cannot create shard dir %s\n", outputFile); return 1;
+        }
+        int64_t B = totalBlocks;
+        if (B <= 0) {                       /* count pass (or pass --totalBlocks to skip it) */
+            int fmt; bool r;
+            LI *l = reopen_input(inputFile, &fmt, &r);
+            Alignment *prev = NULL;
+            while (1) {
+                Alignment *a = (fmt == 0) ? taf_read_block(prev, r, l) : maf_read_block(l);
+                if (prev != NULL) { alignment_destruct(prev, 1); prev = NULL; }
+                if (a == NULL) break;
+                B++; prev = a;
+            }
+            LI_destruct(l);
+        }
+        int64_t lo = (int64_t) shardIdx * B / shardN;
+        int64_t hi = (int64_t) (shardIdx + 1) * B / shardN;
+
+        stHash *refMap = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, NULL, NULL);
+        stList *refList = stList_construct();
+        AllRefsCtx acx = { gt, srcInt, refMap, refList, tmpDir,
+                           1, outputFile, shardIdx, allRefs ? NULL : refGenome };
+        int fmt2; bool r2;
+        LI *l2 = reopen_input(inputFile, &fmt2, &r2);
+        Alignment *prev = NULL; int64_t blk = 0, processed = 0;
+        while (1) {
+            Alignment *a = (fmt2 == 0) ? taf_read_block(prev, r2, l2) : maf_read_block(l2);
+            if (prev != NULL) { alignment_destruct(prev, 1); prev = NULL; }
+            if (a == NULL) break;
+            if (blk >= lo && blk < hi) { score_block_allrefs(&acx, a); processed++; }
+            blk++; prev = a;
+        }
+        LI_destruct(l2);
+
+        int nRefs = stList_length(refList);
+        for (int i = 0; i < nRefs; i++) {
+            RefState *rs = stList_get(refList, i);
+            if (rs->wfp != NULL) {
+                if (fclose(rs->wfp) != 0) { fprintf(stderr, "taffy summary: error writing %s\n", rs->tmp_path); return 1; }
+                rs->wfp = NULL;
+            }
+            interner_free(rs->chromInt); free(rs->name); free(rs);
+        }
+        stList_destruct(refList);
+        stHash_destruct(refMap);
+        fprintf(stderr, "taffy summary --shard %d/%d: blocks [%" PRId64 ",%" PRId64 ") = %" PRId64
+                " of %" PRId64 " total, %d ref(s)\n", shardIdx, shardN, lo, hi, processed, B, nRefs);
+
+        interner_free(srcInt);
+        gerp_tree_destruct(gt);
+        LI_destruct(li);
+        if (header_tag) tag_destruct(header_tag);
+        return 0;
+    }
 
     if (allRefs) {
         /* -------- fan-out: ONE scan, every leaf genome is a master routed to its
