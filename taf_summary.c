@@ -53,6 +53,7 @@
 
 #define _GNU_SOURCE   /* mkstemp/fdopen */
 #include "taf.h"
+#include "tui.h"
 #include "gerp.h"
 #include "line_iterator.h"
 #include "sonLib.h"
@@ -867,37 +868,75 @@ int taf_summary_main(int argc, char *argv[]) {
         if (mkdir(outputFile, 0777) != 0 && errno != EEXIST) {
             fprintf(stderr, "taffy summary: cannot create shard dir %s\n", outputFile); return 1;
         }
-        int64_t B = totalBlocks;
-        if (B <= 0) {                       /* count pass (or pass --totalBlocks to skip it) */
-            int fmt; bool r;
-            LI *l = reopen_input(inputFile, &fmt, &r);
-            Alignment *prev = NULL;
-            while (1) {
-                Alignment *a = (fmt == 0) ? taf_read_block(prev, r, l) : maf_read_block(l);
-                if (prev != NULL) { alignment_destruct(prev, 1); prev = NULL; }
-                if (a == NULL) break;
-                B++; prev = a;
-            }
-            LI_destruct(l);
-        }
-        int64_t lo = (int64_t) shardIdx * B / shardN;
-        int64_t hi = (int64_t) (shardIdx + 1) * B / shardN;
-
         stHash *refMap = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, NULL, NULL);
         stList *refList = stList_construct();
         AllRefsCtx acx = { gt, srcInt, refMap, refList, tmpDir,
                            1, outputFile, shardIdx, allRefs ? NULL : refGenome };
-        int fmt2; bool r2;
-        LI *l2 = reopen_input(inputFile, &fmt2, &r2);
-        Alignment *prev = NULL; int64_t blk = 0, processed = 0;
-        while (1) {
-            Alignment *a = (fmt2 == 0) ? taf_read_block(prev, r2, l2) : maf_read_block(l2);
-            if (prev != NULL) { alignment_destruct(prev, 1); prev = NULL; }
-            if (a == NULL) break;
-            if (blk >= lo && blk < hi) { score_block_allrefs(&acx, a); processed++; }
-            blk++; prev = a;
+        int64_t processed = 0;
+
+        /* phase 2: if a .tui (universal-column index) is present, SEEK to this
+         * shard's COLUMN range and extract only its whole blocks -- reading just
+         * this shard's slice of the file, not the whole thing.  tui_extract emits
+         * a block for every interval its column span overlaps, so we assign each
+         * block to exactly one shard by its column START -- giving the same
+         * partition (and thus the same --shardMerge output) as the phase-1
+         * block-count split.  No .tui -> fall back to phase-1 scan-and-skip. */
+        char *tui_fn = tui_path(inputFile);
+        Tui *tui = NULL;
+        if (tui_fn != NULL) {
+            FILE *probe = fopen(tui_fn, "rb");
+            if (probe != NULL) { fclose(probe); tui = tui_load(tui_fn); }
         }
-        LI_destruct(l2);
+        if (tui != NULL) {
+            int64_t T = tui_total_columns(tui);
+            int64_t col_lo = (int64_t) shardIdx * T / shardN;
+            int64_t col_hi = (int64_t) (shardIdx + 1) * T / shardN;
+            TuiInterval iv = { col_lo, col_hi, 0, 0 };
+            TuiExtractIt *xit = tui_extract_iterator(tui, li, input_format == 1, rle, &iv, 1);
+            Alignment *a;
+            while ((a = tui_extract_next(xit, li)) != NULL) {
+                tui_extract_take_ownership(xit);
+                int64_t cs = tui_extract_col_start(xit);
+                if (cs >= col_lo && cs < col_hi) { score_block_allrefs(&acx, a); processed++; }
+                alignment_destruct(a, 1);
+            }
+            tui_extract_iterator_destruct(xit);
+            tui_destruct(tui);
+            fprintf(stderr, "taffy summary --shard %d/%d: .tui column-seek [%" PRId64 ",%" PRId64
+                    ") of T=%" PRId64 ", %" PRId64 " blocks, %d ref(s)\n",
+                    shardIdx, shardN, col_lo, col_hi, T, processed, (int) stList_length(refList));
+        } else {
+            int64_t B = totalBlocks;
+            if (B <= 0) {                   /* count pass (or pass --totalBlocks to skip it) */
+                int fmt; bool r;
+                LI *l = reopen_input(inputFile, &fmt, &r);
+                Alignment *prev = NULL;
+                while (1) {
+                    Alignment *a = (fmt == 0) ? taf_read_block(prev, r, l) : maf_read_block(l);
+                    if (prev != NULL) { alignment_destruct(prev, 1); prev = NULL; }
+                    if (a == NULL) break;
+                    B++; prev = a;
+                }
+                LI_destruct(l);
+            }
+            int64_t lo = (int64_t) shardIdx * B / shardN;
+            int64_t hi = (int64_t) (shardIdx + 1) * B / shardN;
+            int fmt2; bool r2;
+            LI *l2 = reopen_input(inputFile, &fmt2, &r2);
+            Alignment *prev = NULL; int64_t blk = 0;
+            while (1) {
+                Alignment *a = (fmt2 == 0) ? taf_read_block(prev, r2, l2) : maf_read_block(l2);
+                if (prev != NULL) { alignment_destruct(prev, 1); prev = NULL; }
+                if (a == NULL) break;
+                if (blk >= lo && blk < hi) { score_block_allrefs(&acx, a); processed++; }
+                blk++; prev = a;
+            }
+            LI_destruct(l2);
+            fprintf(stderr, "taffy summary --shard %d/%d: scan-and-skip blocks [%" PRId64 ",%" PRId64
+                    ") = %" PRId64 " of %" PRId64 " total, %d ref(s)\n",
+                    shardIdx, shardN, lo, hi, processed, B, (int) stList_length(refList));
+        }
+        if (tui_fn != NULL) free(tui_fn);
 
         int nRefs = stList_length(refList);
         for (int i = 0; i < nRefs; i++) {
@@ -910,8 +949,6 @@ int taf_summary_main(int argc, char *argv[]) {
         }
         stList_destruct(refList);
         stHash_destruct(refMap);
-        fprintf(stderr, "taffy summary --shard %d/%d: blocks [%" PRId64 ",%" PRId64 ") = %" PRId64
-                " of %" PRId64 " total, %d ref(s)\n", shardIdx, shardN, lo, hi, processed, B, nRefs);
 
         interner_free(srcInt);
         gerp_tree_destruct(gt);
