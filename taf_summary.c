@@ -645,11 +645,22 @@ static char *parse_shard_ref(const char *fn) {
     return ref;
 }
 
+/* Sort reference names lexicographically so --refShard partitions them the same
+ * way in every independent merge job (readdir order is not portable).  stList_sort
+ * passes the list elements (char*) directly to the comparator. */
+static int ref_name_cmp(const void *a, const void *b) {
+    return strcmp((const char *) a, (const char *) b);
+}
+
 /* --shardMerge: for each reference R, gather <dir>/R.shard*.recs (text: chrom
  * start end src score), re-intern the names, bucket by chrom, and finalize to
  * <dir>/R.bed.  Reuses finalize_reference, so each R.bed equals the non-sharded
- * run (compared as a sorted set -- the per-reference sort is global). */
-static void do_shard_merge(const char *dir, Interner *srcInt, const char *tmpDir, int nThreads) {
+ * run (compared as a sorted set -- the per-reference sort is global).
+ * With refShardN>1, this job handles only references whose sorted index ri
+ * satisfies ri % refShardN == refShardIdx (interleaved -> balances big/small refs
+ * across the M parallel merge jobs). */
+static void do_shard_merge(const char *dir, Interner *srcInt, const char *tmpDir, int nThreads,
+                           int refShardIdx, int refShardN) {
     DIR *d = opendir(dir);
     if (d == NULL) { fprintf(stderr, "taffy summary --shardMerge: cannot open dir %s\n", dir); exit(1); }
     stHash *byRef = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, free,
@@ -668,11 +679,14 @@ static void do_shard_merge(const char *dir, Interner *srcInt, const char *tmpDir
         stList_append(files, stString_copy(de->d_name));
     }
     closedir(d);
+    stList_sort(refOrder, ref_name_cmp);   /* portable, stable partition for --refShard */
 
     int nrefs = stList_length(refOrder);
-    int64_t total_out = 0;
+    int64_t total_out = 0, n_done = 0;
     char path[PATH_MAX];
     for (int ri = 0; ri < nrefs; ri++) {
+        if (refShardN > 1 && (ri % refShardN) != refShardIdx) continue;   /* not my reference */
+        n_done++;
         const char *ref = stList_get(refOrder, ri);
         stList *files = stHash_search(byRef, (void *) ref);
         Interner *chromInt = interner_new();
@@ -710,8 +724,9 @@ static void do_shard_merge(const char *dir, Interner *srcInt, const char *tmpDir
         total_out += no;
         fprintf(stderr, "  %s: %" PRId64 " raw recs -> %" PRId64 " merged rows\n", ref, raw, no);
     }
-    fprintf(stderr, "taffy summary --shardMerge: %d references, %" PRId64 " total merged rows (%d threads)\n",
-            nrefs, total_out, nThreads);
+    fprintf(stderr, "taffy summary --shardMerge: %" PRId64 "/%d references (refShard %d/%d), "
+            "%" PRId64 " total merged rows (%d threads)\n",
+            n_done, nrefs, refShardIdx, refShardN, total_out, nThreads);
     stList_destruct(refOrder);
     stHash_destruct(byRef);
 }
@@ -720,6 +735,7 @@ int taf_summary_main(int argc, char *argv[]) {
     char *inputFile = NULL, *outputFile = NULL, *refGenome = NULL, *tmpDir = NULL;
     int allRefs = 0;
     int shardIdx = -1, shardN = 0, shardMergeMode = 0;   /* column-range sharding */
+    int refShardIdx = 0, refShardN = 1;                  /* --refShard j/M: parallel merge */
     int64_t totalBlocks = 0;                             /* --totalBlocks: skip the count pass */
 
     static struct option lopts[] = {
@@ -734,6 +750,7 @@ int taf_summary_main(int argc, char *argv[]) {
         {"shard",           required_argument, 0, 1001},
         {"shardMerge",      no_argument,       0, 1002},
         {"totalBlocks",     required_argument, 0, 1003},
+        {"refShard",        required_argument, 0, 1004},
         {"help",            no_argument,       0, 'h'},
         {0,0,0,0}
     };
@@ -751,6 +768,11 @@ int taf_summary_main(int argc, char *argv[]) {
                 break;
             case 1002: shardMergeMode = 1; break;
             case 1003: totalBlocks = atoll(optarg); break;
+            case 1004:   /* --refShard j/M: this merge job handles 1/M of the refs */
+                if (sscanf(optarg, "%d/%d", &refShardIdx, &refShardN) != 2 || refShardN <= 0 || refShardIdx < 0 || refShardIdx >= refShardN) {
+                    fprintf(stderr, "taffy summary: --refShard must be j/M with 0<=j<M\n"); return 1;
+                }
+                break;
             case 'g': mergeGap   = atoi(optarg); break;
             case 's': minSize    = atoi(optarg); break;
             case 'S': maxSize    = atoi(optarg); break;
@@ -772,6 +794,8 @@ int taf_summary_main(int argc, char *argv[]) {
                   "  --shard i/N  (column-range sharding) process only block-group i of N, with\n"
                   "            -r or --allRefs; writes <-o DIR>/<ref>.shard<i>.recs (no merge)\n"
                   "  --shardMerge  combine <-o DIR>/*.shard*.recs -> <-o DIR>/<ref>.bed\n"
+                  "  --refShard j/M  with --shardMerge: this job merges only 1/M of the\n"
+                  "            references (sorted, interleaved) so the gather runs as an M-way array\n"
                   "  --totalBlocks N  skip --shard's block-count pass (orchestrator counts once)\n"
                   "  --tmp DIR (TMPDIR|/tmp)  scratch dir for the packed per-chrom buckets (needs\n"
                   "            room for ~the packed record volume); bounds peak RAM\n"
@@ -830,7 +854,7 @@ int taf_summary_main(int argc, char *argv[]) {
     /* --shardMerge needs no input MAF: gather the text shard temps -> per-ref beds */
     if (shardMergeMode) {
         Interner *msrc = interner_new();
-        do_shard_merge(outputFile, msrc, tmpDir, nThreads);
+        do_shard_merge(outputFile, msrc, tmpDir, nThreads, refShardIdx, refShardN);
         interner_free(msrc);
         return 0;
     }
