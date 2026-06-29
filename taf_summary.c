@@ -660,7 +660,7 @@ static int ref_name_cmp(const void *a, const void *b) {
  * satisfies ri % refShardN == refShardIdx (interleaved -> balances big/small refs
  * across the M parallel merge jobs). */
 static void do_shard_merge(const char *dir, Interner *srcInt, const char *tmpDir, int nThreads,
-                           int refShardIdx, int refShardN) {
+                           int refShardIdx, int refShardN, Tui *tui) {
     DIR *d = opendir(dir);
     if (d == NULL) { fprintf(stderr, "taffy summary --shardMerge: cannot open dir %s\n", dir); exit(1); }
     stHash *byRef = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, free,
@@ -722,6 +722,31 @@ static void do_shard_merge(const char *dir, Interner *srcInt, const char *tmpDir
         free(bs.arr);
         interner_free(chromInt);
         total_out += no;
+        /* With -i (the .tui), also emit <ref>.chrom.sizes for bedToBigBed.  The bed's
+         * chrom is the sequence part (genome prefix stripped), so strip it here too.
+         * tui_genome_seq_lengths stores the length directly as the value pointer. */
+        if (tui != NULL) {
+            stHash *sl = tui_genome_seq_lengths(tui, ref);
+            if (sl != NULL) {
+                snprintf(path, sizeof path, "%s/%s.chrom.sizes", dir, ref);
+                FILE *cs = fopen(path, "w");
+                if (cs == NULL) { fprintf(stderr, "taffy summary: cannot write %s\n", path); exit(1); }
+                size_t glen = strlen(ref);
+                stHashIterator *sit = stHash_getIterator(sl);
+                char *fn;
+                while ((fn = stHash_getNext(sit)) != NULL) {
+                    int64_t len = (int64_t) (intptr_t) stHash_search(sl, fn);
+                    const char *chrom = (strlen(fn) > glen + 1 && strncmp(fn, ref, glen) == 0 && fn[glen] == '.')
+                                        ? fn + glen + 1 : fn;
+                    fprintf(cs, "%s\t%" PRId64 "\n", chrom, len);
+                }
+                stHash_destructIterator(sit);
+                fclose(cs);
+                stHash_destruct(sl);
+            } else {
+                fprintf(stderr, "  WARNING: %s not in .tui roster -- no chrom.sizes written\n", ref);
+            }
+        }
         fprintf(stderr, "  %s: %" PRId64 " raw recs -> %" PRId64 " merged rows\n", ref, raw, no);
     }
     fprintf(stderr, "taffy summary --shardMerge: %" PRId64 "/%d references (refShard %d/%d), "
@@ -793,7 +818,8 @@ int taf_summary_main(int argc, char *argv[]) {
                   "            (every leaf is a master; -r is ignored)\n"
                   "  --shard i/N  (column-range sharding) process only block-group i of N, with\n"
                   "            -r or --allRefs; writes <-o DIR>/<ref>.shard<i>.recs (no merge)\n"
-                  "  --shardMerge  combine <-o DIR>/*.shard*.recs -> <-o DIR>/<ref>.bed\n"
+                  "  --shardMerge  combine <-o DIR>/*.shard*.recs -> <-o DIR>/<ref>.bed; with\n"
+                  "            -i (the universal input) also writes <ref>.chrom.sizes from its .tui\n"
                   "  --refShard j/M  with --shardMerge: this job merges only 1/M of the\n"
                   "            references (sorted, interleaved) so the gather runs as an M-way array\n"
                   "  --totalBlocks N  skip --shard's block-count pass (orchestrator counts once)\n"
@@ -854,7 +880,17 @@ int taf_summary_main(int argc, char *argv[]) {
     /* --shardMerge needs no input MAF: gather the text shard temps -> per-ref beds */
     if (shardMergeMode) {
         Interner *msrc = interner_new();
-        do_shard_merge(outputFile, msrc, tmpDir, nThreads, refShardIdx, refShardN);
+        Tui *mtui = NULL;
+        if (inputFile != NULL) {            /* -i optional here: enables <ref>.chrom.sizes */
+            char tui_p[PATH_MAX];
+            snprintf(tui_p, sizeof tui_p, "%s.tui", inputFile);
+            mtui = tui_load(tui_p);
+            if (mtui == NULL)
+                fprintf(stderr, "taffy summary --shardMerge: cannot open %s -- "
+                                "no chrom.sizes will be written\n", tui_p);
+        }
+        do_shard_merge(outputFile, msrc, tmpDir, nThreads, refShardIdx, refShardN, mtui);
+        if (mtui != NULL) tui_destruct(mtui);
         interner_free(msrc);
         return 0;
     }
