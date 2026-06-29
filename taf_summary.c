@@ -57,6 +57,7 @@
 #include "line_iterator.h"
 #include "sonLib.h"
 #include <ctype.h>
+#include <errno.h>
 #include <getopt.h>
 #include <inttypes.h>
 #include <limits.h>
@@ -66,6 +67,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 /* ----- defaults: match kent mafToBigMafSummary ----- */
@@ -297,6 +299,112 @@ static void score_block(ScoreCtx *cx, Alignment *aln) {
 }
 
 /* ===================================================================== */
+/* fan-out (--allRefs): every leaf genome is a master in ONE scan          */
+/* ===================================================================== */
+/* During the scan each reference keeps ONE open write stream (all its chroms
+ * mixed; chromId is carried in the packed record) -- N_refs streams total, NOT
+ * per-(ref,chrom) (that opened tens of thousands of buffered streams across all
+ * refs at once -> OOM).  Post-processing re-buckets ONE reference at a time, so
+ * the per-chrom fan-out (and its memory) is bounded to a single reference. */
+typedef struct {
+    char     *name;        /* genome name (owned) */
+    size_t    nameLen;
+    Interner *chromInt;    /* this reference's chroms (chromId carried in packed recs) */
+    FILE     *wfp;         /* ONE scan-temp write stream (lazy) */
+    char      tmp_path[PATH_MAX];
+    int64_t   n_recs;      /* packed records written to wfp */
+    int64_t   raw_n, n_with_ref, n_split_skipped;
+} RefState;
+
+typedef struct {
+    GerpTree *gt;
+    Interner *srcInt;      /* shared across references */
+    stHash   *refMap;      /* genome name -> RefState* (key aliases ->name) */
+    stList   *refList;     /* RefStates in first-seen order */
+    const char *tmpDir;
+} AllRefsCtx;
+
+static RefState *get_refstate(AllRefsCtx *cx, const char *g) {
+    RefState *rs = stHash_search(cx->refMap, (void *) g);
+    if (rs == NULL) {
+        rs = st_calloc(1, sizeof(RefState));   /* wfp=NULL, n_recs=0, tmp_path[0]=0 */
+        rs->name = stString_copy(g);
+        rs->nameLen = strlen(g);
+        rs->chromInt = interner_new();
+        stHash_insert(cx->refMap, rs->name, rs);   /* key aliases rs->name */
+        stList_append(cx->refList, rs);
+    }
+    return rs;
+}
+
+/* append one packed record to this reference's single scan-temp (lazy open) */
+static inline void put_ref_rec(RefState *rs, const char *tmpDir, uint32_t chromId,
+                               uint32_t start, uint32_t end, uint32_t srcId, double score) {
+    if (rs->wfp == NULL) {
+        snprintf(rs->tmp_path, PATH_MAX, "%s/taffy_sum_ref_XXXXXX", tmpDir);
+        int fd = mkstemp(rs->tmp_path);
+        if (fd < 0) { fprintf(stderr, "taffy summary: cannot create per-reference temp in %s\n", tmpDir); exit(1); }
+        rs->wfp = fdopen(fd, "wb");
+        if (rs->wfp == NULL) { fprintf(stderr, "taffy summary: fdopen per-reference temp failed\n"); exit(1); }
+    }
+    PackedRec r = { chromId, start, end, srcId, score };
+    fwrite(&r, sizeof r, 1, rs->wfp);
+    rs->n_recs++;
+}
+
+/* Mirror of score_block, but EVERY leaf row is a master routed to its own
+ * RefState.  For a given reference the emitted record SET equals the single-ref
+ * score_block(ref=that genome) set, so each per-reference bed matches a
+ * single-ref run (compared as a sorted set). */
+static void score_block_allrefs(AllRefsCtx *cx, Alignment *aln) {
+    int single_cover = (chainOverlapFrac < 1.0);
+    for (Alignment_Row *ref = aln->row; ref != NULL; ref = ref->n_row) {
+        const char *rg = gerp_tree_resolve_genome(cx->gt, ref->sequence_name);
+        if (rg == NULL || gerp_tree_is_ancestor(cx->gt, rg)) continue;   /* leaf masters only */
+        if (ref->length < minSeqSize || ref->length <= 0 || ref->sequence_length < minSeqSize) continue;
+        RefState *rs = get_refstate(cx, rg);
+        rs->n_with_ref++;
+        int64_t rstart = ref->strand ? ref->start
+            : ref->sequence_length - (ref->start + ref->length);
+        int64_t rend = rstart + ref->length;
+        const char *chrom = (strlen(ref->sequence_name) > rs->nameLen + 1)
+            ? ref->sequence_name + rs->nameLen + 1 : ref->sequence_name;
+        uint32_t chromId = intern_id(rs->chromInt, chrom);
+        if (ref->length > maxSize) rs->n_split_skipped++;
+
+        stHash *best = single_cover
+            ? stHash_construct3(stHash_stringKey, stHash_stringEqualKey, NULL, free) : NULL;
+        for (Alignment_Row *row = aln->row; row != NULL; row = row->n_row) {
+            if (row == ref || row->length == 0) continue;
+            const char *g = gerp_tree_resolve_genome(cx->gt, row->sequence_name);
+            if (g == NULL || strcmp(g, rg) == 0) continue;     /* unknown genome or reference paralog */
+            if (gerp_tree_is_ancestor(cx->gt, g)) continue;    /* ancestor */
+            double sc = score_pairwise(ref->bases, row->bases, aln->column_number, ref->length);
+            uint32_t srcId = intern_id(cx->srcInt, g);
+            if (single_cover) {
+                const char *gname = intern_name(cx->srcInt, srcId);  /* stable key */
+                double *cur = stHash_search(best, (void *) gname);
+                if (cur == NULL) { cur = st_malloc(sizeof(double)); *cur = sc; stHash_insert(best, (void *) gname, cur); }
+                else if (sc > *cur) *cur = sc;
+            } else {
+                put_ref_rec(rs, cx->tmpDir, chromId, (uint32_t) rstart, (uint32_t) rend, srcId, sc); rs->raw_n++;
+            }
+        }
+        if (single_cover) {
+            stHashIterator *hit = stHash_getIterator(best);
+            char *gname;
+            while ((gname = stHash_getNext(hit)) != NULL) {
+                double *cur = stHash_search(best, gname);
+                uint32_t srcId = intern_id(cx->srcInt, gname);
+                put_ref_rec(rs, cx->tmpDir, chromId, (uint32_t) rstart, (uint32_t) rend, srcId, *cur); rs->raw_n++;
+            }
+            stHash_destructIterator(hit);
+            stHash_destruct(best);
+        }
+    }
+}
+
+/* ===================================================================== */
 /* per-chrom in-memory sort + region merge (run in parallel)              */
 /* ===================================================================== */
 typedef struct { uint32_t start, end, srcId; double score; } MergedRec;
@@ -397,8 +505,82 @@ static int cmp_chrom_name(const void *a, const void *b) {
                   intern_name(g_chrom_for_sort, *(const uint32_t *) b));
 }
 
+/* flush+close buckets, parallel per-chrom sort+merge, then concat the per-chrom
+ * outputs in chrom-name order to `out`.  Returns the merged row count.  Shared
+ * by the single-ref path and each --allRefs reference (so a reference's bed is
+ * produced identically either way). */
+static int64_t finalize_reference(BucketSet *bs, Interner *chromInt, Interner *srcInt,
+                                  const char *tmpDir, int nThreads, FILE *out) {
+    for (int i = 0; i < bs->n; i++)
+        if (bs->arr[i].wfp != NULL) {
+            if (fclose(bs->arr[i].wfp) != 0) {
+                fprintf(stderr, "taffy summary: error writing bucket %s\n", bs->arr[i].in_path); exit(1);
+            }
+            bs->arr[i].wfp = NULL;
+        }
+
+    WorkPool wp = { bs, chromInt, srcInt, tmpDir, 0, PTHREAD_MUTEX_INITIALIZER };
+    int nt = nThreads; if (nt > bs->n) nt = bs->n; if (nt < 1) nt = 1;
+    pthread_t *tids = st_malloc((size_t) nt * sizeof(pthread_t));
+    for (int t = 0; t < nt; t++) pthread_create(&tids[t], NULL, worker, &wp);
+    for (int t = 0; t < nt; t++) pthread_join(tids[t], NULL);
+    free(tids);
+
+    uint32_t *order = st_malloc((size_t) (bs->n > 0 ? bs->n : 1) * sizeof(uint32_t));
+    for (int i = 0; i < bs->n; i++) order[i] = (uint32_t) i;
+    g_chrom_for_sort = chromInt;
+    qsort(order, (size_t) bs->n, sizeof(uint32_t), cmp_chrom_name);
+    int64_t n_out = 0;
+    char buf[1 << 16];
+    for (int i = 0; i < bs->n; i++) {
+        Bucket *b = &bs->arr[order[i]];
+        if (b->merged_n == 0 || b->out_path[0] == 0) continue;
+        FILE *cf = fopen(b->out_path, "r");
+        if (cf == NULL) { fprintf(stderr, "taffy summary: cannot read out temp %s\n", b->out_path); exit(1); }
+        size_t r;
+        while ((r = fread(buf, 1, sizeof buf, cf)) > 0) fwrite(buf, 1, r, out);
+        fclose(cf);
+        remove(b->out_path);
+        n_out += b->merged_n;
+    }
+    free(order);
+    return n_out;
+}
+
+/* re-read a reference's single scan-temp, route its records into per-chrom
+ * buckets (bounded to THIS reference's chroms), then finalize as usual.  Lets
+ * --allRefs keep only N_refs streams open during the scan and one reference's
+ * chrom fan-out during post -- exactly the single-ref path's footprint. */
+static int64_t rebucket_and_finalize(RefState *rs, Interner *srcInt,
+                                     const char *tmpDir, int nThreads, FILE *out) {
+    if (rs->wfp != NULL) {
+        if (fclose(rs->wfp) != 0) { fprintf(stderr, "taffy summary: error writing %s\n", rs->tmp_path); exit(1); }
+        rs->wfp = NULL;
+    }
+    BucketSet bs = { NULL, 0, 0 };
+    if (rs->n_recs > 0) {
+        FILE *f = fopen(rs->tmp_path, "rb");
+        if (f == NULL) { fprintf(stderr, "taffy summary: cannot reopen %s\n", rs->tmp_path); exit(1); }
+        enum { RBUF = 1 << 16 };
+        PackedRec *rbuf = st_malloc((size_t) RBUF * sizeof(PackedRec));
+        size_t got;
+        while ((got = fread(rbuf, sizeof(PackedRec), RBUF, f)) > 0)
+            for (size_t i = 0; i < got; i++) {
+                Bucket *bk = get_bucket(&bs, rbuf[i].chromId, tmpDir);
+                put_rec(bk, rbuf[i].chromId, rbuf[i].start, rbuf[i].end, rbuf[i].srcId, rbuf[i].score);
+            }
+        free(rbuf);
+        fclose(f);
+        remove(rs->tmp_path);
+    }
+    int64_t n_out = finalize_reference(&bs, rs->chromInt, srcInt, tmpDir, nThreads, out);
+    free(bs.arr);
+    return n_out;
+}
+
 int taf_summary_main(int argc, char *argv[]) {
     char *inputFile = NULL, *outputFile = NULL, *refGenome = NULL, *tmpDir = NULL;
+    int allRefs = 0;
 
     static struct option lopts[] = {
         {"mergeGap",        required_argument, 0, 'g'},
@@ -408,15 +590,17 @@ int taf_summary_main(int argc, char *argv[]) {
         {"chainOverlapFrac",required_argument, 0, 'F'},
         {"tmp",             required_argument, 0, 'T'},
         {"threads",         required_argument, 0, 'p'},
+        {"allRefs",         no_argument,       0, 'A'},
         {"help",            no_argument,       0, 'h'},
         {0,0,0,0}
     };
     int c;
-    while ((c = getopt_long(argc, argv, "i:r:o:g:s:S:q:F:T:p:h", lopts, NULL)) != -1) {
+    while ((c = getopt_long(argc, argv, "i:r:o:g:s:S:q:F:T:p:Ah", lopts, NULL)) != -1) {
         switch (c) {
             case 'i': inputFile  = optarg; break;
             case 'r': refGenome  = optarg; break;
             case 'o': outputFile = optarg; break;
+            case 'A': allRefs    = 1; break;
             case 'g': mergeGap   = atoi(optarg); break;
             case 's': minSize    = atoi(optarg); break;
             case 'S': maxSize    = atoi(optarg); break;
@@ -432,7 +616,9 @@ int taf_summary_main(int argc, char *argv[]) {
                   "  Output is (chrom,start)-sorted; feed straight to bedToBigBed -type=bed3+4.\n"
                   "  -i FILE   universal MAF/TAF (its `# hal` header tree names leaves vs ancestors)\n"
                   "  -r NAME   reference genome (the 'master'); its leaf neighbours are scored\n"
-                  "  -o FILE   output bed (default stdout)\n"
+                  "  -o FILE   output bed (default stdout); with --allRefs, an output DIRECTORY\n"
+                  "  --allRefs  ONE scan emits a bed per LEAF genome to <-o DIR>/<genome>.bed\n"
+                  "            (every leaf is a master; -r is ignored)\n"
                   "  --tmp DIR (TMPDIR|/tmp)  scratch dir for the packed per-chrom buckets (needs\n"
                   "            room for ~the packed record volume); bounds peak RAM\n"
                   "  --threads N (ncores)  parallel per-chrom sort+merge workers\n"
@@ -443,8 +629,17 @@ int taf_summary_main(int argc, char *argv[]) {
                 return (c == 'h') ? 0 : 1;
         }
     }
-    if (inputFile == NULL || refGenome == NULL) {
-        fprintf(stderr, "taffy summary: -i and -r are required\n");
+    if (inputFile == NULL) {
+        fprintf(stderr, "taffy summary: -i is required\n");
+        return 1;
+    }
+    if (allRefs) {
+        if (outputFile == NULL) {
+            fprintf(stderr, "taffy summary: --allRefs requires -o <output directory>\n");
+            return 1;
+        }
+    } else if (refGenome == NULL) {
+        fprintf(stderr, "taffy summary: -r is required (or use --allRefs)\n");
         return 1;
     }
     if (chainOverlapFrac < 0.0 || chainOverlapFrac > 1.0) {
@@ -480,79 +675,94 @@ int taf_summary_main(int argc, char *argv[]) {
     }
     GerpTree *gt = gerp_tree_construct(hal->value);
     if (gt == NULL) { fprintf(stderr, "taffy summary: failed to parse `# hal` tree\n"); return 1; }
-    if (gerp_tree_is_ancestor(gt, refGenome)) {
+    if (!allRefs && gerp_tree_is_ancestor(gt, refGenome)) {
         fprintf(stderr, "taffy summary: -r '%s' is an internal (ancestor) node, not a genome\n", refGenome);
         return 1;
     }
 
-    FILE *out = (outputFile == NULL) ? stdout : fopen(outputFile, "w");
-    if (out == NULL) { fprintf(stderr, "taffy summary: cannot write %s\n", outputFile); return 1; }
+    Interner *srcInt = interner_new();   /* species ids -- shared across references */
 
-    /* -------- stream blocks: score each, single-covering species in-block,
-     * routing packed records to per-reference-chrom buckets. Keep only the
-     * previous block alive (TAF deltas reference it); free it on the next read. */
-    Interner *chromInt = interner_new(), *srcInt = interner_new();
-    BucketSet bs = { NULL, 0, 0 };
-    ScoreCtx cx = { gt, refGenome, strlen(refGenome), chromInt, srcInt, &bs, tmpDir, 0, 0, 0 };
-    Alignment *prev = NULL;
-    int64_t n_blocks = 0;
-    while (1) {
-        Alignment *aln = (input_format == 0) ? taf_read_block(prev, rle, li) : maf_read_block(li);
-        if (prev != NULL) { alignment_destruct(prev, 1); prev = NULL; }   /* consumed by the read above */
-        if (aln == NULL) break;
-        n_blocks++;
-        score_block(&cx, aln);
-        prev = aln;
-    }
-    int64_t raw_n = cx.raw_n, n_with_ref = cx.n_with_ref, n_split_skipped = cx.n_split_skipped;
-
-    /* flush + close all bucket write handles before the (re-reading) merge phase */
-    for (int i = 0; i < bs.n; i++)
-        if (bs.arr[i].wfp != NULL) {
-            if (fclose(bs.arr[i].wfp) != 0) { fprintf(stderr, "taffy summary: error writing bucket %s\n", bs.arr[i].in_path); return 1; }
-            bs.arr[i].wfp = NULL;
+    if (allRefs) {
+        /* -------- fan-out: ONE scan, every leaf genome is a master routed to its
+         * own per-chrom buckets; then finalize each to <outDir>/<genome>.bed.
+         * Each per-reference bed equals the single-ref `-r <genome>` run. */
+        if (mkdir(outputFile, 0777) != 0 && errno != EEXIST) {
+            fprintf(stderr, "taffy summary: cannot create output dir %s\n", outputFile); return 1;
         }
+        stHash *refMap = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, NULL, NULL);
+        stList *refList = stList_construct();
+        AllRefsCtx acx = { gt, srcInt, refMap, refList, tmpDir };
+        Alignment *prev = NULL;
+        int64_t n_blocks = 0;
+        while (1) {
+            Alignment *aln = (input_format == 0) ? taf_read_block(prev, rle, li) : maf_read_block(li);
+            if (prev != NULL) { alignment_destruct(prev, 1); prev = NULL; }
+            if (aln == NULL) break;
+            n_blocks++;
+            score_block_allrefs(&acx, aln);
+            prev = aln;
+        }
+        stHash_destruct(refMap);   /* lookups done; RefStates live on in refList */
 
-    /* parallel per-chrom sort + merge */
-    WorkPool wp = { &bs, chromInt, srcInt, tmpDir, 0, PTHREAD_MUTEX_INITIALIZER };
-    int nt = nThreads; if (nt > bs.n) nt = bs.n; if (nt < 1) nt = 1;
-    pthread_t *tids = st_malloc((size_t) nt * sizeof(pthread_t));
-    for (int t = 0; t < nt; t++) pthread_create(&tids[t], NULL, worker, &wp);
-    for (int t = 0; t < nt; t++) pthread_join(tids[t], NULL);
-    free(tids);
+        int nRefs = stList_length(refList);
+        int64_t total_out = 0;
+        char path[PATH_MAX];
+        for (int i = 0; i < nRefs; i++) {
+            RefState *rs = stList_get(refList, i);
+            snprintf(path, sizeof path, "%s/%s.bed", outputFile, rs->name);
+            FILE *rout = fopen(path, "w");
+            if (rout == NULL) { fprintf(stderr, "taffy summary: cannot write %s\n", path); return 1; }
+            int64_t no = rebucket_and_finalize(rs, srcInt, tmpDir, nThreads, rout);
+            fclose(rout);
+            total_out += no;
+            fprintf(stderr, "  %s: %" PRId64 " master rows, %" PRId64 " raw recs -> %" PRId64 " merged rows\n",
+                    rs->name, rs->n_with_ref, rs->raw_n, no);
+            interner_free(rs->chromInt); free(rs->name); free(rs);
+        }
+        fprintf(stderr, "taffy summary --allRefs: %d references, %" PRId64 " blocks, "
+                "%" PRId64 " total merged rows (single-cover F=%.2f, %d threads)\n",
+                nRefs, n_blocks, total_out, chainOverlapFrac, nThreads);
+        stList_destruct(refList);
+    } else {
+        FILE *out = (outputFile == NULL) ? stdout : fopen(outputFile, "w");
+        if (out == NULL) { fprintf(stderr, "taffy summary: cannot write %s\n", outputFile); return 1; }
 
-    /* concatenate per-chrom outputs in lexicographic chrom order */
-    uint32_t *order = st_malloc((size_t) (bs.n > 0 ? bs.n : 1) * sizeof(uint32_t));
-    for (int i = 0; i < bs.n; i++) order[i] = (uint32_t) i;
-    g_chrom_for_sort = chromInt;
-    qsort(order, (size_t) bs.n, sizeof(uint32_t), cmp_chrom_name);
-    int64_t n_out = 0;
-    char buf[1 << 16];
-    for (int i = 0; i < bs.n; i++) {
-        Bucket *b = &bs.arr[order[i]];
-        if (b->merged_n == 0 || b->out_path[0] == 0) continue;
-        FILE *cf = fopen(b->out_path, "r");
-        if (cf == NULL) { fprintf(stderr, "taffy summary: cannot read out temp %s\n", b->out_path); return 1; }
-        size_t r;
-        while ((r = fread(buf, 1, sizeof buf, cf)) > 0) fwrite(buf, 1, r, out);
-        fclose(cf);
-        remove(b->out_path);
-        n_out += b->merged_n;
+        /* -------- single reference: stream blocks, score, single-cover species
+         * in-block, route to per-chrom buckets.  Keep only the previous block
+         * alive (TAF deltas reference it); free it on the next read. */
+        Interner *chromInt = interner_new();
+        BucketSet bs = { NULL, 0, 0 };
+        ScoreCtx cx = { gt, refGenome, strlen(refGenome), chromInt, srcInt, &bs, tmpDir, 0, 0, 0 };
+        Alignment *prev = NULL;
+        int64_t n_blocks = 0;
+        while (1) {
+            Alignment *aln = (input_format == 0) ? taf_read_block(prev, rle, li) : maf_read_block(li);
+            if (prev != NULL) { alignment_destruct(prev, 1); prev = NULL; }
+            if (aln == NULL) break;
+            n_blocks++;
+            score_block(&cx, aln);
+            prev = aln;
+        }
+        int64_t raw_n = cx.raw_n, n_with_ref = cx.n_with_ref, n_split_skipped = cx.n_split_skipped;
+
+        int64_t n_out = finalize_reference(&bs, chromInt, srcInt, tmpDir, nThreads, out);
+        if (out != stdout) fclose(out);
+
+        int nt = nThreads; if (nt > bs.n) nt = bs.n; if (nt < 1) nt = 1;
+        fprintf(stderr, "taffy summary: %" PRId64 " blocks (%" PRId64 " reference master rows, "
+                "single-cover F=%.2f), %" PRId64 " raw records -> %" PRId64 " merged summary rows "
+                "(%d chroms, %d threads)\n",
+                n_blocks, n_with_ref, chainOverlapFrac, raw_n, n_out, bs.n, nt);
+        if (n_split_skipped > 0)
+            fprintf(stderr, "taffy summary: NOTE: %" PRId64 " reference master row(s) had span > "
+                    "maxSize=%d and were NOT split (cosmetic; universal-MAF blocks are normally small)\n",
+                    n_split_skipped, maxSize);
+
+        free(bs.arr);
+        interner_free(chromInt);
     }
-    free(order);
 
-    if (out != stdout) fclose(out);
-    fprintf(stderr, "taffy summary: %" PRId64 " blocks (%" PRId64 " reference master rows, "
-            "single-cover F=%.2f), %" PRId64 " raw records -> %" PRId64 " merged summary rows "
-            "(%d chroms, %d threads)\n",
-            n_blocks, n_with_ref, chainOverlapFrac, raw_n, n_out, bs.n, nt);
-    if (n_split_skipped > 0)
-        fprintf(stderr, "taffy summary: NOTE: %" PRId64 " reference master row(s) had span > "
-                "maxSize=%d and were NOT split (cosmetic; universal-MAF blocks are normally small)\n",
-                n_split_skipped, maxSize);
-
-    free(bs.arr);
-    interner_free(chromInt); interner_free(srcInt);
+    interner_free(srcInt);
     gerp_tree_destruct(gt);
     LI_destruct(li);
     if (header_tag) tag_destruct(header_tag);
