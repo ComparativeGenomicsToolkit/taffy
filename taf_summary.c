@@ -26,14 +26,24 @@
  * anchored single-coverage the real bigMafSummary has.  No cross-block chaining
  * is needed (the reference is already single-cover by base).
  *
+ * MEMORY: universal block order != reference order, so the per-record entries
+ * must be sorted by (src, chrom, start) before the region merge.  Buffering them
+ * all in RAM scales with the SUMMARY size (the 28-species fish generates enough
+ * raw records to OOM a 31 GB box).  Instead we STREAM raw records to a temp file,
+ * EXTERNAL-`sort` it (spills to disk under --tmp), and stream-merge the sorted
+ * result -- peak RAM is then a small constant (the merge's one pending block +
+ * IO buffers), independent of record count.  Disk use is ~the raw record volume;
+ * point --tmp at a roomy filesystem.
+ *
  * Output is bed3+4 (chrom start end src score leftStatus rightStatus), the same
- * schema as kent's mafSummary.as.  Like kent's tool the output is NOT sorted;
- * pipe it through `sort -k1,1 -k2,2n` then `bedToBigBed -type=bed3+4
- * -as=mafSummary.as -tab`.
+ * schema as kent's mafSummary.as, grouped by (src, chrom).  bedToBigBed wants
+ * (chrom, start) order, so pipe through `sort -k1,1 -k2,2n` then `bedToBigBed
+ * -type=bed3+4 -as=mafSummary.as -tab`.
  *
  *  Released under the MIT license, see LICENSE.txt
  */
 
+#define _GNU_SOURCE   /* mkstemp/popen/fdopen */
 #include "taf.h"
 #include "gerp.h"
 #include "line_iterator.h"
@@ -41,9 +51,11 @@
 #include <ctype.h>
 #include <getopt.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 /* ----- defaults: match kent mafToBigMafSummary ----- */
 static int mergeGap   = 500;
@@ -142,24 +154,8 @@ static double score_pairwise(const char *master, const char *other,
 }
 
 /* ===================================================================== */
-/* record collection + per-reference merge                               */
+/* record streaming (to temp) + streaming per-(src,chrom) region merge    */
 /* ===================================================================== */
-typedef struct {
-    char *chrom;        /* interned (stable) */
-    char *src;          /* interned (stable) */
-    int64_t start, end; /* reference forward coords */
-    double score;
-} Rec;
-
-/* group by src, then chrom, then start (pointer compares give grouping;
- * we only need grouping + start order for the merge, not lexicographic). */
-static int rec_cmp(const void *a, const void *b) {
-    const Rec *x = a, *y = b;
-    if (x->src != y->src)     return (x->src   < y->src)   ? -1 : 1;
-    if (x->chrom != y->chrom) return (x->chrom < y->chrom) ? -1 : 1;
-    if (x->start != y->start) return (x->start < y->start) ? -1 : 1;
-    return 0;
-}
 
 static char *intern(stHash *pool, const char *s) {
     char *v = stHash_search(pool, (void *) s);
@@ -167,52 +163,59 @@ static char *intern(stHash *pool, const char *s) {
     return v;
 }
 
-static void emit(FILE *f, char *chrom, char *src, int64_t start, int64_t end, double score) {
-    /* bed3+4; empty left/right status (kent leaves them blank for these) */
+/* bed3+4; empty left/right status (kent leaves them blank for these) */
+static void emit(FILE *f, const char *chrom, const char *src, int64_t start, int64_t end, double score) {
     fprintf(f, "%s\t%" PRId64 "\t%" PRId64 "\t%s\t%g\t\t\n", chrom, start, end, src, score);
 }
 
-/* One (src,chrom) group recs[lo..hi), sorted by start.  After single-cover the
- * records are non-overlapping, so apply kent mafToBigMafSummary's plain region
- * merge: merge adjacent within mergeGap (length-weighted average), hold blocks
- * <= minSize pending, output once a block grows past minSize. */
-static int64_t flush_group(FILE *f, Rec *recs, size_t lo, size_t hi) {
-    char *chrom = recs[lo].chrom, *src = recs[lo].src;
+/* one raw record to the temp: src \t chrom \t start \t end \t score.
+ * src/chrom FIRST so external `sort -k1 -k2 -k3n` groups by (src,chrom) and
+ * orders by start, matching the merge's expectations.  score at full %.17g so
+ * the merge sees the exact doubles (no rounding before length-weighted avg). */
+static void rec_to_tmp(FILE *tmp, const char *src, const char *chrom,
+                       int64_t start, int64_t end, double score) {
+    fprintf(tmp, "%s\t%s\t%" PRId64 "\t%" PRId64 "\t%.17g\n", src, chrom, start, end, score);
+}
+
+/* Stream-merge the EXTERNALLY-sorted temp (records grouped by (src,chrom),
+ * ordered by start) using kent mafToBigMafSummary's plain region merge: merge
+ * adjacent within mergeGap (length-weighted average), output a block once it
+ * grows past minSize, flush at each group boundary.  Constant memory. */
+static int64_t stream_merge(FILE *sorted, FILE *out) {
     int64_t n_out = 0;
+    char line[4096];
+    char src[1024], chrom[1024], psrc[1024] = "\1", pchrom[1024] = "\1";
     int have = 0; int64_t pstart = 0, pend = 0; double pscore = 0;
-    for (size_t k = lo; k < hi; ++k) {
-        Rec *r = &recs[k];
-        if (have && (r->start + 1 - pend < mergeGap)) {
-            double total = pscore * (double)(pend - pstart) + r->score * (double)(r->end - r->start);
-            pend = r->end;
+    while (fgets(line, sizeof line, sorted) != NULL) {
+        int64_t start, end; double score;
+        if (sscanf(line, "%1023[^\t]\t%1023[^\t]\t%" SCNd64 "\t%" SCNd64 "\t%lf",
+                   src, chrom, &start, &end, &score) != 5)
+            continue;
+        if (strcmp(src, psrc) != 0 || strcmp(chrom, pchrom) != 0) {
+            if (have) { emit(out, pchrom, psrc, pstart, pend, pscore); n_out++; have = 0; }
+            strcpy(psrc, src); strcpy(pchrom, chrom);
+        }
+        if (have && (start + 1 - pend < mergeGap)) {
+            double total = pscore * (double)(pend - pstart) + score * (double)(end - start);
+            pend = end;
             pscore = total / (double)(pend - pstart);
         } else {
-            if (have) { emit(f, chrom, src, pstart, pend, pscore); n_out++; }
-            pstart = r->start; pend = r->end; pscore = r->score; have = 1;
+            if (have) { emit(out, pchrom, psrc, pstart, pend, pscore); n_out++; }
+            pstart = start; pend = end; pscore = score; have = 1;
         }
-        if (pend - pstart > minSize) { emit(f, chrom, src, pstart, pend, pscore); n_out++; have = 0; }
+        if (pend - pstart > minSize) { emit(out, pchrom, psrc, pstart, pend, pscore); n_out++; have = 0; }
     }
-    if (have) { emit(f, chrom, src, pstart, pend, pscore); n_out++; }
+    if (have) { emit(out, pchrom, psrc, pstart, pend, pscore); n_out++; }
     return n_out;
 }
 
-/* per-block scoring context (accumulates records across the stream) */
+/* per-block scoring context (streams raw records to cx->tmp) */
 typedef struct {
     GerpTree *gt; const char *ref; size_t refLen;
     stHash *pool;
-    Rec *recs; size_t recN, recCap;
+    FILE *tmp; int64_t raw_n;
     int64_t n_with_ref, n_split_skipped;
 } ScoreCtx;
-
-static void rec_append(ScoreCtx *cx, char *chrom, char *src, int64_t start, int64_t end, double score) {
-    if (cx->recN == cx->recCap) { cx->recCap *= 2; cx->recs = st_realloc(cx->recs, cx->recCap * sizeof(Rec)); }
-    cx->recs[cx->recN].chrom = chrom;
-    cx->recs[cx->recN].src   = src;
-    cx->recs[cx->recN].start = start;
-    cx->recs[cx->recN].end   = end;
-    cx->recs[cx->recN].score = score;
-    cx->recN++;
-}
 
 /* For EACH reference (master) row in the block, emit one record per leaf
  * species, scored master-vs-species in the reference's coords.  Single-cover
@@ -247,7 +250,7 @@ static void score_block(ScoreCtx *cx, Alignment *aln) {
                 if (cur == NULL) { cur = st_malloc(sizeof(double)); *cur = sc; stHash_insert(best, gi, cur); }
                 else if (sc > *cur) *cur = sc;
             } else {
-                rec_append(cx, chromI, gi, rstart, rend, sc);
+                rec_to_tmp(cx->tmp, gi, chromI, rstart, rend, sc); cx->raw_n++;
             }
         }
         if (single_cover) {
@@ -255,7 +258,7 @@ static void score_block(ScoreCtx *cx, Alignment *aln) {
             char *gi;
             while ((gi = stHash_getNext(hit)) != NULL) {
                 double *cur = stHash_search(best, gi);
-                rec_append(cx, chromI, gi, rstart, rend, *cur);
+                rec_to_tmp(cx->tmp, gi, chromI, rstart, rend, *cur); cx->raw_n++;
             }
             stHash_destructIterator(hit);
             stHash_destruct(best);
@@ -264,7 +267,7 @@ static void score_block(ScoreCtx *cx, Alignment *aln) {
 }
 
 int taf_summary_main(int argc, char *argv[]) {
-    char *inputFile = NULL, *outputFile = NULL, *refGenome = NULL;
+    char *inputFile = NULL, *outputFile = NULL, *refGenome = NULL, *tmpDir = NULL;
 
     static struct option lopts[] = {
         {"mergeGap",        required_argument, 0, 'g'},
@@ -272,11 +275,12 @@ int taf_summary_main(int argc, char *argv[]) {
         {"maxSize",         required_argument, 0, 'S'},
         {"minSeqSize",      required_argument, 0, 'q'},
         {"chainOverlapFrac",required_argument, 0, 'F'},
+        {"tmp",             required_argument, 0, 'T'},
         {"help",            no_argument,       0, 'h'},
         {0,0,0,0}
     };
     int c;
-    while ((c = getopt_long(argc, argv, "i:r:o:g:s:S:q:F:h", lopts, NULL)) != -1) {
+    while ((c = getopt_long(argc, argv, "i:r:o:g:s:S:q:F:T:h", lopts, NULL)) != -1) {
         switch (c) {
             case 'i': inputFile  = optarg; break;
             case 'r': refGenome  = optarg; break;
@@ -286,15 +290,19 @@ int taf_summary_main(int argc, char *argv[]) {
             case 'S': maxSize    = atoi(optarg); break;
             case 'q': minSeqSize = atoll(optarg); break;
             case 'F': chainOverlapFrac = atof(optarg); break;
+            case 'T': tmpDir     = optarg; break;
             case 'h':
             default:
                 fprintf(stderr,
                   "usage: taffy summary -i <universal .taf/.maf[.gz]> -r <refGenome> [-o out.bed]\n"
                   "  Emit a per-reference bigMafSummary (bed3+4) from a universal alignment.\n"
-                  "  Pipe out through `sort -k1,1 -k2,2n` then bedToBigBed -type=bed3+4.\n"
+                  "  Output is grouped by (src,chrom); pipe through `sort -k1,1 -k2,2n` then\n"
+                  "  bedToBigBed -type=bed3+4 for the browser.\n"
                   "  -i FILE   universal MAF/TAF (its `# hal` header tree names leaves vs ancestors)\n"
                   "  -r NAME   reference genome (the 'master'); its leaf neighbours are scored\n"
                   "  -o FILE   output bed (default stdout)\n"
+                  "  --tmp DIR (TMPDIR|/tmp)  scratch dir for the external sort spill (needs room\n"
+                  "            for ~the raw record volume); bounds peak RAM regardless of size\n"
                   "  --chainOverlapFrac F (%.2f)  per-species in-block dedup: 0=single-cover\n"
                   "            (best paralog row, matches reference-anchored summary), 1=keep all\n"
                   "  --mergeGap N (%d)  --minSize N (%d)  --maxSize N (%d)  --minSeqSize N (%" PRId64 ")\n",
@@ -310,6 +318,7 @@ int taf_summary_main(int argc, char *argv[]) {
         fprintf(stderr, "taffy summary: --chainOverlapFrac must be in [0,1]\n");
         return 1;
     }
+    if (tmpDir == NULL) { tmpDir = getenv("TMPDIR"); if (tmpDir == NULL) tmpDir = "/tmp"; }
 
     scorer_init();
 
@@ -339,14 +348,21 @@ int taf_summary_main(int argc, char *argv[]) {
     FILE *out = (outputFile == NULL) ? stdout : fopen(outputFile, "w");
     if (out == NULL) { fprintf(stderr, "taffy summary: cannot write %s\n", outputFile); return 1; }
 
+    /* temp file for raw records (streamed during the scan, external-sorted after) */
+    char tmpl[PATH_MAX];
+    snprintf(tmpl, sizeof tmpl, "%s/taffy_summary_XXXXXX", tmpDir);
+    int tfd = mkstemp(tmpl);
+    if (tfd < 0) { fprintf(stderr, "taffy summary: cannot create temp in %s\n", tmpDir); return 1; }
+    FILE *recf = fdopen(tfd, "w");
+    if (recf == NULL) { fprintf(stderr, "taffy summary: fdopen temp failed\n"); close(tfd); remove(tmpl); return 1; }
+
     /* -------- stream blocks: score each, single-covering species in-block --------
      * The universal --noRefDupes invariant (tui.h) makes the reference single-
      * cover by base, so no cross-block chaining is needed.  We keep only the
      * previous block alive (TAF coordinate deltas reference it) and free it once
-     * the next block is read. */
+     * the next block is read.  Raw records go to recf, not RAM. */
     stHash *pool = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, NULL, NULL);
-    ScoreCtx cx = { gt, refGenome, strlen(refGenome), pool,
-                    st_malloc((1 << 16) * sizeof(Rec)), 0, 1 << 16, 0, 0 };
+    ScoreCtx cx = { gt, refGenome, strlen(refGenome), pool, recf, 0, 0, 0 };
     Alignment *prev = NULL;
     int64_t n_blocks = 0;
     while (1) {
@@ -357,30 +373,33 @@ int taf_summary_main(int argc, char *argv[]) {
         score_block(&cx, aln);
         prev = aln;
     }
-    Rec *recs = cx.recs; size_t recN = cx.recN;
-    int64_t n_with_ref = cx.n_with_ref, n_split_skipped = cx.n_split_skipped;
+    int64_t raw_n = cx.raw_n, n_with_ref = cx.n_with_ref, n_split_skipped = cx.n_split_skipped;
+    if (fclose(recf) != 0) { fprintf(stderr, "taffy summary: error writing temp %s\n", tmpl); remove(tmpl); return 1; }
 
-    /* sort (group by src, chrom; order by start) then plain adjacent merge */
-    qsort(recs, recN, sizeof(Rec), rec_cmp);
-    int64_t n_out = 0;
-    size_t gi = 0;
-    while (gi < recN) {
-        size_t gj = gi;
-        while (gj < recN && recs[gj].src == recs[gi].src && recs[gj].chrom == recs[gi].chrom) gj++;
-        n_out += flush_group(out, recs, gi, gj);
-        gi = gj;
+    /* external sort by (src, chrom, start), then stream-merge -- constant RAM.
+     * -t<TAB> so the fields split on tab; -T puts the sort's own spill on tmpDir. */
+    char cmd[2 * PATH_MAX + 128];
+    snprintf(cmd, sizeof cmd, "LC_ALL=C sort -S 1G -t'\t' -k1,1 -k2,2 -k3,3n -T '%s' '%s'", tmpDir, tmpl);
+    FILE *sorted = popen(cmd, "r");
+    if (sorted == NULL) { fprintf(stderr, "taffy summary: cannot spawn sort\n"); remove(tmpl); return 1; }
+    int64_t n_out = stream_merge(sorted, out);
+    int prc = pclose(sorted);
+    remove(tmpl);
+    if (prc != 0) {
+        fprintf(stderr, "taffy summary: external sort failed (exit %d) -- check --tmp '%s' has space\n", prc, tmpDir);
+        if (out != stdout) fclose(out);
+        return 1;
     }
 
     if (out != stdout) fclose(out);
     fprintf(stderr, "taffy summary: %" PRId64 " blocks (%" PRId64 " reference master rows, "
-            "single-cover F=%.2f), %zu raw records -> %" PRId64 " merged summary rows\n",
-            n_blocks, n_with_ref, chainOverlapFrac, recN, n_out);
+            "single-cover F=%.2f), %" PRId64 " raw records -> %" PRId64 " merged summary rows\n",
+            n_blocks, n_with_ref, chainOverlapFrac, raw_n, n_out);
     if (n_split_skipped > 0)
         fprintf(stderr, "taffy summary: NOTE: %" PRId64 " reference master row(s) had span > "
                 "maxSize=%d and were NOT split (cosmetic; universal-MAF blocks are normally small)\n",
                 n_split_skipped, maxSize);
 
-    free(recs);
     stHash_destruct(pool);
     gerp_tree_destruct(gt);
     LI_destruct(li);
