@@ -21,11 +21,12 @@
 #
 #   D) BIGBED (array of M jobs, afterok B; skip with --no-bigbed): each runs
 #        bedToBigBed -type=bed3+4 -as=<mafSummary.as> -tab <ref>.bed \
-#                    <ref>.chrom.sizes  OUTDIR/<ref>.bb
+#                    <ref>.chrom.sizes  OUTDIR/<ref>.summary.bb
 #      for its 1/M of the references.
 #
-#   C) FINALIZE (afterok D, or afterok B with --no-bigbed): mv SCRATCH/*.bed ->
-#      OUTDIR, rm the *.recs and *.chrom.sizes temps.
+#   C) FINALIZE (afterok D, or afterok B with --no-bigbed): default keeps ONLY
+#      OUTDIR/<ref>.summary.bb (drops the intermediate beds); with --no-bigbed it
+#      moves SCRATCH/*.bed -> OUTDIR instead.  Always rm the *.recs/*.chrom.sizes.
 #
 # No input prep: reuses the existing UNI.tui (the seek index + the chrom sizes).
 #
@@ -193,7 +194,7 @@ for (( k=\$SLURM_ARRAY_TASK_ID; k<\${#beds[@]}; k+=$NMERGE )); do
   bed="\${beds[k]}"; ref="\$(basename "\$bed" .bed)"
   sizes="$SCRATCH/\$ref.chrom.sizes"
   [ -s "\$sizes" ] || { echo "BIGBED: missing \$sizes (was MERGE run with -i?)" >&2; exit 1; }
-  "$BTB" -type=bed3+4 -as="$ASFILE" -tab "\$bed" "\$sizes" "$OUTDIR/\$ref.bb"
+  "$BTB" -type=bed3+4 -as="$ASFILE" -tab "\$bed" "\$sizes" "$OUTDIR/\$ref.summary.bb"
   made=\$((made+1))
 done
 echo "BIGBED task \$SLURM_ARRAY_TASK_ID: \$made bigBeds -> $OUTDIR"
@@ -211,14 +212,15 @@ set -euo pipefail
 nbed=\$(ls "$SCRATCH"/*.bed 2>/dev/null | wc -l)
 (( nbed > 0 )) || { echo "FINALIZE: no .bed files in $SCRATCH -- merge failed" >&2; exit 1; }
 if [ "$BIGBED" = 1 ]; then
-  nbb=\$(ls "$OUTDIR"/*.bb 2>/dev/null | wc -l)
+  nbb=\$(ls "$OUTDIR"/*.summary.bb 2>/dev/null | wc -l)
   (( nbb == nbed )) || { echo "FINALIZE: \$nbb bigBeds but \$nbed beds -- bigBed stage incomplete" >&2; exit 1; }
-fi
-if [ "\$(readlink -f "$SCRATCH")" != "\$(readlink -f "$OUTDIR")" ]; then
-  mv "$SCRATCH"/*.bed "$OUTDIR"/
+  rm -f "$SCRATCH"/*.bed                 # bigBeds only: drop the intermediate beds
+  echo "FINALIZE: \$nbb per-reference .summary.bb in $OUTDIR; beds + temps removed"
+else
+  if [ "\$(readlink -f "$SCRATCH")" != "\$(readlink -f "$OUTDIR")" ]; then mv "$SCRATCH"/*.bed "$OUTDIR"/; fi
+  echo "FINALIZE: \$nbed per-reference beds in $OUTDIR; temps removed"
 fi
 rm -f "$SCRATCH"/*.shard*.recs "$SCRATCH"/*.chrom.sizes "$SCRATCH/.mafSummary.as"
-echo "FINALIZE: \$nbed per-reference beds\${nbb:+ + \$nbb bigBeds} in $OUTDIR; temps removed"
 EOF
 
 if (( DRYRUN )); then

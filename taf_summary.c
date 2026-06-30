@@ -756,6 +756,43 @@ static void do_shard_merge(const char *dir, Interner *srcInt, const char *tmpDir
     stHash_destruct(byRef);
 }
 
+/* Byte-balanced shard boundaries.  The even column split (col_lo = i*T/N) is
+ * catastrophically imbalanced: the dense early/root columns carry far more
+ * species rows -> far more D^2 pairwise work, so an equal-WIDTH shard there runs
+ * for hours while sparse shards finish in minutes (~500x straggler observed on a
+ * 27-shard fish run).  Instead split on FILE BYTES via the .tui's universal-
+ * column -> file-position X-index (tui_idx_cols/fpos): dense columns carry more
+ * bytes, so equal byte fractions give each shard ~equal columns-worth of file =
+ * ~equal I/O+parse work.  Residual imbalance is only the depth ratio (work~D^2
+ * vs byte~D), a ~500x -> ~6x improvement; over-decomposition + the scheduler
+ * absorb the rest.  Boundaries are monotone and the per-shard ranges are
+ * disjoint and cover [0,T) exactly (shard i: [frac i/N, frac (i+1)/N)). */
+static int64_t shard_col_at_byte_frac(Tui *tui, double frac) {
+    int64_t T = tui_total_columns(tui);
+    if (frac <= 0.0) return 0;
+    if (frac >= 1.0) return T;
+    int64_t n = tui_idx_n(tui);
+    const int64_t *cols = tui_idx_cols(tui);
+    const int64_t *fpos = tui_idx_fpos(tui);
+    if (n <= 0 || cols == NULL || fpos == NULL) return (int64_t) (frac * (double) T);  /* no X-index: even */
+    int64_t target = (int64_t) (frac * (double) fpos[n - 1]);
+    int64_t lo = 0, hi = n;                         /* first index entry with fpos >= target */
+    while (lo < hi) { int64_t mid = (lo + hi) / 2; if (fpos[mid] < target) lo = mid + 1; else hi = mid; }
+    return (lo >= n) ? T : cols[lo];
+}
+
+/* File offset at universal column `col`, via the X-index (for logging the byte
+ * span of a shard).  Returns the offset of the first indexed column >= col. */
+static int64_t shard_byte_at_col(Tui *tui, int64_t col) {
+    int64_t n = tui_idx_n(tui);
+    const int64_t *cols = tui_idx_cols(tui);
+    const int64_t *fpos = tui_idx_fpos(tui);
+    if (n <= 0 || cols == NULL || fpos == NULL) return 0;
+    int64_t lo = 0, hi = n;                         /* first index entry with cols >= col */
+    while (lo < hi) { int64_t mid = (lo + hi) / 2; if (cols[mid] < col) lo = mid + 1; else hi = mid; }
+    return (lo >= n) ? fpos[n - 1] : fpos[lo];
+}
+
 int taf_summary_main(int argc, char *argv[]) {
     char *inputFile = NULL, *outputFile = NULL, *refGenome = NULL, *tmpDir = NULL;
     int allRefs = 0;
@@ -949,8 +986,10 @@ int taf_summary_main(int argc, char *argv[]) {
         }
         if (tui != NULL) {
             int64_t T = tui_total_columns(tui);
-            int64_t col_lo = (int64_t) shardIdx * T / shardN;
-            int64_t col_hi = (int64_t) (shardIdx + 1) * T / shardN;
+            int64_t col_lo = shard_col_at_byte_frac(tui, (double) shardIdx / shardN);
+            int64_t col_hi = shard_col_at_byte_frac(tui, (double) (shardIdx + 1) / shardN);
+            int64_t byte_lo = shard_byte_at_col(tui, col_lo);
+            int64_t byte_hi = shard_byte_at_col(tui, col_hi);
             TuiInterval iv = { col_lo, col_hi, 0, 0 };
             TuiExtractIt *xit = tui_extract_iterator(tui, li, input_format == 1, rle, &iv, 1);
             Alignment *a;
@@ -962,9 +1001,10 @@ int taf_summary_main(int argc, char *argv[]) {
             }
             tui_extract_iterator_destruct(xit);
             tui_destruct(tui);
-            fprintf(stderr, "taffy summary --shard %d/%d: .tui column-seek [%" PRId64 ",%" PRId64
-                    ") of T=%" PRId64 ", %" PRId64 " blocks, %d ref(s)\n",
-                    shardIdx, shardN, col_lo, col_hi, T, processed, (int) stList_length(refList));
+            fprintf(stderr, "taffy summary --shard %d/%d: .tui byte-balanced column-seek [%" PRId64 ",%"
+                    PRId64 ") of T=%" PRId64 " (~%" PRId64 " MB of file), %" PRId64 " blocks, %d ref(s)\n",
+                    shardIdx, shardN, col_lo, col_hi, T, (byte_hi - byte_lo) >> 20, processed,
+                    (int) stList_length(refList));
         } else {
             int64_t B = totalBlocks;
             if (B <= 0) {                   /* count pass (or pass --totalBlocks to skip it) */
