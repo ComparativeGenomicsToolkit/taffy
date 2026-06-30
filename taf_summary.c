@@ -399,6 +399,10 @@ typedef struct {
     const char  *outDir;
     int          shardIdx;
     const char  *restrictRef;
+    /* --refSubset j/M (with --allRefs): master only leaves whose name-hash %M==j,
+     * so the file is read M times and each job masters ~1/M of the references
+     * (node-local raw stays ~1/M, no shared scratch).  mod<=1 = master all. */
+    int          refSubsetMod, refSubsetIdx;
 } AllRefsCtx;
 
 static RefState *get_refstate(AllRefsCtx *cx, const char *g) {
@@ -449,6 +453,38 @@ static inline void emit_ref_rec(AllRefsCtx *cx, RefState *rs, const char *chrom,
     }
 }
 
+/* djb2 string hash -- deterministic across processes so every --refSubset job
+ * partitions the reference roster identically (no shared roster needed). */
+static uint64_t name_hash(const char *s) {
+    uint64_t h = 5381;
+    for (; *s; s++) h = h * 33u + (unsigned char) *s;
+    return h;
+}
+
+/* Write <dir>/<ref>.chrom.sizes from the .tui sequence lengths (genome prefix
+ * stripped to match the bed's chrom names) for bedToBigBed.  No-op if tui==NULL. */
+static void write_chrom_sizes(Tui *tui, const char *ref, const char *dir) {
+    if (tui == NULL) return;
+    stHash *sl = tui_genome_seq_lengths(tui, ref);
+    if (sl == NULL) { fprintf(stderr, "  WARNING: %s not in .tui roster -- no chrom.sizes\n", ref); return; }
+    char path[PATH_MAX];
+    snprintf(path, sizeof path, "%s/%s.chrom.sizes", dir, ref);
+    FILE *cs = fopen(path, "w");
+    if (cs == NULL) { fprintf(stderr, "taffy summary: cannot write %s\n", path); exit(1); }
+    size_t glen = strlen(ref);
+    stHashIterator *sit = stHash_getIterator(sl);
+    char *fn;
+    while ((fn = stHash_getNext(sit)) != NULL) {
+        int64_t len = (int64_t) (intptr_t) stHash_search(sl, fn);
+        const char *chrom = (strlen(fn) > glen + 1 && strncmp(fn, ref, glen) == 0 && fn[glen] == '.')
+                            ? fn + glen + 1 : fn;
+        fprintf(cs, "%s\t%" PRId64 "\n", chrom, len);
+    }
+    stHash_destructIterator(sit);
+    wclose(cs, path);
+    stHash_destruct(sl);
+}
+
 /* Mirror of score_block, but EVERY leaf row is a master routed to its own
  * RefState.  For a given reference the emitted record SET equals the single-ref
  * score_block(ref=that genome) set, so each per-reference bed matches a
@@ -464,6 +500,8 @@ static void score_block_allrefs(AllRefsCtx *cx, Alignment *aln) {
         if (g == NULL || gerp_tree_is_ancestor(cx->gt, g)) continue;   /* leaf only */
         intern_id(cx->srcInt, g); n_leaf++;
         if (cx->restrictRef != NULL && strcmp(g, cx->restrictRef) != 0) continue;
+        if (cx->refSubsetMod > 1 &&
+            (int) (name_hash(g) % (uint64_t) cx->refSubsetMod) != cx->refSubsetIdx) continue;  /* not my subset */
         if (r->length < minSeqSize || r->length <= 0 || r->sequence_length < minSeqSize) continue;
         get_refstate(cx, g); n_master++;   /* one RefState per master genome */
     }
@@ -493,6 +531,8 @@ static void score_block_allrefs(AllRefsCtx *cx, Alignment *aln) {
         const char *rg = gerp_tree_resolve_genome(cx->gt, ref->sequence_name);
         if (rg == NULL || gerp_tree_is_ancestor(cx->gt, rg)) continue;   /* leaf masters only */
         if (cx->restrictRef != NULL && strcmp(rg, cx->restrictRef) != 0) continue;  /* shard -r: one master */
+        if (cx->refSubsetMod > 1 &&
+            (int) (name_hash(rg) % (uint64_t) cx->refSubsetMod) != cx->refSubsetIdx) continue;  /* not my subset */
         if (ref->length < minSeqSize || ref->length <= 0 || ref->sequence_length < minSeqSize) continue;
         if (cur_nt > 1 &&
             (int)(intern_id(cx->srcInt, rg) % (uint32_t) cur_nt) != tid) continue;  /* not my genome */
@@ -920,6 +960,7 @@ int taf_summary_main(int argc, char *argv[]) {
     int allRefs = 0;
     int shardIdx = -1, shardN = 0, shardMergeMode = 0;   /* column-range sharding */
     int refShardIdx = 0, refShardN = 1;                  /* --refShard j/M: parallel merge */
+    int refSubsetIdx = 0, refSubsetMod = 1;              /* --refSubset j/M: per-reference fan-out */
     int64_t totalBlocks = 0;                             /* --totalBlocks: skip the count pass */
 
     static struct option lopts[] = {
@@ -936,6 +977,7 @@ int taf_summary_main(int argc, char *argv[]) {
         {"shardMerge",      no_argument,       0, 1002},
         {"totalBlocks",     required_argument, 0, 1003},
         {"refShard",        required_argument, 0, 1004},
+        {"refSubset",       required_argument, 0, 1006},
         {"help",            no_argument,       0, 'h'},
         {0,0,0,0}
     };
@@ -956,6 +998,11 @@ int taf_summary_main(int argc, char *argv[]) {
             case 1004:   /* --refShard j/M: this merge job handles 1/M of the refs */
                 if (sscanf(optarg, "%d/%d", &refShardIdx, &refShardN) != 2 || refShardN <= 0 || refShardIdx < 0 || refShardIdx >= refShardN) {
                     fprintf(stderr, "taffy summary: --refShard must be j/M with 0<=j<M\n"); return 1;
+                }
+                break;
+            case 1006:   /* --refSubset j/M: master only the refs with name-hash %M==j */
+                if (sscanf(optarg, "%d/%d", &refSubsetIdx, &refSubsetMod) != 2 || refSubsetMod <= 0 || refSubsetIdx < 0 || refSubsetIdx >= refSubsetMod) {
+                    fprintf(stderr, "taffy summary: --refSubset must be j/M with 0<=j<M\n"); return 1;
                 }
                 break;
             case 'g': mergeGap   = atoi(optarg); break;
@@ -988,6 +1035,9 @@ int taf_summary_main(int argc, char *argv[]) {
                   "            -i (the universal input) also writes <ref>.chrom.sizes from its .tui\n"
                   "  --refShard j/M  with --shardMerge: this job merges only 1/M of the\n"
                   "            references (sorted, interleaved) so the gather runs as an M-way array\n"
+                  "  --refSubset j/M  with --allRefs: master only 1/M of the references (by\n"
+                  "            name-hash); the file is read M times -> per-reference fan-out with no\n"
+                  "            shared scratch (raw stays node-local). Also writes <ref>.chrom.sizes\n"
                   "  --totalBlocks N  skip --shard's block-count pass (orchestrator counts once)\n"
                   "  --tmp DIR (TMPDIR|/tmp)  scratch dir for the packed per-chrom buckets (needs\n"
                   "            room for ~the packed record volume); bounds peak RAM\n"
@@ -1028,6 +1078,9 @@ int taf_summary_main(int argc, char *argv[]) {
         } else if (refGenome == NULL) {
             fprintf(stderr, "taffy summary: -r is required (or use --allRefs)\n");
             return 1;
+        }
+        if (refSubsetMod > 1 && !allRefs) {
+            fprintf(stderr, "taffy summary: --refSubset requires --allRefs\n"); return 1;
         }
     }
     if (chainOverlapFrac < 0.0 || chainOverlapFrac > 1.0) {
@@ -1198,6 +1251,7 @@ int taf_summary_main(int argc, char *argv[]) {
         stHash *refMap = stHash_construct3(stHash_stringKey, stHash_stringEqualKey, NULL, NULL);
         stList *refList = stList_construct();
         AllRefsCtx acx = { gt, srcInt, refMap, refList, tmpDir };
+        acx.refSubsetMod = refSubsetMod; acx.refSubsetIdx = refSubsetIdx;
         Alignment *prev = NULL;
         int64_t n_blocks = 0;
         while (1) {
@@ -1213,6 +1267,9 @@ int taf_summary_main(int argc, char *argv[]) {
         int nRefs = stList_length(refList);
         int64_t total_out = 0;
         char path[PATH_MAX];
+        Tui *atui = NULL;   /* <inputFile>.tui -> per-ref chrom.sizes for bedToBigBed */
+        { char tp[PATH_MAX]; snprintf(tp, sizeof tp, "%s.tui", inputFile); atui = tui_load(tp);
+          if (atui == NULL) fprintf(stderr, "taffy summary --allRefs: no %s -- no chrom.sizes written\n", tp); }
         for (int i = 0; i < nRefs; i++) {
             RefState *rs = stList_get(refList, i);
             snprintf(path, sizeof path, "%s/%s.bed", outputFile, rs->name);
@@ -1220,11 +1277,13 @@ int taf_summary_main(int argc, char *argv[]) {
             if (rout == NULL) { fprintf(stderr, "taffy summary: cannot write %s\n", path); return 1; }
             int64_t no = rebucket_and_finalize(rs, srcInt, tmpDir, nThreads, rout);
             wclose(rout, path);
+            write_chrom_sizes(atui, rs->name, outputFile);
             total_out += no;
             fprintf(stderr, "  %s: %" PRId64 " master rows, %" PRId64 " raw recs -> %" PRId64 " merged rows\n",
                     rs->name, rs->n_with_ref, rs->raw_n, no);
             interner_free(rs->chromInt); free(rs->name); free(rs);
         }
+        if (atui != NULL) tui_destruct(atui);
         fprintf(stderr, "taffy summary --allRefs: %d references, %" PRId64 " blocks, "
                 "%" PRId64 " total merged rows (single-cover F=%.2f, %d threads)\n",
                 nRefs, n_blocks, total_out, chainOverlapFrac, nThreads);
