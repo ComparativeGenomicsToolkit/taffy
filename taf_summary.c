@@ -201,7 +201,7 @@ static void interner_free(Interner *in) {
 /* ===================================================================== */
 /* packed records + per-reference-chrom buckets                           */
 /* ===================================================================== */
-typedef struct { uint32_t chromId, start, end, srcId; double score; } PackedRec;  /* 24B, score 8-aligned */
+typedef struct { uint32_t chromId; int64_t start, end; uint32_t srcId; double score; } PackedRec;  /* start/end int64: VGP sequences exceed 4.29 Gb (uint32 wraps) */
 
 typedef struct {
     FILE   *wfp;                 /* write handle during the scan (lazy) */
@@ -212,6 +212,15 @@ typedef struct {
 } Bucket;
 
 typedef struct { Bucket *arr; int n, cap; } BucketSet;
+
+/* Close a stream we WROTE to, aborting on any accumulated write error (ferror)
+ * or a flush/close failure -- a silent short write (ENOSPC, quota) must never
+ * pass as a valid-but-truncated output. */
+static void wclose(FILE *f, const char *what) {
+    int err = ferror(f);
+    if (fclose(f) != 0) err = 1;
+    if (err) { fprintf(stderr, "taffy summary: write error on %s\n", what); exit(1); }
+}
 
 static Bucket *get_bucket(BucketSet *bs, uint32_t id, const char *tmpDir) {
     if ((int) id >= bs->cap) {
@@ -236,7 +245,7 @@ static Bucket *get_bucket(BucketSet *bs, uint32_t id, const char *tmpDir) {
     return b;
 }
 
-static inline void put_rec(Bucket *b, uint32_t chromId, uint32_t start, uint32_t end, uint32_t srcId, double score) {
+static inline void put_rec(Bucket *b, uint32_t chromId, int64_t start, int64_t end, uint32_t srcId, double score) {
     PackedRec r = { chromId, start, end, srcId, score };
     fwrite(&r, sizeof r, 1, b->wfp);
     b->n_recs++;
@@ -284,7 +293,7 @@ static void score_block(ScoreCtx *cx, Alignment *aln) {
                 if (cur == NULL) { cur = st_malloc(sizeof(double)); *cur = sc; stHash_insert(best, (void *) gname, cur); }
                 else if (sc > *cur) *cur = sc;
             } else {
-                put_rec(bk, chromId, (uint32_t) rstart, (uint32_t) rend, srcId, sc); cx->raw_n++;
+                put_rec(bk, chromId, rstart, rend, srcId, sc); cx->raw_n++;
             }
         }
         if (single_cover) {
@@ -293,7 +302,7 @@ static void score_block(ScoreCtx *cx, Alignment *aln) {
             while ((gname = stHash_getNext(hit)) != NULL) {
                 double *cur = stHash_search(best, gname);
                 uint32_t srcId = intern_id(cx->srcInt, gname);
-                put_rec(bk, chromId, (uint32_t) rstart, (uint32_t) rend, srcId, *cur); cx->raw_n++;
+                put_rec(bk, chromId, rstart, rend, srcId, *cur); cx->raw_n++;
             }
             stHash_destructIterator(hit);
             stHash_destruct(best);
@@ -350,7 +359,7 @@ static RefState *get_refstate(AllRefsCtx *cx, const char *g) {
 
 /* append one packed record to this reference's single scan-temp (lazy open) */
 static inline void put_ref_rec(RefState *rs, const char *tmpDir, uint32_t chromId,
-                               uint32_t start, uint32_t end, uint32_t srcId, double score) {
+                               int64_t start, int64_t end, uint32_t srcId, double score) {
     if (rs->wfp == NULL) {
         snprintf(rs->tmp_path, PATH_MAX, "%s/taffy_sum_ref_XXXXXX", tmpDir);
         int fd = mkstemp(rs->tmp_path);
@@ -379,7 +388,7 @@ static inline void emit_ref_rec(AllRefsCtx *cx, RefState *rs, const char *chrom,
         fprintf(rs->wfp, "%s\t%" PRId64 "\t%" PRId64 "\t%s\t%.17g\n", chrom, start, end, srcName, score);
         rs->n_recs++;
     } else {
-        put_ref_rec(rs, cx->tmpDir, chromId, (uint32_t) start, (uint32_t) end, srcId, score);
+        put_ref_rec(rs, cx->tmpDir, chromId, start, end, srcId, score);
     }
 }
 
@@ -476,7 +485,7 @@ static void score_block_allrefs(AllRefsCtx *cx, Alignment *aln) {
 /* ===================================================================== */
 /* per-chrom in-memory sort + region merge (run in parallel)              */
 /* ===================================================================== */
-typedef struct { uint32_t start, end, srcId; double score; } MergedRec;
+typedef struct { int64_t start, end; uint32_t srcId; double score; } MergedRec;
 
 static int cmp_packed(const void *a, const void *b) {   /* by (srcId, start) */
     const PackedRec *x = a, *y = b;
@@ -518,9 +527,9 @@ static void process_chrom(WorkPool *wp, int cid) {
         if (mn == mcap) { mcap = mcap ? mcap * 2 : 1024; m = st_realloc(m, (size_t) mcap * sizeof(MergedRec)); } \
         m[mn].start = (s); m[mn].end = (e); m[mn].srcId = (sr); m[mn].score = (sc); mn++; \
     } while (0)
-    int have = 0, first = 1; uint32_t psrc = 0, pstart = 0, pend = 0; double pscore = 0;
+    int have = 0, first = 1; uint32_t psrc = 0; int64_t pstart = 0, pend = 0; double pscore = 0;
     for (int64_t i = 0; i < n; i++) {
-        uint32_t src = recs[i].srcId, start = recs[i].start, end = recs[i].end; double score = recs[i].score;
+        uint32_t src = recs[i].srcId; int64_t start = recs[i].start, end = recs[i].end; double score = recs[i].score;
         if (first || src != psrc) {
             if (have) { PUSH(pstart, pend, psrc, pscore); have = 0; }
             psrc = src; first = 0;
@@ -548,9 +557,9 @@ static void process_chrom(WorkPool *wp, int cid) {
     FILE *of = fdopen(ofd, "w");
     const char *chrom = intern_name(wp->chromInt, (uint32_t) cid);
     for (int64_t i = 0; i < mn; i++)
-        fprintf(of, "%s\t%" PRIu32 "\t%" PRIu32 "\t%s\t%g\t\t\n",
+        fprintf(of, "%s\t%" PRId64 "\t%" PRId64 "\t%s\t%g\t\t\n",
                 chrom, m[i].start, m[i].end, intern_name(wp->srcInt, m[i].srcId), m[i].score);
-    fclose(of);
+    wclose(of, b->out_path);
     free(m);
     b->merged_n = mn;
 }
@@ -582,9 +591,7 @@ static int64_t finalize_reference(BucketSet *bs, Interner *chromInt, Interner *s
                                   const char *tmpDir, int nThreads, FILE *out) {
     for (int i = 0; i < bs->n; i++)
         if (bs->arr[i].wfp != NULL) {
-            if (fclose(bs->arr[i].wfp) != 0) {
-                fprintf(stderr, "taffy summary: error writing bucket %s\n", bs->arr[i].in_path); exit(1);
-            }
+            wclose(bs->arr[i].wfp, bs->arr[i].in_path);
             bs->arr[i].wfp = NULL;
         }
 
@@ -623,7 +630,7 @@ static int64_t finalize_reference(BucketSet *bs, Interner *chromInt, Interner *s
 static int64_t rebucket_and_finalize(RefState *rs, Interner *srcInt,
                                      const char *tmpDir, int nThreads, FILE *out) {
     if (rs->wfp != NULL) {
-        if (fclose(rs->wfp) != 0) { fprintf(stderr, "taffy summary: error writing %s\n", rs->tmp_path); exit(1); }
+        wclose(rs->wfp, rs->tmp_path);
         rs->wfp = NULL;
     }
     BucketSet bs = { NULL, 0, 0 };
@@ -745,8 +752,8 @@ static void do_shard_merge(const char *dir, Interner *srcInt, const char *tmpDir
                 uint32_t chromId = intern_id(chromInt, line);   /* line[] now = chrom */
                 uint32_t srcId = intern_id(srcInt, src);
                 Bucket *bk = get_bucket(&bs, chromId, tmpDir);
-                put_rec(bk, chromId, (uint32_t) strtoll(s_start, NULL, 10),
-                        (uint32_t) strtoll(s_end, NULL, 10), srcId, strtod(s_score, NULL));
+                put_rec(bk, chromId, strtoll(s_start, NULL, 10),
+                        strtoll(s_end, NULL, 10), srcId, strtod(s_score, NULL));
                 raw++;
             }
             free(line);
@@ -756,7 +763,7 @@ static void do_shard_merge(const char *dir, Interner *srcInt, const char *tmpDir
         FILE *out = fopen(path, "w");
         if (out == NULL) { fprintf(stderr, "taffy summary: cannot write %s\n", path); exit(1); }
         int64_t no = finalize_reference(&bs, chromInt, srcInt, tmpDir, nThreads, out);
-        fclose(out);
+        wclose(out, path);
         free(bs.arr);
         interner_free(chromInt);
         total_out += no;
@@ -779,7 +786,7 @@ static void do_shard_merge(const char *dir, Interner *srcInt, const char *tmpDir
                     fprintf(cs, "%s\t%" PRId64 "\n", chrom, len);
                 }
                 stHash_destructIterator(sit);
-                fclose(cs);
+                wclose(cs, path);
                 stHash_destruct(sl);
             } else {
                 fprintf(stderr, "  WARNING: %s not in .tui roster -- no chrom.sizes written\n", ref);
@@ -1126,7 +1133,7 @@ int taf_summary_main(int argc, char *argv[]) {
             FILE *rout = fopen(path, "w");
             if (rout == NULL) { fprintf(stderr, "taffy summary: cannot write %s\n", path); return 1; }
             int64_t no = rebucket_and_finalize(rs, srcInt, tmpDir, nThreads, rout);
-            fclose(rout);
+            wclose(rout, path);
             total_out += no;
             fprintf(stderr, "  %s: %" PRId64 " master rows, %" PRId64 " raw recs -> %" PRId64 " merged rows\n",
                     rs->name, rs->n_with_ref, rs->raw_n, no);
@@ -1159,7 +1166,8 @@ int taf_summary_main(int argc, char *argv[]) {
         int64_t raw_n = cx.raw_n, n_with_ref = cx.n_with_ref, n_split_skipped = cx.n_split_skipped;
 
         int64_t n_out = finalize_reference(&bs, chromInt, srcInt, tmpDir, nThreads, out);
-        if (out != stdout) fclose(out);
+        if (out != stdout) wclose(out, outputFile);
+        else if (fflush(out) != 0 || ferror(out)) { fprintf(stderr, "taffy summary: write error on stdout\n"); exit(1); }
 
         int nt = nThreads; if (nt > bs.n) nt = bs.n; if (nt < 1) nt = 1;
         fprintf(stderr, "taffy summary: %" PRId64 " blocks (%" PRId64 " reference master rows, "
