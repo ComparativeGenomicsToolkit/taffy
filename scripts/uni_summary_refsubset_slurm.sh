@@ -40,8 +40,12 @@
 #     scan: ~ (refs/M) references' packed records, dominated by the deepest ref
 #     (~70 GB for a 577-way backbone genome).  With refs=577 and M=64 that is ~9
 #     refs => budget a few hundred GB of node-local; raise M if that is too much.
-#   * Peak RAM per job ~= --mergeMem (merge budget) + the biggest single bigBed
-#     build (sequential, so max not sum); --mem covers both.
+#   * Peak RAM per job ~= MAX(--mergeMem, the biggest single reference chrom's
+#     records x ~72 B): a chrom LARGER than --mergeMem is NOT capped -- it loads
+#     whole into RAM and runs alone -- so size --mem to the DEEPEST ref's biggest
+#     chrom (hundreds of M records => tens of GB), NOT to --mergeMem.  Measure it
+#     with a single-ref `-r <deepest backbone genome>` dry run first (it also pins
+#     down per-pass wall vs --time).  The bigBed build is smaller than the merge.
 #   * Shared FS holds only the final per-reference bigBeds (~1-2 TB total).
 #
 # Usage: uni_summary_refsubset_slurm.sh -i UNI.taf.gz -o OUTDIR [options]
@@ -162,7 +166,11 @@ for bed in "\$LOCAL"/beds/*.bed; do
   made=\$((made+1))
 done
 echo "SUMMARIZE pass \$SLURM_ARRAY_TASK_ID/$NPASS: \$made references -> $OUTDIR"
-(( made > 0 )) || { echo "SUMMARIZE: pass produced 0 references -- check the input/tree" >&2; exit 1; }
+# an empty subset (no leaf's name-hash landed in this pass) is a legitimate no-op,
+# NOT a failure -- still drop a per-pass sentinel so FINALIZE can confirm all $NPASS
+# passes actually ran (raising M makes empty passes EXPECTED, not an error).
+mkdir -p "$OUTDIR/.passes"
+touch "$OUTDIR/.passes/\$SLURM_ARRAY_TASK_ID.done"
 EOF
 
 # ---- C) FINALIZE: count outputs, report ----
@@ -174,41 +182,46 @@ cat > "$FINALIZE" <<EOF
 ${PARTITION:+#SBATCH --partition=$PARTITION}
 ${ACCOUNT:+#SBATCH --account=$ACCOUNT}
 set -euo pipefail
-if [ "$BIGBED" = 1 ]; then
-  n=\$(ls "$OUTDIR"/*.summary.bb 2>/dev/null | wc -l)
-  (( n > 0 )) || { echo "FINALIZE: no .summary.bb in $OUTDIR -- the summarize array failed" >&2; exit 1; }
-  rm -f "$OUTDIR/.mafSummary.as"
-  echo "FINALIZE: \$n per-reference .summary.bb in $OUTDIR"
-else
-  n=\$(ls "$OUTDIR"/*.bed 2>/dev/null | wc -l)
-  (( n > 0 )) || { echo "FINALIZE: no .bed in $OUTDIR -- the summarize array failed" >&2; exit 1; }
-  echo "FINALIZE: \$n per-reference .bed in $OUTDIR"
+# COMPLETENESS: every one of the $NPASS passes must have left its sentinel (an
+# empty subset still does).  FINALIZE is afterany, so this runs even when a pass
+# failed -- reporting the shortfall instead of silently shipping a partial browser.
+# A bare n>0 check would pass a 568/577 result; this catches it.
+done_n=\$(ls "$OUTDIR"/.passes/*.done 2>/dev/null | wc -l)
+if (( done_n != $NPASS )); then
+  miss=""
+  for j in \$(seq 0 $((NPASS-1))); do [ -f "$OUTDIR/.passes/\$j.done" ] || miss="\${miss:+\$miss,}\$j"; done
+  echo "FINALIZE: only \$done_n/$NPASS passes completed -- FAILED pass(es): \$miss" >&2
+  echo "  output is INCOMPLETE; rerun just those: sbatch --array=\$miss $SUMRUN ; then re-run FINALIZE" >&2
+  exit 1
 fi
+if [ "$BIGBED" = 1 ]; then n=\$(ls "$OUTDIR"/*.summary.bb 2>/dev/null | wc -l); rm -f "$OUTDIR/.mafSummary.as"; else n=\$(ls "$OUTDIR"/*.bed 2>/dev/null | wc -l); fi
+rm -rf "$OUTDIR/.passes"
+echo "FINALIZE: all $NPASS passes complete -> \$n per-reference outputs in $OUTDIR"
 EOF
 
 if (( DRYRUN )); then
   echo "[dry-run] wrote $SUMRUN, $FINALIZE" >&2
   echo "[dry-run] sbatch --array=0-$((NPASS-1)) $SUMRUN" >&2
-  echo "[dry-run] sbatch --dependency=afterok:<A> $FINALIZE" >&2
+  echo "[dry-run] sbatch --dependency=afterany:<A> $FINALIZE  # afterany so a pass failure is REPORTED, not silently dropped" >&2
   exit 0
 fi
 A_ID=$(sbatch --parsable --array=0-$((NPASS-1)) "$SUMRUN")
 echo ">> SUMMARIZE array submitted: job $A_ID ($NPASS passes)" >&2
-F_ID=$(sbatch --parsable --dependency=afterok:"$A_ID" "$FINALIZE")
-echo ">> FINALIZE submitted (afterok:$A_ID): job $F_ID -> $OUTDIR" >&2
+F_ID=$(sbatch --parsable --dependency=afterany:"$A_ID" "$FINALIZE")   # afterany: run even if a pass fails, so the shortfall is reported
+echo ">> FINALIZE submitted (afterany:$A_ID): job $F_ID -> $OUTDIR" >&2
 
 if (( WAIT )); then
   # Real SLURM jobs; the build still completes if THIS poll dies -- run under
-  # nohup/tmux for a multi-hour build.  afterok means any pass failure cancels
-  # FINALIZE, so it leaves the queue without writing -> the count check reports it.
+  # nohup/tmux for a multi-hour build.  FINALIZE is afterany, so it runs even when a
+  # pass fails: it removes OUTDIR/.passes/ only when all $NPASS passes completed,
+  # else leaves it and exits non-zero with the failed-pass list.
   echo ">> [--wait] blocking until job $F_ID completes (polling every 60s)..." >&2
   sleep 5
   while [[ -n "$(squeue -h -j "$F_ID" 2>/dev/null)" ]]; do sleep 60; done
   if (( BIGBED )); then n=$(ls "$OUTDIR"/*.summary.bb 2>/dev/null | wc -l); else n=$(ls "$OUTDIR"/*.bed 2>/dev/null | wc -l); fi
-  if (( n > 0 )); then
-    echo ">> done -> $n per-reference $( ((BIGBED)) && echo bigBeds || echo beds) in $OUTDIR" >&2
-  else
-    echo ">> BUILD FAILED: no outputs in $OUTDIR -- inspect summarize ($A_ID), finalize ($F_ID)" >&2
+  if [ -d "$OUTDIR/.passes" ]; then
+    echo ">> BUILD INCOMPLETE: not all $NPASS passes finished ($n outputs so far) -- see FINALIZE ($F_ID) for the failed-pass list; inspect summarize ($A_ID)" >&2
     exit 1
   fi
+  echo ">> done -> $n per-reference $( ((BIGBED)) && echo bigBeds || echo beds) in $OUTDIR" >&2
 fi

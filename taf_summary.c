@@ -651,6 +651,11 @@ static void *worker(void *arg) {
             pthread_cond_wait(&wp->cv, &wp->lock);
         wp->inUse += need;
         pthread_mutex_unlock(&wp->lock);
+        if (need > wp->budget)   /* a single chrom exceeds the whole --mergeMem budget */
+            fprintf(stderr, "taffy summary: chrom %s = %" PRId64 " records (~%.1f GiB) > --mergeMem %.1f GiB"
+                    " -- merging it ALONE; size the job's RAM to this, not to --mergeMem\n",
+                    intern_name(wp->chromInt, (uint32_t) cid), wp->bs->arr[cid].n_recs,
+                    (double) need / (double) (1LL << 30), (double) wp->budget / (double) (1LL << 30));
         process_chrom(wp, cid);
         pthread_mutex_lock(&wp->lock);
         wp->inUse -= need;
@@ -841,6 +846,11 @@ int taf_summary_main(int argc, char *argv[]) {
     }
 
     scorer_init();
+
+    /* multi-thread the bgzf decode -- a per-reference (--refSubset) run re-reads
+     * and decompresses the whole file once per pass, and decode is otherwise
+     * single-threaded (every other taffy scanner sets this). */
+    LI_set_bgzf_threads(nThreads);
 
     FILE *in_fh = fopen(inputFile, "r");
     if (in_fh == NULL) { fprintf(stderr, "taffy summary: cannot open %s\n", inputFile); return 1; }
