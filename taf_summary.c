@@ -83,6 +83,11 @@ static int64_t minSeqSize = 1;
  * (multi-cover; the region merge then length-weighted-averages them). */
 static double  chainOverlapFrac = 0.0;
 static int     nThreads = 0;   /* 0 => ncores */
+/* per-chrom sort+merge holds the whole chrom in RAM (recs + merged); with many
+ * threads on a scaffold-dense reference that sums past the box.  Cap concurrent
+ * in-RAM chrom bytes to this budget (workers wait their turn; a single chrom
+ * larger than the budget still runs, alone). */
+static int64_t mergeMemBudget = 8LL << 30;   /* 8 GiB */
 
 /* ===================================================================== */
 /* HOXD70 pairwise scorer -- ported verbatim from kent src/lib/mafScore.c */
@@ -204,14 +209,23 @@ static void interner_free(Interner *in) {
 typedef struct { uint32_t chromId; int64_t start, end; uint32_t srcId; double score; } PackedRec;  /* start/end int64: VGP sequences exceed 4.29 Gb (uint32 wraps) */
 
 typedef struct {
-    FILE   *wfp;                 /* write handle during the scan (lazy) */
-    char    in_path[PATH_MAX];   /* packed bucket temp */
-    char    out_path[PATH_MAX];  /* merged bed temp (set by worker; empty if none) */
+    FILE   *wfp;                 /* write handle during the scan (lazy; may be evicted) */
+    char   *in_path;             /* packed bucket temp (malloc'd; NULL until first open) */
+    char   *out_path;            /* merged bed temp (malloc'd; NULL until worker writes it) */
     int64_t n_recs;              /* raw records written */
     int64_t merged_n;            /* merged records (set by worker) */
 } Bucket;
 
-typedef struct { Bucket *arr; int n, cap; } BucketSet;
+/* A scaffold-dense reference can fan out to >10^5 chrom buckets -- one open fd
+ * each would blow past RLIMIT_NOFILE.  Keep at most `max_open` write streams
+ * open at once (a FIFO ring of the currently-open buckets); an evicted bucket's
+ * temp is reopened in append mode on its next write. */
+typedef struct {
+    Bucket  *arr; int n, cap;
+    int     *open_ring;          /* ids of the currently-open buckets, FIFO (ids, not
+                                  * pointers: arr is realloc'd as chroms arrive) */
+    int      ring_n, ring_head, max_open;
+} BucketSet;
 
 /* Close a stream we WROTE to, aborting on any accumulated write error (ferror)
  * or a flush/close failure -- a silent short write (ENOSPC, quota) must never
@@ -222,6 +236,45 @@ static void wclose(FILE *f, const char *what) {
     if (err) { fprintf(stderr, "taffy summary: write error on %s\n", what); exit(1); }
 }
 
+/* Ensure bucket `id`'s wfp is open for writing, holding the open-fd count under
+ * max_open.  First open creates the temp (mkstemp); a reopen appends (records
+ * within one bucket are order-independent -- process_chrom sorts -- so append is
+ * fine).  Takes an id, not a pointer: bs->arr is realloc'd as chroms arrive. */
+static void bucket_open(BucketSet *bs, int id, const char *tmpDir) {
+    Bucket *b = &bs->arr[id];
+    if (b->wfp != NULL) return;
+    if (bs->max_open == 0) {                          /* lazy: size the pool to the fd limit */
+        int cap = 8192;
+        struct rlimit rl;
+        if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY
+            && (int64_t) rl.rlim_cur / 2 < cap) cap = (int) (rl.rlim_cur / 2);
+        if (cap < 8) cap = 8;
+        bs->max_open = cap;
+        bs->open_ring = st_malloc((size_t) cap * sizeof(int));
+    }
+    if (bs->ring_n >= bs->max_open) {                 /* evict the FIFO-oldest open bucket */
+        Bucket *ev = &bs->arr[bs->open_ring[bs->ring_head]];
+        wclose(ev->wfp, ev->in_path);
+        ev->wfp = NULL;
+        bs->ring_head = (bs->ring_head + 1) % bs->max_open;
+        bs->ring_n--;
+    }
+    if (b->in_path == NULL) {
+        char tmpl[PATH_MAX];
+        snprintf(tmpl, sizeof tmpl, "%s/taffy_sum_bk_XXXXXX", tmpDir);
+        int fd = mkstemp(tmpl);
+        if (fd < 0) { fprintf(stderr, "taffy summary: cannot create bucket temp in %s (raise ulimit -n?)\n", tmpDir); exit(1); }
+        b->in_path = stString_copy(tmpl);
+        b->wfp = fdopen(fd, "wb");
+        if (b->wfp == NULL) { fprintf(stderr, "taffy summary: fdopen bucket failed\n"); exit(1); }
+    } else {
+        b->wfp = fopen(b->in_path, "ab");
+        if (b->wfp == NULL) { fprintf(stderr, "taffy summary: cannot reopen bucket %s (raise ulimit -n?)\n", b->in_path); exit(1); }
+    }
+    bs->open_ring[(bs->ring_head + bs->ring_n) % bs->max_open] = id;
+    bs->ring_n++;
+}
+
 static Bucket *get_bucket(BucketSet *bs, uint32_t id, const char *tmpDir) {
     if ((int) id >= bs->cap) {
         int nc = bs->cap ? bs->cap : 64;
@@ -229,20 +282,24 @@ static Bucket *get_bucket(BucketSet *bs, uint32_t id, const char *tmpDir) {
         bs->arr = st_realloc(bs->arr, (size_t) nc * sizeof(Bucket));
         for (int i = bs->cap; i < nc; i++) {
             bs->arr[i].wfp = NULL; bs->arr[i].n_recs = 0; bs->arr[i].merged_n = 0;
-            bs->arr[i].in_path[0] = 0; bs->arr[i].out_path[0] = 0;
+            bs->arr[i].in_path = NULL; bs->arr[i].out_path = NULL;
         }
         bs->cap = nc;
     }
     if ((int) id >= bs->n) bs->n = (int) id + 1;
-    Bucket *b = &bs->arr[id];
-    if (b->wfp == NULL) {
-        snprintf(b->in_path, PATH_MAX, "%s/taffy_sum_bk_XXXXXX", tmpDir);
-        int fd = mkstemp(b->in_path);
-        if (fd < 0) { fprintf(stderr, "taffy summary: cannot create bucket temp in %s (raise ulimit -n?)\n", tmpDir); exit(1); }
-        b->wfp = fdopen(fd, "wb");
-        if (b->wfp == NULL) { fprintf(stderr, "taffy summary: fdopen bucket failed\n"); exit(1); }
+    bucket_open(bs, (int) id, tmpDir);
+    return &bs->arr[id];
+}
+
+/* Free a BucketSet's heap: any straggler temp paths (and their files) plus the
+ * arrays.  Most paths are already removed+freed in process_chrom/finalize. */
+static void bucketset_destroy(BucketSet *bs) {
+    for (int i = 0; i < bs->cap; i++) {
+        if (bs->arr[i].in_path)  { remove(bs->arr[i].in_path);  free(bs->arr[i].in_path); }
+        if (bs->arr[i].out_path) { remove(bs->arr[i].out_path); free(bs->arr[i].out_path); }
     }
-    return b;
+    free(bs->open_ring);
+    free(bs->arr);
 }
 
 static inline void put_rec(Bucket *b, uint32_t chromId, int64_t start, int64_t end, uint32_t srcId, double score) {
@@ -503,6 +560,7 @@ static int cmp_merged(const void *a, const void *b) {   /* by (start, srcId) */
 typedef struct {
     BucketSet *bs; Interner *chromInt, *srcInt; const char *tmpDir;
     int next; pthread_mutex_t lock;
+    int64_t budget, inUse; pthread_cond_t cv;   /* concurrent in-RAM chrom-byte cap */
 } WorkPool;
 
 /* read bucket `cid` into RAM, sort by (srcId,start), kent region-merge per src,
@@ -520,6 +578,7 @@ static void process_chrom(WorkPool *wp, int cid) {
     }
     fclose(f);
     remove(b->in_path);
+    free(b->in_path); b->in_path = NULL;
     qsort(recs, (size_t) n, sizeof(PackedRec), cmp_packed);
 
     MergedRec *m = NULL; int64_t mn = 0, mcap = 0;
@@ -551,9 +610,11 @@ static void process_chrom(WorkPool *wp, int cid) {
 
     qsort(m, (size_t) mn, sizeof(MergedRec), cmp_merged);
 
-    snprintf(b->out_path, PATH_MAX, "%s/taffy_sum_out_XXXXXX", wp->tmpDir);
-    int ofd = mkstemp(b->out_path);
+    char otmpl[PATH_MAX];
+    snprintf(otmpl, sizeof otmpl, "%s/taffy_sum_out_XXXXXX", wp->tmpDir);
+    int ofd = mkstemp(otmpl);
     if (ofd < 0) { fprintf(stderr, "taffy summary: cannot create out temp in %s\n", wp->tmpDir); exit(1); }
+    b->out_path = stString_copy(otmpl);
     FILE *of = fdopen(ofd, "w");
     const char *chrom = intern_name(wp->chromInt, (uint32_t) cid);
     for (int64_t i = 0; i < mn; i++)
@@ -571,7 +632,20 @@ static void *worker(void *arg) {
         int cid = (wp->next < wp->bs->n) ? wp->next++ : -1;
         pthread_mutex_unlock(&wp->lock);
         if (cid < 0) break;
+        /* reserve this chrom's peak RAM (recs + merged, both live during merge);
+         * wait if it would exceed the budget -- unless we hold nothing, so a lone
+         * over-budget chrom proceeds rather than deadlocking. */
+        int64_t need = wp->bs->arr[cid].n_recs * (int64_t)(sizeof(PackedRec) + sizeof(MergedRec));
+        pthread_mutex_lock(&wp->lock);
+        while (wp->inUse > 0 && wp->inUse + need > wp->budget)
+            pthread_cond_wait(&wp->cv, &wp->lock);
+        wp->inUse += need;
+        pthread_mutex_unlock(&wp->lock);
         process_chrom(wp, cid);
+        pthread_mutex_lock(&wp->lock);
+        wp->inUse -= need;
+        pthread_cond_broadcast(&wp->cv);
+        pthread_mutex_unlock(&wp->lock);
     }
     return NULL;
 }
@@ -594,8 +668,10 @@ static int64_t finalize_reference(BucketSet *bs, Interner *chromInt, Interner *s
             wclose(bs->arr[i].wfp, bs->arr[i].in_path);
             bs->arr[i].wfp = NULL;
         }
+    bs->ring_n = 0; bs->ring_head = 0;   /* all streams closed; ring is now empty */
 
-    WorkPool wp = { bs, chromInt, srcInt, tmpDir, 0, PTHREAD_MUTEX_INITIALIZER };
+    WorkPool wp = { bs, chromInt, srcInt, tmpDir, 0, PTHREAD_MUTEX_INITIALIZER,
+                    mergeMemBudget, 0, PTHREAD_COND_INITIALIZER };
     int nt = nThreads; if (nt > bs->n) nt = bs->n; if (nt < 1) nt = 1;
     pthread_t *tids = st_malloc((size_t) nt * sizeof(pthread_t));
     for (int t = 0; t < nt; t++) pthread_create(&tids[t], NULL, worker, &wp);
@@ -610,13 +686,14 @@ static int64_t finalize_reference(BucketSet *bs, Interner *chromInt, Interner *s
     char buf[1 << 16];
     for (int i = 0; i < bs->n; i++) {
         Bucket *b = &bs->arr[order[i]];
-        if (b->merged_n == 0 || b->out_path[0] == 0) continue;
+        if (b->merged_n == 0 || b->out_path == NULL) continue;
         FILE *cf = fopen(b->out_path, "r");
         if (cf == NULL) { fprintf(stderr, "taffy summary: cannot read out temp %s\n", b->out_path); exit(1); }
         size_t r;
         while ((r = fread(buf, 1, sizeof buf, cf)) > 0) fwrite(buf, 1, r, out);
         fclose(cf);
         remove(b->out_path);
+        free(b->out_path); b->out_path = NULL;
         n_out += b->merged_n;
     }
     free(order);
@@ -650,7 +727,7 @@ static int64_t rebucket_and_finalize(RefState *rs, Interner *srcInt,
         remove(rs->tmp_path);
     }
     int64_t n_out = finalize_reference(&bs, rs->chromInt, srcInt, tmpDir, nThreads, out);
-    free(bs.arr);
+    bucketset_destroy(&bs);
     return n_out;
 }
 
@@ -764,7 +841,7 @@ static void do_shard_merge(const char *dir, Interner *srcInt, const char *tmpDir
         if (out == NULL) { fprintf(stderr, "taffy summary: cannot write %s\n", path); exit(1); }
         int64_t no = finalize_reference(&bs, chromInt, srcInt, tmpDir, nThreads, out);
         wclose(out, path);
-        free(bs.arr);
+        bucketset_destroy(&bs);
         interner_free(chromInt);
         total_out += no;
         /* With -i (the .tui), also emit <ref>.chrom.sizes for bedToBigBed.  The bed's
@@ -853,6 +930,7 @@ int taf_summary_main(int argc, char *argv[]) {
         {"chainOverlapFrac",required_argument, 0, 'F'},
         {"tmp",             required_argument, 0, 'T'},
         {"threads",         required_argument, 0, 'p'},
+        {"mergeMem",        required_argument, 0, 1005},
         {"allRefs",         no_argument,       0, 'A'},
         {"shard",           required_argument, 0, 1001},
         {"shardMerge",      no_argument,       0, 1002},
@@ -887,6 +965,12 @@ int taf_summary_main(int argc, char *argv[]) {
             case 'F': chainOverlapFrac = atof(optarg); break;
             case 'T': tmpDir     = optarg; break;
             case 'p': nThreads   = atoi(optarg); break;
+            case 1005: {   /* --mergeMem G : per-chrom merge RAM budget in GiB */
+                double g = atof(optarg);
+                if (g <= 0) { fprintf(stderr, "taffy summary: --mergeMem must be > 0 (GiB)\n"); return 1; }
+                mergeMemBudget = (int64_t)(g * (double)(1LL << 30));
+                break;
+            }
             case 'h':
             default:
                 fprintf(stderr,
@@ -908,6 +992,8 @@ int taf_summary_main(int argc, char *argv[]) {
                   "  --tmp DIR (TMPDIR|/tmp)  scratch dir for the packed per-chrom buckets (needs\n"
                   "            room for ~the packed record volume); bounds peak RAM\n"
                   "  --threads N (ncores)  parallel per-chrom sort+merge workers\n"
+                  "  --mergeMem G (8)  cap concurrent in-RAM chrom-merge bytes (GiB) across\n"
+                  "            those workers; a single chrom larger than G still runs (alone)\n"
                   "  --chainOverlapFrac F (%.2f)  per-species in-block dedup: 0=single-cover\n"
                   "            (best paralog row, matches reference-anchored summary), 1=keep all\n"
                   "  --mergeGap N (%d)  --minSize N (%d)  --maxSize N (%d)  --minSeqSize N (%" PRId64 ")\n",
@@ -1179,7 +1265,7 @@ int taf_summary_main(int argc, char *argv[]) {
                     "maxSize=%d and were NOT split (cosmetic; universal-MAF blocks are normally small)\n",
                     n_split_skipped, maxSize);
 
-        free(bs.arr);
+        bucketset_destroy(&bs);
         interner_free(chromInt);
     }
 
