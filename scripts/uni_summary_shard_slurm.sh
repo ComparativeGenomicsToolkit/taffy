@@ -33,7 +33,10 @@
 # SIZING (577-way ballpark -- read this before launching):
 #   * Total compute ~4000-8000 core-hours (D^2 scoring; single-threaded scan, so
 #     wall ~= total / concurrent slots; ~6-11 h at ~700 concurrent cores).
-#   * Per shard task is SINGLE-THREADED (the scan); -T only threads the MERGE.
+#   * Scan AND merge tasks use -T threads: the scan threads the per-block D^2
+#     pairwise scoring (OpenMP, partitioned over reference genomes); the merge
+#     threads the per-chrom sort+merge.  Heavy dense blocks parallelize; the many
+#     small blocks stay sequential (TAFFY_SUMMARY_SCAN_PAR_MIN, default 100000).
 #   * SCRATCH must be HUGE: the raw .recs temps are ~tens of TB (the full D^2
 #     record set hits disk before MERGE crunches it to ~1-2 TB of beds).  They are
 #     removed only after FINALIZE.  Put SCRATCH on a roomy parallel FS.
@@ -54,7 +57,7 @@
 #   -s INT         columns per shard (default 1e8 -> ~725 shards on a 577-way);
 #                  sets N = ceil(T / s)
 #   -M INT         number of parallel MERGE (and BIGBED) jobs (default 64)
-#   -T INT         merge threads per job (default 8; per-chrom sort+merge workers)
+#   -T INT         threads per scan AND merge job (default 8; --cpus-per-task)
 #   --localtmp DIR node-local scratch for MERGE per-chrom buckets (default
 #                  $TMPDIR or /tmp); must hold ~the biggest single ref's buckets
 #   --no-bigbed    stop at .bed (skip stage D / bedToBigBed)
@@ -152,14 +155,15 @@ echo ">> T=$T columns  shard=$SHARD cols  scan_shards=$NSHARD  merge/bigbed_jobs
 # ---- A) SCAN: one column-shard per array task -> per-ref raw .recs ----
 cat > "$RUNNER" <<EOF
 #!/bin/bash
-#SBATCH --cpus-per-task=1
+#SBATCH --cpus-per-task=$THREADS
 #SBATCH --mem=${SCAN_MEM}G
 #SBATCH --time=${SCAN_TIME}:00:00
 ${PARTITION:+#SBATCH --partition=$PARTITION}
 ${ACCOUNT:+#SBATCH --account=$ACCOUNT}
 set -euo pipefail
+export OMP_WAIT_POLICY=passive   # OMP scan threads sleep (not spin) between dense blocks
 "$TAFFY" summary --allRefs --shard \$SLURM_ARRAY_TASK_ID/$NSHARD \\
-  -i "$INPUT" -o "$SCRATCH"
+  -i "$INPUT" -o "$SCRATCH" --threads \$SLURM_CPUS_PER_TASK
 EOF
 
 # ---- B) MERGE: 1/M of the references per array task (afterok A) ----

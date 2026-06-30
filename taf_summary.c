@@ -63,6 +63,7 @@
 #include <getopt.h>
 #include <inttypes.h>
 #include <limits.h>
+#include <omp.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -388,11 +389,47 @@ static inline void emit_ref_rec(AllRefsCtx *cx, RefState *rs, const char *chrom,
  * single-ref run (compared as a sorted set). */
 static void score_block_allrefs(AllRefsCtx *cx, Alignment *aln) {
     int single_cover = (chainOverlapFrac < 1.0);
+    /* PRE-PASS (sequential): populate the SHARED interners.  intern_id is NOT
+     * thread-safe, so the parallel scoring below must only READ them: srcInt
+     * gets every leaf species, refMap/refList get every master genome. */
+    int64_t n_leaf = 0, n_master = 0;
+    for (Alignment_Row *r = aln->row; r != NULL; r = r->n_row) {
+        const char *g = gerp_tree_resolve_genome(cx->gt, r->sequence_name);
+        if (g == NULL || gerp_tree_is_ancestor(cx->gt, g)) continue;   /* leaf only */
+        intern_id(cx->srcInt, g); n_leaf++;
+        if (cx->restrictRef != NULL && strcmp(g, cx->restrictRef) != 0) continue;
+        if (r->length < minSeqSize || r->length <= 0 || r->sequence_length < minSeqSize) continue;
+        get_refstate(cx, g); n_master++;   /* one RefState per master genome */
+    }
+    /* PARALLEL scoring -- only when the block is heavy enough to outweigh the
+     * OpenMP fork/join (the dense root/backbone blocks dominate; the many small
+     * blocks stay sequential).  Thread t owns the reference genomes with interned
+     * srcId %% nt == t: it scores ALL master rows of its genomes and writes ONLY
+     * those genomes' RefState temps -> zero write contention, and the shared
+     * interners/refMap are read-only here.  (The merge sorts, so cross-genome
+     * temp interleaving cannot change the output -> -T8 == -T1.) */
+    int nt = nThreads > 0 ? nThreads : omp_get_max_threads();
+    if (nt < 1) nt = 1;
+    /* per-block work below which the OpenMP fork/join isn't worth it; tunable
+     * (env override, parsed once -- this fn runs on the single scan thread). */
+    static int64_t scan_par_min = -1;
+    if (scan_par_min < 0) {
+        const char *e = getenv("TAFFY_SUMMARY_SCAN_PAR_MIN");
+        scan_par_min = (e != NULL) ? atoll(e) : 100000;
+    }
+    int do_par = (nt > 1 && n_master >= 2 &&
+                  (int64_t) n_master * n_leaf * aln->column_number >= scan_par_min);
+    #pragma omp parallel num_threads(nt) if(do_par)
+    {
+        int tid = omp_get_thread_num();
+        int cur_nt = omp_get_num_threads();   /* 1 when !do_par */
     for (Alignment_Row *ref = aln->row; ref != NULL; ref = ref->n_row) {
         const char *rg = gerp_tree_resolve_genome(cx->gt, ref->sequence_name);
         if (rg == NULL || gerp_tree_is_ancestor(cx->gt, rg)) continue;   /* leaf masters only */
         if (cx->restrictRef != NULL && strcmp(rg, cx->restrictRef) != 0) continue;  /* shard -r: one master */
         if (ref->length < minSeqSize || ref->length <= 0 || ref->sequence_length < minSeqSize) continue;
+        if (cur_nt > 1 &&
+            (int)(intern_id(cx->srcInt, rg) % (uint32_t) cur_nt) != tid) continue;  /* not my genome */
         RefState *rs = get_refstate(cx, rg);
         rs->n_with_ref++;
         int64_t rstart = ref->strand ? ref->start
@@ -400,7 +437,7 @@ static void score_block_allrefs(AllRefsCtx *cx, Alignment *aln) {
         int64_t rend = rstart + ref->length;
         const char *chrom = (strlen(ref->sequence_name) > rs->nameLen + 1)
             ? ref->sequence_name + rs->nameLen + 1 : ref->sequence_name;
-        uint32_t chromId = intern_id(rs->chromInt, chrom);
+        uint32_t chromId = intern_id(rs->chromInt, chrom);   /* per-genome interner: this genome's sole thread */
         if (ref->length > maxSize) rs->n_split_skipped++;
 
         stHash *best = single_cover
@@ -411,7 +448,7 @@ static void score_block_allrefs(AllRefsCtx *cx, Alignment *aln) {
             if (g == NULL || strcmp(g, rg) == 0) continue;     /* unknown genome or reference paralog */
             if (gerp_tree_is_ancestor(cx->gt, g)) continue;    /* ancestor */
             double sc = score_pairwise(ref->bases, row->bases, aln->column_number, ref->length);
-            uint32_t srcId = intern_id(cx->srcInt, g);
+            uint32_t srcId = intern_id(cx->srcInt, g);          /* read-only (pre-interned) */
             if (single_cover) {
                 const char *gname = intern_name(cx->srcInt, srcId);  /* stable key */
                 double *cur = stHash_search(best, (void *) gname);
@@ -426,12 +463,13 @@ static void score_block_allrefs(AllRefsCtx *cx, Alignment *aln) {
             char *gname;
             while ((gname = stHash_getNext(hit)) != NULL) {
                 double *cur = stHash_search(best, gname);
-                uint32_t srcId = intern_id(cx->srcInt, gname);
+                uint32_t srcId = intern_id(cx->srcInt, gname);   /* read-only (pre-interned) */
                 emit_ref_rec(cx, rs, chrom, chromId, rstart, rend, gname, srcId, *cur); rs->raw_n++;
             }
             stHash_destructIterator(hit);
             stHash_destruct(best);
         }
+    }
     }
 }
 
