@@ -36,16 +36,20 @@
 #   * I/O: the file is decompressed+scanned M times (~M * file-size of reads).
 #     Smaller M = fewer reads but each job masters MORE refs => MORE node-local
 #     disk; larger M = less node-local but more reads.  Tune M to your node-local.
-#   * NODE-LOCAL --tmp must hold the job's masters' raw records AT ONCE during the
-#     scan: ~ (refs/M) references' packed records, dominated by the deepest ref
-#     (~70 GB for a 577-way backbone genome).  With refs=577 and M=64 that is ~9
-#     refs => budget a few hundred GB of node-local; raise M if that is too much.
+#   * NODE-LOCAL --tmp holds, during the scan: ~ (refs/M) refs' raw records
+#     (~55 GB/ref avg on a 577-way, deepest ~100+ GB) PLUS the staged input copy
+#     (~the .taf.gz size, unless --no-stage).  M is the key knob and cuts TWO ways:
+#     it CAPS CORES (the scan threads across a block's masters, so a pass uses at
+#     most ~refs/M cores -- pick M so refs/M >= -T, else you reserve cores you can't
+#     fill) and it sets node-local (smaller M = more cores + fewer re-reads but more
+#     disk).  e.g. M=16 ~36 refs/pass (~2 TB, fills 32 cores) vs M=64 ~9 refs (~9).
 #   * Peak RAM per job ~= MAX(--mergeMem, the biggest single reference chrom's
 #     records x ~72 B): a chrom LARGER than --mergeMem is NOT capped -- it loads
 #     whole into RAM and runs alone -- so size --mem to the DEEPEST ref's biggest
 #     chrom (hundreds of M records => tens of GB), NOT to --mergeMem.  Measure it
-#     with a single-ref `-r <deepest backbone genome>` dry run first (it also pins
-#     down per-pass wall vs --time).  The bigBed build is smaller than the merge.
+#     with a `-r <deepest backbone genome>` run (the RAM is the same threaded or
+#     not).  For per-pass WALL, time a real `--allRefs --refSubset 0/M` pass -- NOT
+#     -r, which single-threads scoring.  The bigBed build is smaller than the merge.
 #   * Shared FS holds only the final per-reference bigBeds (~1-2 TB total).
 #
 # Usage: uni_summary_refsubset_slurm.sh -i UNI.taf.gz -o OUTDIR [options]
@@ -57,6 +61,8 @@
 #   --localtmp DIR node-local scratch root (default $TMPDIR or /tmp); per-task subdir
 #                  holds one pass's raw records + beds -- keep OFF the shared FS
 #   --no-bigbed    stop at .bed (write beds to OUTDIR; skip bedToBigBed)
+#   --no-stage     don't copy the input to node-local first (default: stage it, so
+#                  the M concurrent passes don't all stream the file off shared FS)
 #   --bedToBigBed PATH  the bedToBigBed binary (default: bedToBigBed on PATH)
 #   --as FILE      bed AS schema for bedToBigBed (default: a built-in mafSummary.as)
 #   --mem GB       --time HRS   sbatch --mem/--time per SUMMARIZE job (default 24G / 24h)
@@ -72,7 +78,7 @@ set -euo pipefail
 
 INPUT=""; OUTDIR=""; NPASS=64; THREADS=8; MERGEMEM=8; LOCALTMP=""
 MEM=24; TIME=24; BIGBED=1; BTB="bedToBigBed"; ASFILE=""
-PARTITION=""; ACCOUNT=""; DRYRUN=0; WAIT=0
+PARTITION=""; ACCOUNT=""; DRYRUN=0; WAIT=0; STAGE=1
 TAFFY="${TAFFY:-taffy}"
 
 usage() { sed -n '52,72p' "$0" >&2; exit "${1:-1}"; }
@@ -85,6 +91,7 @@ while [[ $# -gt 0 ]]; do
     --mergeMem) MERGEMEM=$2; shift 2;;
     --localtmp) LOCALTMP=$2; shift 2;;
     --no-bigbed) BIGBED=0; shift;;
+    --no-stage) STAGE=0; shift;;
     --bedToBigBed) BTB=$2; shift 2;;
     --as) ASFILE=$2; shift 2;;
     --mem) MEM=$2; shift 2;;
@@ -146,10 +153,20 @@ export OMP_WAIT_POLICY=passive   # OMP scan threads sleep (not spin) between den
 LOCAL="$LOCALTMP/uni_sum_\$SLURM_ARRAY_TASK_ID.\$\$"
 mkdir -p "\$LOCAL/beds" "\$LOCAL/tmp"
 trap 'rm -rf "\$LOCAL"' EXIT
+# STAGE the input to node-local disk (default; --no-stage to skip): the M passes
+# otherwise all stream the whole file off the shared FS at once.  Copy the .taf.gz;
+# SYMLINK the .tui (its read is just the genome roster for chrom.sizes, not 100 GB).
+IN="$INPUT"
+if [ "$STAGE" = 1 ]; then
+  echo "staging $INPUT -> \$LOCAL/in.taf.gz ..."
+  cp "$INPUT" "\$LOCAL/in.taf.gz"
+  ln -sf "$INPUT.tui" "\$LOCAL/in.taf.gz.tui"
+  IN="\$LOCAL/in.taf.gz"
+fi
 # scan the whole file once, master only this pass's 1/M of the references, merge
 # to node-local disk (raw records bounded by --mergeMem, never touch shared FS):
 "$TAFFY" summary --allRefs --refSubset \$SLURM_ARRAY_TASK_ID/$NPASS \\
-  -i "$INPUT" -o "\$LOCAL/beds" --tmp "\$LOCAL/tmp" \\
+  -i "\$IN" -o "\$LOCAL/beds" --tmp "\$LOCAL/tmp" \\
   --threads \$SLURM_CPUS_PER_TASK --mergeMem $MERGEMEM
 shopt -s nullglob
 made=0
