@@ -33,23 +33,21 @@
 #   * Total compute ~= the same Sum(D^2) scoring as one fan-out scan, but spread
 #     over M passes; wall ~= total / concurrent slots.  Single-ref masters mean NO
 #     dense-root straggler.
-#   * I/O: the file is decompressed+scanned M times (~M * file-size of reads).
-#     Smaller M = fewer reads but each job masters MORE refs => MORE node-local
-#     disk; larger M = less node-local but more reads.  Tune M to your node-local.
-#   * NODE-LOCAL --tmp holds, during the scan: ~ (refs/M) refs' raw records
-#     (~55 GB/ref avg on a 577-way, deepest ~100+ GB) PLUS the staged input copy
-#     (~the .taf.gz size, unless --no-stage).  M is the key knob and cuts TWO ways:
-#     it CAPS CORES (the scan threads across a block's masters, so a pass uses at
-#     most ~refs/M cores -- pick M so refs/M >= -T, else you reserve cores you can't
-#     fill) and it sets node-local (smaller M = more cores + fewer re-reads but more
-#     disk).  e.g. M=16 ~36 refs/pass (~2 TB, fills 32 cores) vs M=64 ~9 refs (~9).
-#   * Peak RAM per job ~= MAX(--mergeMem, the biggest single reference chrom's
-#     records x ~72 B): a chrom LARGER than --mergeMem is NOT capped -- it loads
-#     whole into RAM and runs alone -- so size --mem to the DEEPEST ref's biggest
-#     chrom (hundreds of M records => tens of GB), NOT to --mergeMem.  Measure it
-#     with a `-r <deepest backbone genome>` run (the RAM is the same threaded or
-#     not).  For per-pass WALL, time a real `--allRefs --refSubset 0/M` pass -- NOT
-#     -r, which single-threads scoring.  The bigBed build is smaller than the merge.
+#   * I/O: the file is decompressed+scanned M times (~M * file-size of reads); stage
+#     it node-local (default) and OFF a slow NFS.
+#   * RAM IS THE LIMIT (the raw is NEVER spilled -- it's merged in RAM as it scans):
+#     peak RAM per job ~= (refs/M) x the merged BED size (~2-3 GB/ref on a 577-way).
+#     So smaller M = MORE RAM (more refs resident) + fewer passes; larger M = less
+#     RAM + more passes/reads.  Size SLURM --mem to ~(refs/M) x 3 GB, and --mergeMem
+#     below --mem (it caps the per-reference in-RAM compaction).  MEASURE it with a
+#     real `--allRefs --refSubset 0/M` pass (peak RSS) -- NOT -r (single-threads
+#     scoring, and won't show the per-pass footprint).
+#   * NODE-LOCAL --tmp now holds only the STAGED input copy (~the .taf.gz size) + the
+#     per-ref beds -- NOT the raw records (the ~90 TB the old disk design spilled is
+#     gone).  A few hundred GB, not TBs.
+#   * M also CAPS CORES: the scan threads across a block's masters, so a pass uses at
+#     most ~refs/M cores -- pick M so refs/M >= -T.  Decode is single-threaded (htslib
+#     bgzf_mt leaks), so on a huge file the decode wall is a floor -- factor it in.
 #   * Shared FS holds only the final per-reference bigBeds (~1-2 TB total).
 #
 # Usage: uni_summary_refsubset_slurm.sh -i UNI.taf.gz -o OUTDIR [options]
