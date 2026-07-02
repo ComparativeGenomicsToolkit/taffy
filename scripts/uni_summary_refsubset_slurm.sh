@@ -57,11 +57,13 @@
 #   -M INT         number of passes/jobs; each masters refs/M references (default 64)
 #   -T INT         threads per job (default 8; --cpus-per-task)
 #   --mergeMem GB  per-job in-RAM chrom-merge budget passed to taffy (default 8)
-#   --localtmp DIR node-local scratch root (default $TMPDIR or /tmp); per-task subdir
-#                  holds one pass's raw records + beds -- keep OFF the shared FS
+#   --localtmp DIR node-local scratch root (default $TMPDIR or /tmp); holds the STAGED
+#                  input copy + this pass's beds (raw is in RAM) -- keep OFF shared FS
 #   --no-bigbed    stop at .bed (write beds to OUTDIR; skip bedToBigBed)
 #   --no-stage     don't copy the input to node-local first (default: stage it, so
 #                  the M concurrent passes don't all stream the file off shared FS)
+#   --only RANGE   run only these array task(s), e.g. 0 or 0-3 -- a fragment probe
+#                  (one pass; skips FINALIZE; read MaxRSS/Elapsed from sacct)
 #   --bedToBigBed PATH  the bedToBigBed binary (default: bedToBigBed on PATH)
 #   --as FILE      bed AS schema for bedToBigBed (default: a built-in mafSummary.as)
 #   --mem GB       --time HRS   sbatch --mem/--time per SUMMARIZE job (default 24G / 24h)
@@ -77,10 +79,10 @@ set -euo pipefail
 
 INPUT=""; OUTDIR=""; NPASS=64; THREADS=8; MERGEMEM=8; LOCALTMP=""
 MEM=24; TIME=24; BIGBED=1; BTB="bedToBigBed"; ASFILE=""
-PARTITION=""; ACCOUNT=""; DRYRUN=0; WAIT=0; STAGE=1
+PARTITION=""; ACCOUNT=""; DRYRUN=0; WAIT=0; STAGE=1; ONLY=""
 TAFFY="${TAFFY:-taffy}"
 
-usage() { sed -n '52,72p' "$0" >&2; exit "${1:-1}"; }
+usage() { sed -n '54,74p' "$0" >&2; exit "${1:-1}"; }
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -i) INPUT=$2; shift 2;;
@@ -91,6 +93,7 @@ while [[ $# -gt 0 ]]; do
     --localtmp) LOCALTMP=$2; shift 2;;
     --no-bigbed) BIGBED=0; shift;;
     --no-stage) STAGE=0; shift;;
+    --only) ONLY=$2; shift 2;;
     --bedToBigBed) BTB=$2; shift 2;;
     --as) ASFILE=$2; shift 2;;
     --mem) MEM=$2; shift 2;;
@@ -145,12 +148,13 @@ cat > "$SUMRUN" <<EOF
 #SBATCH --cpus-per-task=$THREADS
 #SBATCH --mem=${MEM}G
 #SBATCH --time=${TIME}:00:00
+#SBATCH --output=$OUTDIR/summarize-%A_%a.log
 ${PARTITION:+#SBATCH --partition=$PARTITION}
 ${ACCOUNT:+#SBATCH --account=$ACCOUNT}
 set -euo pipefail
 export OMP_WAIT_POLICY=passive   # OMP scan threads sleep (not spin) between dense blocks
 LOCAL="$LOCALTMP/uni_sum_\$SLURM_ARRAY_TASK_ID.\$\$"
-mkdir -p "\$LOCAL/beds" "\$LOCAL/tmp"
+mkdir -p "\$LOCAL/beds"
 trap 'rm -rf "\$LOCAL"' EXIT
 # STAGE the input to node-local disk (default; --no-stage to skip): the M passes
 # otherwise all stream the whole file off the shared FS at once.  Copy the .taf.gz;
@@ -163,9 +167,10 @@ if [ "$STAGE" = 1 ]; then
   IN="\$LOCAL/in.taf.gz"
 fi
 # scan the whole file once, master only this pass's 1/M of the references, and
-# merge IN RAM (the raw records are NEVER spilled to disk -- only the beds written):
+# merge IN RAM (the raw records are NEVER spilled to disk -- only the beds written;
+# RAM peaks at ~2x this pass's refs' merged size, capped by SLURM --mem, not disk):
 "$TAFFY" summary --allRefs --refSubset \$SLURM_ARRAY_TASK_ID/$NPASS \\
-  -i "\$IN" -o "\$LOCAL/beds" --tmp "\$LOCAL/tmp" \\
+  -i "\$IN" -o "\$LOCAL/beds" \\
   --threads \$SLURM_CPUS_PER_TASK --mergeMem $MERGEMEM
 shopt -s nullglob
 made=0
@@ -215,14 +220,24 @@ rm -rf "$OUTDIR/.passes"
 echo "FINALIZE: all $NPASS passes complete -> \$n per-reference outputs in $OUTDIR"
 EOF
 
+ARR="${ONLY:-0-$((NPASS-1))}"
 if (( DRYRUN )); then
-  echo "[dry-run] wrote $SUMRUN, $FINALIZE" >&2
-  echo "[dry-run] sbatch --array=0-$((NPASS-1)) $SUMRUN" >&2
-  echo "[dry-run] sbatch --dependency=afterany:<A> $FINALIZE  # afterany so a pass failure is REPORTED, not silently dropped" >&2
+  echo "[dry-run] wrote $SUMRUN$([ -z "$ONLY" ] && echo ", $FINALIZE")" >&2
+  echo "[dry-run] sbatch --array=$ARR $SUMRUN" >&2
+  [ -z "$ONLY" ] && echo "[dry-run] sbatch --dependency=afterany:<A> $FINALIZE  # afterany so a pass failure is REPORTED" >&2
   exit 0
 fi
-A_ID=$(sbatch --parsable --array=0-$((NPASS-1)) "$SUMRUN")
-echo ">> SUMMARIZE array submitted: job $A_ID ($NPASS passes)" >&2
+A_ID=$(sbatch --parsable --array="$ARR" "$SUMRUN")
+echo ">> SUMMARIZE array submitted: job $A_ID (passes $ARR)" >&2
+
+# ONE-FRAGMENT probe (--only): completeness is meaningless for a subset, so no FINALIZE.
+if [ -n "$ONLY" ]; then
+  echo ">> --only $ONLY: fragment probe, FINALIZE skipped.  When it finishes:" >&2
+  echo "     sacct -j $A_ID --format=JobID,State,MaxRSS,Elapsed   # MaxRSS -> --mem, Elapsed -> per-pass wall" >&2
+  echo "     less $OUTDIR/summarize-${A_ID}_*.log ; ls $OUTDIR/*.summary.bb   # per-ref rows + outputs" >&2
+  exit 0
+fi
+
 F_ID=$(sbatch --parsable --dependency=afterany:"$A_ID" "$FINALIZE")   # afterany: run even if a pass fails, so the shortfall is reported
 echo ">> FINALIZE submitted (afterany:$A_ID): job $F_ID -> $OUTDIR" >&2
 
