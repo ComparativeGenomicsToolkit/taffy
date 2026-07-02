@@ -38,10 +38,11 @@
 #   * RAM IS THE LIMIT (the raw is NEVER spilled -- it's merged in RAM as it scans):
 #     peak RAM per job ~= (refs/M) x the merged BED size (~2-3 GB/ref on a 577-way).
 #     So smaller M = MORE RAM (more refs resident) + fewer passes; larger M = less
-#     RAM + more passes/reads.  Size SLURM --mem to ~(refs/M) x 3 GB, and --mergeMem
-#     below --mem (it caps the per-reference in-RAM compaction).  MEASURE it with a
-#     real `--allRefs --refSubset 0/M` pass (peak RSS) -- NOT -r (single-threads
-#     scoring, and won't show the per-pass footprint).
+#     RAM + more passes/reads.  M IS THE RAM KNOB: --mergeMem only sets the compaction
+#     CADENCE (how often each ref window-bins), NOT a hard cap -- a deep ref still
+#     grows to ~2x its merged size regardless.  So MEASURE peak RSS with a real
+#     `--allRefs --refSubset 0/M` pass (NOT -r) and size SLURM --mem to it; if it is
+#     too big, RAISE M (fewer refs/pass) -- do not expect --mergeMem to bound it.
 #   * NODE-LOCAL --tmp now holds only the STAGED input copy (~the .taf.gz size) + the
 #     per-ref beds -- NOT the raw records (the ~90 TB the old disk design spilled is
 #     gone).  A few hundred GB, not TBs.
@@ -161,8 +162,8 @@ if [ "$STAGE" = 1 ]; then
   ln -sf "$INPUT.tui" "\$LOCAL/in.taf.gz.tui"
   IN="\$LOCAL/in.taf.gz"
 fi
-# scan the whole file once, master only this pass's 1/M of the references, merge
-# to node-local disk (raw records bounded by --mergeMem, never touch shared FS):
+# scan the whole file once, master only this pass's 1/M of the references, and
+# merge IN RAM (the raw records are NEVER spilled to disk -- only the beds written):
 "$TAFFY" summary --allRefs --refSubset \$SLURM_ARRAY_TASK_ID/$NPASS \\
   -i "\$IN" -o "\$LOCAL/beds" --tmp "\$LOCAL/tmp" \\
   --threads \$SLURM_CPUS_PER_TASK --mergeMem $MERGEMEM

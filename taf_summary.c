@@ -265,10 +265,13 @@ static int64_t region_merge_inplace(PackedRec *r, int64_t n) {
 }
 
 /* A reference's records, ALL chroms interleaved in ONE array (chromId carried in
- * each record).  Self-compacting: sort by (chromId,srcId,start) + window-bin in
- * place, realloc'd DOWN to the merged size.  ONE allocation per reference (not per
- * chrom): releasing the raw is a single mmap shrink, with none of the per-chrom
- * grow/shrink churn that otherwise balloons the allocator to tens of GB. */
+ * each record).  Self-compacting: sort by (chromId,srcId,start) + window-bin IN
+ * PLACE, dropping n to the merged count but KEEPING the capacity (later appends
+ * refill it -- realloc'ing down then regrowing churns the allocator to ~25x the
+ * working set).  ONE array per reference (not per chrom) avoids per-chrom
+ * grow/shrink fragmentation.  Peak ~= 2x the reference's merged (bed) size; RAM is
+ * bounded by that x resident references -- tune with M/--refSubset, NOT --mergeMem
+ * (which only sets the compaction cadence, not a hard cap). */
 typedef struct {
     PackedRec *recs; int64_t n, cap;
     int64_t    baseline;                     /* n right after the last compaction */
