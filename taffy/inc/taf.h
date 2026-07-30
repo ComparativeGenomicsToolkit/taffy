@@ -125,6 +125,16 @@ stList *alignment_get_rows_in_a_list(Alignment_Row *row);
 void alignment_set_rows(Alignment *alignment, stList *rows);
 
 /*
+ * Remove any column of the alignment that consists entirely of gaps, e.g. as left behind when the
+ * only row with a base in that column has been filtered out. The bases of each row and the column
+ * tags are compacted in place and column_number is reduced accordingly. Row coordinates and the
+ * links between adjacent blocks are unaffected, as a gap-only column contains no bases. Returns
+ * the number of columns removed. If every column is a gap then one is kept, so the alignment is
+ * never reduced to zero columns.
+ */
+int64_t alignment_remove_all_gap_columns(Alignment *alignment);
+
+/*
  * Read a column of the alignment into the buffer. The buffer must be initialized and be at least
  * of length alignment->row_number.
  */

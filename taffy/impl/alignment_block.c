@@ -321,6 +321,88 @@ int64_t alignment_number_of_common_rows(Alignment *left_alignment, Alignment *ri
     return shared_rows;
 }
 
+static bool alignment_column_is_all_gaps(Alignment *alignment, int64_t column_index) {
+    for(Alignment_Row *row = alignment->row; row != NULL; row = row->n_row) {
+        if(row->bases[column_index] != '-') {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+int64_t alignment_remove_all_gap_columns(Alignment *alignment) {
+    int64_t column_number = alignment->column_number;
+    if(alignment->row == NULL || column_number == 0) {
+        return 0;
+    }
+    // Flag the columns to keep. Scanning column-major with an early exit keeps this
+    // O(column_number) in the common case where the first row has a base in every column, and the
+    // flags are only allocated once we know there is a gap-only column to remove.
+    char *keep_column = NULL;
+    int64_t columns_to_remove = 0;
+    for(int64_t i=0; i<column_number; i++) {
+        if(alignment_column_is_all_gaps(alignment, i)) {
+            if(keep_column == NULL) {
+                keep_column = st_calloc(column_number, sizeof(char));
+                for(int64_t j=0; j<i; j++) { // Every column up to here is being kept
+                    keep_column[j] = 1;
+                }
+            }
+            columns_to_remove++;
+        }
+        else if(keep_column != NULL) {
+            keep_column[i] = 1;
+        }
+    }
+    if(keep_column == NULL) { // Nothing to do, which is the usual case
+        return 0;
+    }
+    // If every column is a gap then keep one of them, so that we never reduce a block to zero
+    // columns. Such a block can not be written, and removing it from the alignment instead would
+    // strand the interstitial gap sequence that the following block records relative to it.
+    if(columns_to_remove == column_number) {
+        keep_column[0] = 1;
+        columns_to_remove--;
+    }
+    // Compact the bases of each row in place. Note we deliberately do not touch start / length /
+    // sequence_length or the l_row / r_row links: a gap-only column contains no bases, so removing
+    // it leaves every row's coordinates, and hence the linking between blocks, unchanged.
+    Alignment_Row *row = alignment->row;
+    while(row != NULL) {
+        // Every reader builds bases exactly column_number long, see taf_read_block and maf_read_block
+        assert((int64_t)strlen(row->bases) == column_number);
+        int64_t j=0;
+        for(int64_t i=0; i<column_number; i++) {
+            if(keep_column[i]) {
+                row->bases[j++] = row->bases[i];
+            }
+        }
+        row->bases[j] = '\0';
+        assert(j == column_number - columns_to_remove);
+        row = row->n_row;
+    }
+    // Compact the column tags, cleaning up the tags of the columns being removed
+    if(alignment->column_tags != NULL) {
+        int64_t j=0;
+        for(int64_t i=0; i<column_number; i++) {
+            if(keep_column[i]) {
+                alignment->column_tags[j++] = alignment->column_tags[i];
+            }
+            else {
+                tag_destruct(alignment->column_tags[i]);
+            }
+        }
+        while(j < column_number) { // Null the now unused trailing entries. alignment_destruct only
+            // walks up to the reduced column_number, so this is belt and braces against a future
+            // caller that looks at them
+            alignment->column_tags[j++] = NULL;
+        }
+    }
+    alignment->column_number = column_number - columns_to_remove;
+    free(keep_column);
+    return columns_to_remove;
+}
+
 void alignment_get_column_in_buffer(Alignment *alignment, int64_t column_index, char *buffer) {
     assert(column_index >= 0);
     assert(column_index < alignment->column_number);

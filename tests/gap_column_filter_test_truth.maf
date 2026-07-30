@@ -1,0 +1,6 @@
+##maf version=1 scoring=N/A
+
+a
+s	simCow.chr1	0	6	+	100	ACGTAC
+s	simDog.chr1	0	6	+	100	ACGTAC
+

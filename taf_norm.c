@@ -19,6 +19,8 @@ static int64_t repeat_coordinates_every_n_columns = 10000;
 static void usage(void) {
     fprintf(stderr, "taffy norm [options]\n");
     fprintf(stderr, "Normalize a taf format alignment to remove small blocks using the -m and -n options to determine what to merge \n");
+    fprintf(stderr, "Any column consisting entirely of gaps is also removed, as can be left behind when the only row "
+                    "with a base in that column has been filtered out upstream.\n");
     fprintf(stderr, "Note, taffy norm will resort the rows alpha-numerically according to sequence name, "
                     "as is necessary to successfully merge all mergeable rows. Is the resorting is undesired, pipe the"
                     "result to taffy sort to resort.\n");
@@ -62,6 +64,24 @@ static Alignment *get_next_block(BlockReader *reader) {
     // Reduce the alignment index
     alignment_index--;
     return block;
+}
+
+/*
+ * As get_next_block, but additionally strips out any column that is entirely gaps. These show up
+ * when the only row with a base in a column has been filtered out upstream (e.g. by taffy sort -f
+ * dropping a species). Stripping here, rather than on the way out, means the merging logic below
+ * sees the true block lengths.
+ */
+static Alignment *get_next_block_and_remove_gap_columns(BlockReader *reader) {
+    Alignment *alignment = get_next_block(reader);
+    if(alignment != NULL) {
+        int64_t columns_removed = alignment_remove_all_gap_columns(alignment);
+        if(columns_removed > 0) {
+            st_logDebug("Removed %" PRIi64 " all-gap columns from a block, leaving %" PRIi64 " columns\n",
+                        columns_removed, alignment->column_number);
+        }
+    }
+    return alignment;
 }
 
 /**
@@ -351,7 +371,7 @@ int taf_norm_main(int argc, char *argv[]) {
     tag_destruct(tag);
 
     Alignment *alignment, *p_alignment = NULL, *p_p_alignment = NULL;
-    while((alignment = get_next_block(reader)) != NULL) {
+    while((alignment = get_next_block_and_remove_gap_columns(reader)) != NULL) {
         // First resort the rows to be alphabetical and then realign with any previous block. This ensures
         // we will not have any mergeable rows unlinked. Note:
         // We do not allow row substitutions when linking two blocks to merge (see last parameter of function call),
@@ -371,6 +391,8 @@ int taf_norm_main(int argc, char *argv[]) {
                     // try to greedily filter dupes in order to get the gap length down - do this iteratively,
                     // relinking the rows after each step
                     while (max_gap > maximum_gap_length && greedy_prune_by_gap(alignment, maximum_gap_length)) {
+                        alignment_remove_all_gap_columns(alignment); // Dropping rows can leave columns that are
+                        // now entirely gaps
                         alignment_link_adjacent(p_alignment, alignment, 0); // Now relink, as having removed rows we
                         // may have different rows that need to be relinked
                         max_gap = alignment_max_gap_length(p_alignment); // recalculste the max gap
