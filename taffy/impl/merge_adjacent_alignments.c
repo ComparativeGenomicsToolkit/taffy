@@ -9,12 +9,10 @@
  */
 
 static char *make_run(int64_t length, char c) {
-    char gap_alignment[length+1];
-    for(int64_t i=0; i<length; i++) {
-        gap_alignment[i] = c;
-    }
-    gap_alignment[length] = '\0';
-    return stString_copy(gap_alignment);
+    char *run = st_malloc(sizeof(char) * (length + 1));
+    memset(run, c, length);
+    run[length] = '\0';
+    return run;
 }
 
 int64_t make_msa(int64_t string_no, int64_t column_no, int64_t max_alignment_length,
@@ -437,6 +435,21 @@ int64_t align_interstitial_gaps_abpoa(Alignment *alignment) {
     return msa_length;
 }
 
+/*
+ * Join up to three strings whose lengths are already known. The row strings here are all exactly as
+ * long as their block's column count, so going through stString_print only to have vsnprintf walk
+ * them again with strlen is wasted work, and this is the innermost loop of a merge.
+ */
+static char *concat_known(const char *a, int64_t a_length, const char *b, int64_t b_length,
+                          const char *c, int64_t c_length) {
+    char *joined = st_malloc(sizeof(char) * (a_length + b_length + c_length + 1));
+    memcpy(joined, a, a_length);
+    memcpy(joined + a_length, b, b_length);
+    memcpy(joined + a_length + b_length, c, c_length);
+    joined[a_length + b_length + c_length] = '\0';
+    return joined;
+}
+
 Alignment *alignment_merge_adjacent(Alignment *left_alignment, Alignment *right_alignment) {
     // First un-link any rows that are substitutions as these can't be merged
     Alignment_Row *r_row = right_alignment->row;
@@ -490,12 +503,14 @@ Alignment *alignment_merge_adjacent(Alignment *left_alignment, Alignment *right_
 
     // Now finally extend the left alignment rows to include the right alignment rows
     Alignment_Row *l_row = left_alignment->row;
-    char *right_gap = make_run(right_alignment->column_number + interstitial_alignment_length, '-'); // any trailing bases needed
+    int64_t left_column_number = left_alignment->column_number; // every left row is this long
+    int64_t right_gap_length = right_alignment->column_number + interstitial_alignment_length;
+    char *right_gap = make_run(right_gap_length, '-'); // any trailing bases needed
     while(l_row != NULL) {
         if(l_row->r_row == NULL) {
             // Is a deletion, so add in trailing gaps equal in length to the right alignment length plus any interstitial
             // gap
-            char *bases = stString_print("%s%s", l_row->bases, right_gap);
+            char *bases = concat_known(l_row->bases, left_column_number, right_gap, right_gap_length, "", 0);
             free(l_row->bases);
             l_row->bases = bases;
         }
@@ -510,7 +525,9 @@ Alignment *alignment_merge_adjacent(Alignment *left_alignment, Alignment *right_
             // Is not a deletion, so merge together two adjacent rows
             assert(r_row->left_gap_sequence != NULL);
             assert(strlen(r_row->left_gap_sequence) == interstitial_alignment_length);
-            char *bases = stString_print("%s%s%s", l_row->bases, r_row->left_gap_sequence, r_row->bases);
+            char *bases = concat_known(l_row->bases, left_column_number,
+                                       r_row->left_gap_sequence, interstitial_alignment_length,
+                                       r_row->bases, right_alignment->column_number);
             free(l_row->bases); // clean up
             l_row->bases = bases;
 

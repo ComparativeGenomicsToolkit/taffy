@@ -165,9 +165,12 @@ void alignment_set_rows(Alignment *alignment, stList *rows) {
 }
 
 bool alignment_row_is_predecessor(Alignment_Row *left_row, Alignment_Row *right_row) {
-    // Do the rows match
-    return strcmp(left_row->sequence_name, right_row->sequence_name) == 0 && left_row->strand == right_row->strand &&
-            left_row->start + left_row->length <= right_row->start;
+    // Do the rows match. The coordinate and strand tests are far cheaper than comparing the names,
+    // which for sequences out of the same assembly share long prefixes and so are slow to tell
+    // apart, and this is called for every pair of rows the row diff considers.
+    return left_row->strand == right_row->strand &&
+            left_row->start + left_row->length <= right_row->start &&
+            strcmp(left_row->sequence_name, right_row->sequence_name) == 0;
 }
 
 bool alignment_row_is_predecessor_2(Alignment_Row **left_row, Alignment_Row **right_row) {
