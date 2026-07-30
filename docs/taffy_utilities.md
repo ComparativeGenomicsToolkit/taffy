@@ -111,6 +111,16 @@ dropping rows from an alignment, e.g. after removing a species with `taffy sort 
 Removing a gap-only column does not change any row's coordinates, as such a column contains no
 bases.
 
+### Unnormalizing
+
+    taffy norm -i MAF_FILE -u -k -o out.maf
+
+`taffy norm -u` does the reverse, splitting each block at every run of columns in which the reference
+(first) row has a gap and removing those columns, which puts an already merged alignment back into the
+reference-contiguous form hal2maf produces. Normalizing and then unnormalizing recovers the same
+alignment columns, though not every block boundary, as two blocks merged with no gap between them
+leave no reference gap to split back on.
+
 Note(!), taffy norm will resort the rows alpha-numerically according to sequence name,  as is necessary to successfully merge all mergeable rows. Is the resorting is undesired, pipe the result to taffy sort (see below) to resort, e.g.
 
     taffy view -i MAF_FILE | taffy norm -b SEQUENCE_FILES | taffy sort -n SORT_FILE | taffy view -m

@@ -1,0 +1,12 @@
+##maf version=1
+
+a
+s	ref.c1	0	2	+	100	AC
+s	s2.c1	0	2	+	100	AC
+s	s3.c1	0	1	+	100	-C
+
+a
+s	ref.c1	2	2	+	100	GT
+s	s2.c1	4	2	+	100	GT
+s	s3.c1	1	2	+	100	GT
+
