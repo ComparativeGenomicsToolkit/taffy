@@ -491,6 +491,24 @@ static void test_norm_with_gap_sequences(CuTest *testCase) {
     st_system("rm -f %s %s", gap_file, output_file);
 }
 
+/*
+ * Merging two blocks moves the right block's column tags into the merged block, so the right block
+ * must not then free them: reading them back when the merged block is written is a use after free,
+ * which crashed taffy norm on any taf carrying column tags on a mergeable block. The input also has
+ * an all-gap column with a tag on it, so this covers the tags being remapped by both the merge and
+ * the gap column removal at once.
+ */
+static void test_column_tags_through_merge(CuTest *testCase) {
+    char *input_file = "./tests/column_tag_merge_test.taf";
+    char *output_file = "./tests/column_tag_merge_out.taf";
+    int i = st_system("./bin/taffy norm -i %s -o %s", input_file, output_file);
+    CuAssertIntEquals(testCase, 0, i); // must not crash
+    char *truth_file = "./tests/column_tag_merge_test_truth.taf";
+    int diff_ret = st_system("diff %s %s", output_file, truth_file);
+    CuAssertIntEquals(testCase, 0, diff_ret);
+    st_system("rm -f %s", output_file);
+}
+
 CuSuite* normalize_test_suite(void) {
     CuSuite* suite = CuSuiteNew();
     SUITE_ADD_TEST(suite, test_remove_all_gap_columns);
@@ -499,6 +517,7 @@ CuSuite* normalize_test_suite(void) {
     SUITE_ADD_TEST(suite, test_gap_column_filter);
     SUITE_ADD_TEST(suite, test_gap_columns_after_filtering_a_species);
     SUITE_ADD_TEST(suite, test_norm_with_gap_sequences);
+    SUITE_ADD_TEST(suite, test_column_tags_through_merge);
     SUITE_ADD_TEST(suite, test_normalize);
     SUITE_ADD_TEST(suite, test_maf_norm);
     SUITE_ADD_TEST(suite, test_maf_norm_to_maf);

@@ -1,0 +1,6 @@
+#taf version:1
+AA ; i 0 s1.c1 0 + 100 i 1 s2.c1 0 + 100 @ c:0
+-- @ c:allgap
+CC @ c:1
+GG ; @ c:2
+TT @ c:3
