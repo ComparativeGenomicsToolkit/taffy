@@ -118,8 +118,9 @@ bases.
 `taffy norm -u` does the reverse, splitting each block at every run of columns in which the reference
 (first) row has a gap and removing those columns, which puts an already merged alignment back into the
 reference-contiguous form hal2maf produces. Normalizing and then unnormalizing recovers the same
-alignment columns, though not every block boundary, as two blocks merged with no gap between them
-leave no reference gap to split back on.
+alignment columns as long as the reference itself is contiguous, as it is in hal2maf output, though
+not every block boundary, since two blocks merged with no gap between them leave no reference gap to
+split back on.
 
 Note(!), taffy norm will resort the rows alpha-numerically according to sequence name,  as is necessary to successfully merge all mergeable rows. Is the resorting is undesired, pipe the result to taffy sort (see below) to resort, e.g.
 

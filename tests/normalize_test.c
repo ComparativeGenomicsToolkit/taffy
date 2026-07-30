@@ -735,6 +735,107 @@ static void test_unnormalize_restores_aligned_bases(CuTest *testCase) {
     st_system("rm -f %s %s %s", original, merged, split);
 }
 
+/*
+ * The blocks a taf has and the unaligned bases it holds in gap sequences between them.
+ */
+static void count_taf_blocks_and_gap_bases(CuTest *testCase, char *taf_file, int64_t *blocks,
+                                           int64_t *gap_bases) {
+    FILE *file = fopen(taf_file, "r");
+    CuAssertTrue(testCase, file != NULL);
+    LI *li = LI_construct(file);
+    BlockReader *reader = block_reader_open(li);
+    CuAssertTrue(testCase, reader != NULL);
+    Tag *header = block_reader_take_header(reader);
+    tag_destruct(header);
+    *blocks = 0;
+    *gap_bases = 0;
+    Alignment *alignment, *p_alignment = NULL;
+    while((alignment = block_reader_next(reader, p_alignment)) != NULL) {
+        (*blocks)++;
+        for(Alignment_Row *row = alignment->row; row != NULL; row = row->n_row) {
+            if(row->left_gap_sequence != NULL) {
+                *gap_bases += strlen(row->left_gap_sequence);
+            }
+        }
+        if(p_alignment != NULL) {
+            alignment_destruct(p_alignment, 1);
+        }
+        p_alignment = alignment;
+    }
+    if(p_alignment != NULL) {
+        alignment_destruct(p_alignment, 1);
+    }
+    block_reader_destruct(reader);
+    LI_destruct(li);
+    fclose(file);
+}
+
+/*
+ * taffy sort relinks every block as it goes without merging anything, so a row can end up continuing
+ * from a different predecessor than the one its gap sequence was worked out against. Left holding a
+ * sequence that no longer spans its gap, write_coordinates aborts: sorting a taf that had been
+ * through add-gap-bases used to die partway through and leave a truncated file behind.
+ */
+static void test_sort_keeps_gap_sequences(CuTest *testCase) {
+    char *gap_file = "./tests/sort.gapseq.taf";
+    char *sorted_file = "./tests/sort.gapseq.sorted.taf";
+    CuAssertIntEquals(testCase, 0, st_system("./bin/taffy view -i ./tests/evolverMammals.maf -o %s.tmp",
+                                             gap_file));
+    CuAssertIntEquals(testCase, 0, st_system("./bin/taffy add-gap-bases -i %s.tmp ./tests/seqs/* -o %s",
+                                             gap_file, gap_file));
+    CuAssertIntEquals(testCase, 0, st_system("./bin/taffy sort -i %s -n ./tests/sort_file.txt -o %s",
+                                             gap_file, sorted_file));
+
+    int64_t blocks_before, gap_before, blocks_after, gap_after;
+    count_taf_blocks_and_gap_bases(testCase, gap_file, &blocks_before, &gap_before);
+    count_taf_blocks_and_gap_bases(testCase, sorted_file, &blocks_after, &gap_after);
+
+    CuAssertTrue(testCase, gap_before > 0); // The input has to have gap sequences to lose
+    CuAssertIntEquals(testCase, blocks_before, blocks_after); // Nothing truncated by an abort
+    // And essentially nothing downgraded to a bare gap length. Not quite all of them survive: where
+    // a sequence occurs more than once in a block, relinking can legitimately pair a row with a
+    // different, further away copy than the one its gap sequence was worked out against, and a
+    // sequence that no longer spans the gap has to be dropped. That accounts for 61 bases here.
+    CuAssertTrue(testCase, gap_after * 100 > gap_before * 99);
+    st_system("rm -f %s %s.tmp %s", gap_file, gap_file, sorted_file);
+}
+
+// Splitting a block moves the column tags of the columns it keeps into the new blocks, and the tags
+// of the reference-gap columns it removes go with them. Neither may be freed twice or leaked.
+static void test_unnormalize_column_tags(CuTest *testCase) {
+    char *input_file = "./tests/unnormalize_tags_test.taf";
+    char *output_file = "./tests/unnormalize_tags_out.taf";
+    CuAssertIntEquals(testCase, 0, st_system("./bin/taffy norm -i %s -u -o %s", input_file, output_file));
+    CuAssertIntEquals(testCase, 0, st_system("diff %s ./tests/unnormalize_tags_test_truth.taf",
+                                             output_file));
+    st_system("rm -f %s", output_file);
+}
+
+/*
+ * taffy norm links a block to the next one and then writes that same block, so clearing gap sequences
+ * on the left side of a link threw them away just before they were needed. Everything add-gap-bases
+ * had put in came out as a bare gap length instead. The merged blocks legitimately lose theirs, the
+ * sequence having become alignment columns, but the boundaries that remain have to keep them.
+ */
+static void test_norm_keeps_gap_sequences(CuTest *testCase) {
+    char *gap_file = "./tests/norm.gapseq.taf";
+    char *normed_file = "./tests/norm.gapseq.normed.taf";
+    CuAssertIntEquals(testCase, 0, st_system("./bin/taffy view -i ./tests/evolverMammals.maf -o %s.tmp",
+                                             gap_file));
+    CuAssertIntEquals(testCase, 0, st_system("./bin/taffy add-gap-bases -i %s.tmp ./tests/seqs/* -o %s",
+                                             gap_file, gap_file));
+    CuAssertIntEquals(testCase, 0, st_system("./bin/taffy norm -i %s -o %s", gap_file, normed_file));
+
+    int64_t blocks_before, gap_before, blocks_after, gap_after;
+    count_taf_blocks_and_gap_bases(testCase, gap_file, &blocks_before, &gap_before);
+    count_taf_blocks_and_gap_bases(testCase, normed_file, &blocks_after, &gap_after);
+
+    CuAssertTrue(testCase, gap_before > 0); // The input has to have gap sequences to lose
+    CuAssertTrue(testCase, blocks_after < blocks_before); // And norm has to have merged blocks
+    CuAssertTrue(testCase, gap_after > 0); // The boundaries that survived keep their sequence
+    st_system("rm -f %s %s.tmp %s", gap_file, gap_file, normed_file);
+}
+
 CuSuite* normalize_test_suite(void) {
     CuSuite* suite = CuSuiteNew();
     SUITE_ADD_TEST(suite, test_remove_all_gap_columns);
@@ -748,6 +849,9 @@ CuSuite* normalize_test_suite(void) {
     SUITE_ADD_TEST(suite, test_unnormalize_rejects_merge_options);
     SUITE_ADD_TEST(suite, test_unnormalize_round_trip);
     SUITE_ADD_TEST(suite, test_unnormalize_restores_aligned_bases);
+    SUITE_ADD_TEST(suite, test_unnormalize_column_tags);
+    SUITE_ADD_TEST(suite, test_sort_keeps_gap_sequences);
+    SUITE_ADD_TEST(suite, test_norm_keeps_gap_sequences);
     SUITE_ADD_TEST(suite, test_normalize);
     SUITE_ADD_TEST(suite, test_maf_norm);
     SUITE_ADD_TEST(suite, test_maf_norm_to_maf);
