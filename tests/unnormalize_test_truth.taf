@@ -1,0 +1,5 @@
+#taf version:1
+AA- ; i 0 ref.c1 0 + 100 i 1 s2.c1 0 + 100 i 2 s3.c1 0 + 100
+CCC
+GGG ; g 1 2
+TTT

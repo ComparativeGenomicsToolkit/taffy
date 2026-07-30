@@ -515,6 +515,8 @@ Alignment *alignment_merge_adjacent(Alignment *left_alignment, Alignment *right_
         }
         for(int64_t i=0; i<right_alignment->column_number; i++) { // Add the right alignment's column's tags
             combined_column_tags[j++] = right_alignment->column_tags[i];
+            right_alignment->column_tags[i] = NULL; // The merged alignment owns them now, so the
+            // alignment_destruct below must not free them out from under it
         }
         free(left_alignment->column_tags); // Cleanup, but not the tag strings which we copied
         left_alignment->column_tags = combined_column_tags;

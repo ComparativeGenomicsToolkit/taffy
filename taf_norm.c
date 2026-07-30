@@ -32,6 +32,7 @@ static void usage(void) {
     fprintf(stderr, "-n --maximumGapLength : Only merge together two adjacent blocks if the total number of unaligned bases between the blocks is less than this many bases, by default: %" PRIi64 "\n", maximum_gap_length);
     fprintf(stderr, "-Q --minimumSharedRows : The minimum number of rows between two blocks that need to be shared for a merge, default: %" PRIi64 "\n", minimum_shared_rows);
     fprintf(stderr, "-q --fractionSharedRows : The fraction of rows between two blocks that need to be shared for a merge, default: %f\n", fraction_shared_rows);
+    fprintf(stderr, "-u --unnormalize : Reverse of the normal merging: split each block at every run of columns in which the reference (first) row has a gap, removing those columns, so that no output block has a reference gap. The bases in the removed columns are not aligned to the reference and are dropped. Can not be combined with -d, -a or -b, and the -m, -n, -Q and -q merging options are not used.\n");
     fprintf(stderr, "-d --filterGapCausingDupes : Reduce the number of MAF blocks by filtering out rows that induce gaps > maximumGapLength. Rows are only filtered out if they are duplications (contig of same name appears elsewhere in block, or contig with same prefix up to \".\" appears in the same block).\n");
     fprintf(stderr, "-s --repeatCoordinatesEveryNColumns : Repeat coordinates of each sequence at least every n columns. By default: %" PRIi64 "\n", repeat_coordinates_every_n_columns);
     fprintf(stderr, "-c --useCompression : Write the output using bgzip compression.\n");
@@ -207,6 +208,45 @@ static bool greedy_prune_by_gap(Alignment *alignment, int64_t maximum_gap_length
 }
 
 
+/*
+ * Break a block's links to the blocks the reader linked it to. When we write blocks we built
+ * ourselves, an input block can outlive or predecease its reader neighbours, and relinking it into
+ * the output would otherwise leave a neighbour pointing at it without a matching pointer back.
+ */
+static void unlink_block(Alignment *alignment) {
+    for(Alignment_Row *row = alignment->row; row != NULL; row = row->n_row) {
+        if(row->l_row != NULL) {
+            row->l_row->r_row = NULL;
+            row->l_row = NULL;
+        }
+        if(row->r_row != NULL) {
+            row->r_row->l_row = NULL;
+            row->r_row = NULL;
+        }
+    }
+}
+
+/*
+ * Push a block onto the output. Blocks are written one behind, because the block after the one being
+ * written has to be linked to it first, and the two previous blocks are kept so that taf coordinates
+ * can be written differentially against them.
+ */
+static void emit_block(Alignment **p_alignment, Alignment **p_p_alignment, Alignment *alignment,
+                       LW *output, bool output_maf, bool run_length_encode_bases,
+                       int64_t repeat_coordinates_every_n_columns) {
+    if(*p_alignment != NULL) {
+        alignment_link_adjacent(*p_alignment, alignment, 1);
+        output_maf ? maf_write_block(*p_alignment, output) :
+            taf_write_block(*p_p_alignment, *p_alignment, run_length_encode_bases,
+                            repeat_coordinates_every_n_columns, output);
+        if(*p_p_alignment != NULL) {
+            alignment_destruct(*p_p_alignment, 1);
+        }
+        *p_p_alignment = *p_alignment;
+    }
+    *p_alignment = alignment;
+}
+
 int taf_norm_main(int argc, char *argv[]) {
     time_t startTime = time(NULL);
 
@@ -220,6 +260,7 @@ int taf_norm_main(int argc, char *argv[]) {
     bool output_maf = 0;
     bool use_compression = 0;
     bool filter_gap_causing_dupes = 0;
+    bool unnormalize = 0;
     stList *fasta_files = stList_construct();
     char *hal_file = NULL;
     int bgzf_threads = 1;
@@ -239,6 +280,7 @@ int taf_norm_main(int argc, char *argv[]) {
                                                 { "fractionSharedRows", required_argument, 0, 'q' },
                                                 { "minimumSharedRows", required_argument, 0, 'Q' },
                                                 { "filterGapCausingDupes", no_argument, 0, 'd' },
+                                                { "unnormalize", no_argument, 0, 'u' },
                                                 { "repeatCoordinatesEveryNColumns", required_argument, 0, 's' },
                                                 { "useCompression", no_argument, 0, 'c' },
                                                 { "halFile", required_argument, 0, 'a' },
@@ -247,7 +289,7 @@ int taf_norm_main(int argc, char *argv[]) {
                                                 { 0, 0, 0, 0 } };
 
         int option_index = 0;
-        int64_t key = getopt_long(argc, argv, "l:i:o:hcm:n:dkQ:q:s:a:b:T:", long_options, &option_index);
+        int64_t key = getopt_long(argc, argv, "l:i:o:hcm:n:dukQ:q:s:a:b:T:", long_options, &option_index);
         if (key == -1) {
             break;
         }
@@ -276,6 +318,9 @@ int taf_norm_main(int argc, char *argv[]) {
                 break;
             case 'd':
                 filter_gap_causing_dupes = 1;
+                break;
+            case 'u':
+                unnormalize = 1;
                 break;
             case 'Q':
                 minimum_shared_rows = atol(optarg);
@@ -311,6 +356,12 @@ int taf_norm_main(int argc, char *argv[]) {
     //////////////////////////////////////////////
     //Log the inputs
     //////////////////////////////////////////////
+
+    if(unnormalize && (filter_gap_causing_dupes || hal_file != NULL || stList_length(fasta_files) > 0)) {
+        fprintf(stderr, "--unnormalize splits blocks apart rather than merging them, so it can not be "
+                        "combined with -d, -a or -b\n");
+        return 1;
+    }
 
     st_setLogLevelFromString(logLevelString);
     LI_set_bgzf_threads(bgzf_threads);
@@ -371,6 +422,61 @@ int taf_norm_main(int argc, char *argv[]) {
     tag_destruct(tag);
 
     Alignment *alignment, *p_alignment = NULL, *p_p_alignment = NULL;
+    if(unnormalize) {
+        //////////////////////////////////////////////
+        // Split every block at its reference gaps, which is the reverse of the merging below
+        //////////////////////////////////////////////
+        int64_t blocks_in = 0, blocks_out = 0, blocks_dropped = 0;
+        while((alignment = get_next_block(reader)) != NULL) {
+            blocks_in++;
+            unlink_block(alignment); // We write blocks of our own making, so the reader's links
+            // between input blocks would only leave dangling pointers behind
+            stList *segments = alignment_split_at_reference_gaps(alignment);
+            if(segments == NULL) { // The reference has no gaps, so the block is already unnormalized
+                emit_block(&p_alignment, &p_p_alignment, alignment, output, output_maf,
+                           run_length_encode_bases, repeat_coordinates_every_n_columns);
+                blocks_out++;
+                continue;
+            }
+            if(stList_length(segments) == 0) { // The reference row was entirely gaps, so nothing in
+                // the block is anchored to the reference and it goes away
+                blocks_dropped++;
+                st_logDebug("Dropping a block whose reference row was entirely gaps\n");
+            }
+            for(int64_t i=0; i<stList_length(segments); i++) {
+                emit_block(&p_alignment, &p_p_alignment, stList_get(segments, i), output, output_maf,
+                           run_length_encode_bases, repeat_coordinates_every_n_columns);
+                blocks_out++;
+            }
+            stList_destruct(segments);
+            alignment_destruct(alignment, 1); // We built new blocks, so the input block goes
+        }
+        // Flush the last block, which has nothing after it to link to
+        if(p_alignment != NULL) {
+            output_maf ? maf_write_block(p_alignment, output) :
+                taf_write_block(p_p_alignment, p_alignment, run_length_encode_bases, -1, output);
+            alignment_destruct(p_alignment, 1);
+            if(p_p_alignment != NULL) {
+                alignment_destruct(p_p_alignment, 1);
+            }
+        }
+        st_logInfo("Unnormalized %" PRIi64 " blocks into %" PRIi64 ", dropping %" PRIi64
+                   " with an all-gap reference row\n", blocks_in, blocks_out, blocks_dropped);
+        block_reader_destruct(reader);
+        LI_destruct(li);
+        if(inputFile != NULL) {
+            fclose(input);
+        }
+        LW_destruct(output, outputFile != NULL);
+        if (fastas_map) {
+            stHash_destruct(fastas_map);
+        }
+        if (hal_species) {
+            stSet_destruct(hal_species);
+        }
+        st_logInfo("taffy norm is done, %" PRIi64 " seconds have elapsed\n", time(NULL) - startTime);
+        return 0;
+    }
     while((alignment = get_next_block_and_remove_gap_columns(reader)) != NULL) {
         // First resort the rows to be alphabetical and then realign with any previous block. This ensures
         // we will not have any mergeable rows unlinked. Note:

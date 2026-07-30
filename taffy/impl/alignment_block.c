@@ -193,15 +193,12 @@ void alignment_link_adjacent(Alignment *left_alignment, Alignment *right_alignme
                              // unless we disallow substitutions, in which case use an arbitrarily large mismatch cost
     int64_t aligned_rows[stList_length(left_rows)];
     WFA_get_alignment(wfa, aligned_rows);
-    // Remove any previous links
+    // Remove any previous links. Note we leave the left rows' left_gap_sequence alone: it describes
+    // the gap to the block before the left one, which this call does not touch. It is the right rows'
+    // gap sequences that this can invalidate, and those are checked below once the new links are in.
     Alignment_Row *row = left_alignment->row;
     while(row != NULL) {
         row->r_row = NULL;
-        // Clean up any gap sequences because once unlinked we can not guarantee continuity
-        if(row->left_gap_sequence != NULL) {
-            free(row->left_gap_sequence);
-            row->left_gap_sequence = NULL;
-        }
         row = row->n_row;
     }
     row = right_alignment->row;
@@ -220,6 +217,25 @@ void alignment_link_adjacent(Alignment *left_alignment, Alignment *right_alignme
                 assert(alignment_row_is_predecessor(left_row, right_row));
             }
         }
+    }
+    // A row's left_gap_sequence holds the unaligned bases between it and its left row, so it is only
+    // meaningful for the link that was in place when it was created. Re-linking can pair a row with
+    // a different left row, or with one a different distance away, which leaves the sequence
+    // describing a gap that no longer exists. Drop any that no longer fit the gap they now span, so
+    // that they get regenerated instead of splicing the wrong number of bases into a merged row.
+    row = right_alignment->row;
+    while(row != NULL) {
+        if(row->left_gap_sequence != NULL) {
+            int64_t gap_length = -1; // No predecessor means there is no gap for it to describe
+            if(row->l_row != NULL && alignment_row_is_predecessor(row->l_row, row)) {
+                gap_length = row->start - (row->l_row->start + row->l_row->length);
+            }
+            if((int64_t)strlen(row->left_gap_sequence) != gap_length) {
+                free(row->left_gap_sequence);
+                row->left_gap_sequence = NULL;
+            }
+        }
+        row = row->n_row;
     }
     // clean up
     stList_destruct(left_rows);
@@ -401,6 +417,109 @@ int64_t alignment_remove_all_gap_columns(Alignment *alignment) {
     alignment->column_number = column_number - columns_to_remove;
     free(keep_column);
     return columns_to_remove;
+}
+
+stList *alignment_split_at_reference_gaps(Alignment *alignment) {
+    if(alignment->row == NULL || alignment->column_number == 0) {
+        return NULL;
+    }
+    int64_t column_number = alignment->column_number;
+    char *reference_bases = alignment->row->bases;
+    bool has_reference_gap = 0;
+    for(int64_t i=0; i<column_number; i++) {
+        if(reference_bases[i] == '-') {
+            has_reference_gap = 1;
+            break;
+        }
+    }
+    if(!has_reference_gap) {
+        return NULL; // Nothing to split, the caller can use the alignment as it stands
+    }
+
+    // Find the column ranges in which the reference has bases; each becomes a block
+    int64_t segment_number = 0;
+    for(int64_t i=0; i<column_number; ) {
+        while(i < column_number && reference_bases[i] == '-') { i++; }
+        if(i >= column_number) { break; }
+        segment_number++;
+        while(i < column_number && reference_bases[i] != '-') { i++; }
+    }
+    int64_t *segment_start = st_malloc(sizeof(int64_t) * (segment_number > 0 ? segment_number : 1));
+    int64_t *segment_end = st_malloc(sizeof(int64_t) * (segment_number > 0 ? segment_number : 1));
+    int64_t k = 0;
+    for(int64_t i=0; i<column_number; ) {
+        while(i < column_number && reference_bases[i] == '-') { i++; }
+        if(i >= column_number) { break; }
+        segment_start[k] = i;
+        while(i < column_number && reference_bases[i] != '-') { i++; }
+        segment_end[k++] = i;
+    }
+    assert(k == segment_number);
+
+    // Per row bookkeeping as we walk the columns left to right
+    int64_t row_number = alignment->row_number;
+    Alignment_Row **input_rows = st_malloc(sizeof(Alignment_Row *) * row_number);
+    int64_t row_index = 0;
+    for(Alignment_Row *row = alignment->row; row != NULL; row = row->n_row) {
+        input_rows[row_index++] = row;
+    }
+    assert(row_index == row_number);
+    int64_t *consumed = st_calloc(row_number, sizeof(int64_t)); // bases of the row already passed over
+    int64_t *scanned_to = st_calloc(row_number, sizeof(int64_t)); // column the row has been scanned up to
+
+    stList *segments = stList_construct();
+    for(k=0; k<segment_number; k++) {
+        int64_t start = segment_start[k], end = segment_end[k];
+        Alignment *segment = st_calloc(1, sizeof(Alignment));
+        segment->column_number = end - start;
+        segment->column_tags = st_calloc(end - start, sizeof(Tag *));
+        for(int64_t i=start; i<end; i++) { // Take the tags of the columns we keep, leaving the
+            // removed columns' tags with the input alignment for it to clean up
+            segment->column_tags[i - start] = alignment->column_tags[i];
+            alignment->column_tags[i] = NULL;
+        }
+        Alignment_Row **p_row = &(segment->row);
+        for(int64_t r=0; r<row_number; r++) {
+            Alignment_Row *row = input_rows[r];
+            for(int64_t i=scanned_to[r]; i<start; i++) { // The bases in the columns being removed are
+                // not in any block, but the row still passes over them
+                if(row->bases[i] != '-') {
+                    consumed[r]++;
+                }
+            }
+            int64_t segment_length = 0;
+            for(int64_t i=start; i<end; i++) {
+                if(row->bases[i] != '-') {
+                    segment_length++;
+                }
+            }
+            scanned_to[r] = end;
+            if(segment_length == 0) { // The row has no bases here, so it is not in this block
+                continue;
+            }
+            Alignment_Row *new_row = st_calloc(1, sizeof(Alignment_Row));
+            new_row->sequence_name = stString_copy(row->sequence_name);
+            new_row->strand = row->strand;
+            new_row->sequence_length = row->sequence_length;
+            new_row->start = row->start + consumed[r];
+            new_row->length = segment_length;
+            new_row->bases = stString_getSubString(row->bases, start, end - start);
+            consumed[r] += segment_length;
+            *p_row = new_row;
+            p_row = &(new_row->n_row);
+            segment->row_number++;
+        }
+        assert(segment->row_number > 0); // The reference always has bases across a segment
+        stList_append(segments, segment);
+    }
+
+    free(consumed);
+    free(scanned_to);
+    free(input_rows);
+    free(segment_start);
+    free(segment_end);
+
+    return segments;
 }
 
 void alignment_get_column_in_buffer(Alignment *alignment, int64_t column_index, char *buffer) {

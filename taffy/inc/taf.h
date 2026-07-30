@@ -135,6 +135,22 @@ void alignment_set_rows(Alignment *alignment, stList *rows);
 int64_t alignment_remove_all_gap_columns(Alignment *alignment);
 
 /*
+ * Split the alignment at every run of columns in which the first (reference) row has a gap, removing
+ * those columns, so that no returned block has a reference gap. Returns the resulting blocks as a
+ * list of newly allocated alignments in left to right order; the caller still owns the alignment
+ * passed in and must destruct it.
+ *
+ * Returns NULL if the reference row has no gaps, meaning the alignment can be used as it is. Returns
+ * an empty list if the reference row is entirely gaps, as then no part of the alignment is anchored
+ * to the reference and the block goes away altogether.
+ *
+ * Each row's coordinates are recomputed from the bases it has in each block, and a row with no bases
+ * in a block is left out of it. The bases in the removed columns are not aligned to the reference and
+ * are dropped.
+ */
+stList *alignment_split_at_reference_gaps(Alignment *alignment);
+
+/*
  * Read a column of the alignment into the buffer. The buffer must be initialized and be at least
  * of length alignment->row_number.
  */

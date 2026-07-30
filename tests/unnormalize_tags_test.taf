@@ -1,0 +1,4 @@
+#taf version:1
+AA ; i 0 ref.c1 0 + 100 i 1 s2.c1 0 + 100 @ c:zero
+-T @ c:refgap
+CC @ c:one
