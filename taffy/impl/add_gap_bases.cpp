@@ -54,7 +54,14 @@ void alignment_add_gap_strings(Alignment *p_alignment, Alignment *alignment, stH
                 char* seq_interval = NULL;
                 int64_t i = row->l_row->start + row->l_row->length;
                 assert(i >= 0 && i < row->sequence_length);
-                if(row->strand) {
+                if(gap_length == 0) {
+                    // Nothing to fetch. Two rows continuing with no gap between them is by far the
+                    // commonest case, and asking the sequence source for an empty interval is not
+                    // free: against a HAL it is a lock, a genome lookup, a sequence lookup and a DNA
+                    // iterator, all to return an empty string.
+                    seq_interval = stString_copy("");
+                }
+                else if(row->strand) {
                     seq_interval = get_sequence_fragment(row->sequence_name, i, gap_length, fastas, hal_handle, hal_species);
                 }
                 else { // Case sequence is on the negative strand
