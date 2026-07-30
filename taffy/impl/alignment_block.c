@@ -221,6 +221,25 @@ void alignment_link_adjacent(Alignment *left_alignment, Alignment *right_alignme
             }
         }
     }
+    // A row's left_gap_sequence holds the unaligned bases between it and its left row, so it is only
+    // meaningful for the link that was in place when it was created. Re-linking can pair a row with
+    // a different left row, or with one a different distance away, which leaves the sequence
+    // describing a gap that no longer exists. Drop any that no longer fit the gap they now span, so
+    // that they get regenerated instead of splicing the wrong number of bases into a merged row.
+    row = right_alignment->row;
+    while(row != NULL) {
+        if(row->left_gap_sequence != NULL) {
+            int64_t gap_length = -1; // No predecessor means there is no gap for it to describe
+            if(row->l_row != NULL && alignment_row_is_predecessor(row->l_row, row)) {
+                gap_length = row->start - (row->l_row->start + row->l_row->length);
+            }
+            if((int64_t)strlen(row->left_gap_sequence) != gap_length) {
+                free(row->left_gap_sequence);
+                row->left_gap_sequence = NULL;
+            }
+        }
+        row = row->n_row;
+    }
     // clean up
     stList_destruct(left_rows);
     stList_destruct(right_rows);

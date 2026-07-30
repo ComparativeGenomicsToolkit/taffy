@@ -463,6 +463,34 @@ static void test_gap_columns_after_filtering_a_species(CuTest *testCase) {
     st_system("rm -f %s %s", filtered_file, normalized_file);
 }
 
+/*
+ * taffy add-gap-bases records the unaligned sequence between two blocks as a TAF "G" record, whose
+ * length is tied to the gap between a row and the row it continues from. taffy norm re-links rows,
+ * which can pair a row with a different, or a differently distant, predecessor, so a gap sequence
+ * that no longer fits its gap must not be spliced into a merged row: doing so puts more bases in the
+ * row than its length field accounts for. This is the pipeline cactus uses, via the HAL backend.
+ */
+static void test_norm_with_gap_sequences(CuTest *testCase) {
+    char *gap_file = "./tests/evolverMammals.gapseq.taf";
+    char *output_file = "./tests/evolverMammals.gapseq.norm.maf";
+    int i = st_system("./bin/taffy view -i ./tests/evolverMammals.maf | "
+                      "./bin/taffy add-gap-bases ./tests/seqs/* > %s", gap_file);
+    CuAssertIntEquals(testCase, 0, i);
+    int j = st_system("./bin/taffy norm -i %s -k -o %s", gap_file, output_file);
+    CuAssertIntEquals(testCase, 0, j);
+    // count_all_gap_columns checks each row's length field against its non-gap base count, which is
+    // the invariant a stale gap sequence breaks
+    count_all_gap_columns(testCase, output_file);
+
+    // And again with the sequences available, where the gap sequences that no longer fit should be
+    // refilled with real bases rather than left as Ns
+    int k = st_system("./bin/taffy norm -i %s -k -b ./tests/seqs/* -o %s", gap_file, output_file);
+    CuAssertIntEquals(testCase, 0, k);
+    count_all_gap_columns(testCase, output_file);
+
+    st_system("rm -f %s %s", gap_file, output_file);
+}
+
 CuSuite* normalize_test_suite(void) {
     CuSuite* suite = CuSuiteNew();
     SUITE_ADD_TEST(suite, test_remove_all_gap_columns);
@@ -470,6 +498,7 @@ CuSuite* normalize_test_suite(void) {
     SUITE_ADD_TEST(suite, test_all_gap_block_keeps_gap_sequence);
     SUITE_ADD_TEST(suite, test_gap_column_filter);
     SUITE_ADD_TEST(suite, test_gap_columns_after_filtering_a_species);
+    SUITE_ADD_TEST(suite, test_norm_with_gap_sequences);
     SUITE_ADD_TEST(suite, test_normalize);
     SUITE_ADD_TEST(suite, test_maf_norm);
     SUITE_ADD_TEST(suite, test_maf_norm_to_maf);
