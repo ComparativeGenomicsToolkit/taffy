@@ -193,15 +193,12 @@ void alignment_link_adjacent(Alignment *left_alignment, Alignment *right_alignme
                              // unless we disallow substitutions, in which case use an arbitrarily large mismatch cost
     int64_t aligned_rows[stList_length(left_rows)];
     WFA_get_alignment(wfa, aligned_rows);
-    // Remove any previous links
+    // Remove any previous links. Note we leave the left rows' left_gap_sequence alone: it describes
+    // the gap to the block before the left one, which this call does not touch. It is the right rows'
+    // gap sequences that this can invalidate, and those are checked below once the new links are in.
     Alignment_Row *row = left_alignment->row;
     while(row != NULL) {
         row->r_row = NULL;
-        // Clean up any gap sequences because once unlinked we can not guarantee continuity
-        if(row->left_gap_sequence != NULL) {
-            free(row->left_gap_sequence);
-            row->left_gap_sequence = NULL;
-        }
         row = row->n_row;
     }
     row = right_alignment->row;
