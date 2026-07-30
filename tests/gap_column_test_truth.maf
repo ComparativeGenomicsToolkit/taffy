@@ -1,0 +1,11 @@
+##maf version=1 scoring=N/A
+
+a
+s	simCow.chr1	10	4	+	100	ACGT
+s	simDog.chr1	20	4	+	100	ACGT
+s	simHuman.chr1	30	4	+	100	ACGT
+
+a
+s	simCow.chr2	5	5	+	200	ACGTT
+s	simDog.chr2	5	5	+	200	ACGTT
+

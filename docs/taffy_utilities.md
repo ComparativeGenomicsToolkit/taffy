@@ -102,6 +102,15 @@ For example, to normalize a maf file do the following:
 option reads in underlying sequence files and is used to
 retrieve any sequences that are unaligned between two blocks that is necessary to include in stitching together adjacent blocks. This uses the same method as `taffy add-gap-bases` to add these unaligned sequences.
 
+`taffy norm` also removes any column that consists entirely of gaps. These are left behind when the
+only row with a base in a column has been filtered out, so it is worth running `taffy norm` after
+dropping rows from an alignment, e.g. after removing a species with `taffy sort -f`:
+
+    taffy view -i MAF_FILE | taffy sort -f FILTER_FILE | taffy norm -k -o out.maf
+
+Removing a gap-only column does not change any row's coordinates, as such a column contains no
+bases.
+
 Note(!), taffy norm will resort the rows alpha-numerically according to sequence name,  as is necessary to successfully merge all mergeable rows. Is the resorting is undesired, pipe the result to taffy sort (see below) to resort, e.g.
 
     taffy view -i MAF_FILE | taffy norm -b SEQUENCE_FILES | taffy sort -n SORT_FILE | taffy view -m

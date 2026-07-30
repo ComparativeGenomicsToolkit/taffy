@@ -1,0 +1,14 @@
+##maf version=1 scoring=N/A
+
+a
+s	simCow.chr1	10	4	+	100	-AC-GT--
+s	simDog.chr1	20	4	+	100	-AC-GT--
+s	simHuman.chr1	30	4	+	100	-AC-GT--
+
+a
+s	simCow.chr2	5	3	+	200	AC--G
+s	simDog.chr2	5	3	+	200	AC--G
+
+a
+s	simCow.chr2	8	2	+	200	-TT-
+s	simDog.chr2	8	2	+	200	-TT-

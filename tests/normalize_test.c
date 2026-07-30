@@ -242,8 +242,234 @@ static void test_norm_maf_input(CuTest *testCase) {
     st_system("rm -f %s %s", piped_out, direct_out);
 }
 
+// Checks alignment_remove_all_gap_columns directly: the gap-only columns go, the remaining bases
+// keep their order, the column tags follow the columns they belong to, and the row coordinates are
+// left alone.
+static void test_remove_all_gap_columns(CuTest *testCase) {
+    char *example_file = "./tests/gap_column_test.maf";
+    FILE *file = fopen(example_file, "r");
+    LI *li = LI_construct(file);
+    Tag *header = maf_read_header(li);
+    tag_destruct(header);
+
+    // The first block of the toy file is 8 columns of which 4 (the first, one in the middle and the
+    // last two) are entirely gaps
+    Alignment *alignment = maf_read_block(li);
+    CuAssertTrue(testCase, alignment != NULL);
+    CuAssertIntEquals(testCase, 8, alignment->column_number);
+    CuAssertIntEquals(testCase, 3, alignment->row_number);
+
+    // Tag a column that survives and a column that does not, so we can check the tags are remapped
+    alignment->column_tags[1] = tag_construct("keep", "1", alignment->column_tags[1]);
+    alignment->column_tags[3] = tag_construct("drop", "1", alignment->column_tags[3]);
+
+    // Record the row coordinates so we can check they are untouched
+    int64_t starts[3], lengths[3], sequence_lengths[3];
+    int64_t i = 0;
+    for(Alignment_Row *row = alignment->row; row != NULL; row = row->n_row, i++) {
+        starts[i] = row->start;
+        lengths[i] = row->length;
+        sequence_lengths[i] = row->sequence_length;
+    }
+    CuAssertIntEquals(testCase, 3, i);
+
+    CuAssertIntEquals(testCase, 4, alignment_remove_all_gap_columns(alignment));
+    CuAssertIntEquals(testCase, 4, alignment->column_number);
+    CuAssertIntEquals(testCase, 3, alignment->row_number); // No rows are removed
+
+    i = 0;
+    for(Alignment_Row *row = alignment->row; row != NULL; row = row->n_row, i++) {
+        CuAssertStrEquals(testCase, "ACGT", row->bases);
+        CuAssertIntEquals(testCase, starts[i], row->start);
+        CuAssertIntEquals(testCase, lengths[i], row->length);
+        CuAssertIntEquals(testCase, sequence_lengths[i], row->sequence_length);
+    }
+    CuAssertIntEquals(testCase, 3, i);
+
+    // The tag of the kept column moved with it from index 1 to index 0, and the tag of the removed
+    // column is gone
+    CuAssertTrue(testCase, tag_find(alignment->column_tags[0], "keep") != NULL);
+    for(int64_t j=0; j<alignment->column_number; j++) {
+        CuAssertTrue(testCase, tag_find(alignment->column_tags[j], "drop") == NULL);
+    }
+
+    // Running it again is a no-op now that no column is all gaps
+    CuAssertIntEquals(testCase, 0, alignment_remove_all_gap_columns(alignment));
+    CuAssertIntEquals(testCase, 4, alignment->column_number);
+
+    alignment_destruct(alignment, 1);
+    LI_destruct(li);
+    fclose(file);
+}
+
+// A block in which every column is a gap keeps one column rather than being reduced to nothing. A
+// zero column block can not be written, and dropping such a block from the alignment instead would
+// strand the interstitial gap sequence that the following block records relative to it.
+static void test_remove_all_gap_columns_all_gap_block(CuTest *testCase) {
+    Alignment *alignment = st_calloc(1, sizeof(Alignment));
+    alignment->column_number = 3;
+    alignment->column_tags = st_calloc(3, sizeof(Tag *));
+    alignment->row_number = 2;
+    Alignment_Row *row_1 = st_calloc(1, sizeof(Alignment_Row));
+    row_1->sequence_name = stString_copy("simCow.chr1");
+    row_1->bases = stString_copy("---");
+    row_1->strand = 1;
+    row_1->sequence_length = 100;
+    Alignment_Row *row_2 = st_calloc(1, sizeof(Alignment_Row));
+    row_2->sequence_name = stString_copy("simDog.chr1");
+    row_2->bases = stString_copy("---");
+    row_2->strand = 1;
+    row_2->sequence_length = 100;
+    alignment->row = row_1;
+    row_1->n_row = row_2;
+
+    CuAssertIntEquals(testCase, 2, alignment_remove_all_gap_columns(alignment));
+    CuAssertIntEquals(testCase, 1, alignment->column_number);
+    CuAssertStrEquals(testCase, "-", row_1->bases);
+    CuAssertStrEquals(testCase, "-", row_2->bases);
+
+    // And it stays at one column if run again
+    CuAssertIntEquals(testCase, 0, alignment_remove_all_gap_columns(alignment));
+    CuAssertIntEquals(testCase, 1, alignment->column_number);
+
+    alignment_destruct(alignment, 1);
+}
+
+/*
+ * A block that is nothing but gaps has to survive as a block, because the block after it records
+ * its interstitial gap sequence (a TAF "G" record) relative to it. Removing the all-gap block
+ * would leave that gap sequence describing a gap that no longer exists, which silently drops the
+ * unaligned bases and leaves each row's length field disagreeing with its aligned bases.
+ */
+static void test_all_gap_block_keeps_gap_sequence(CuTest *testCase) {
+    char *input_file = "./tests/gap_column_gap_seq_test.taf";
+    char *output_file = "./tests/gap_column_gap_seq_out.maf";
+    int i = st_system("./bin/taffy norm -i %s -k -o %s", input_file, output_file);
+    CuAssertIntEquals(testCase, 0, i); // must not abort
+
+    // The two blocks either side of the all-gap block merge, so the 5 bases of gap sequence before
+    // the all-gap block and the 3 before the final block are both part of the merged row
+    FILE *file = fopen(output_file, "r");
+    CuAssertTrue(testCase, file != NULL);
+    LI *li = LI_construct(file);
+    Tag *header = maf_read_header(li);
+    tag_destruct(header);
+    Alignment *alignment = maf_read_block(li);
+    CuAssertTrue(testCase, alignment != NULL);
+    for(Alignment_Row *row = alignment->row; row != NULL; row = row->n_row) {
+        int64_t bases = 0;
+        for(int64_t j=0; j<alignment->column_number; j++) {
+            if(row->bases[j] != '-') {
+                bases++;
+            }
+        }
+        // 2 aligned + 5 unaligned + 3 unaligned + 2 aligned
+        CuAssertIntEquals(testCase, 12, row->length);
+        CuAssertIntEquals(testCase, row->length, bases); // the gap bases must still be there
+    }
+    alignment_destruct(alignment, 1);
+    LI_destruct(li);
+    fclose(file);
+    st_system("rm %s", output_file);
+}
+
+static void test_gap_column_filter(CuTest *testCase) {
+    /*
+     * Run taffy norm on a small maf containing all-gap columns and check they are removed. The toy
+     * file also exercises the interaction with block merging: its second and third blocks are
+     * adjacent on the same contig and get merged, and the merged block must not carry over the gap
+     * columns of either input block.
+     */
+    char *input_file = "./tests/gap_column_test.maf";
+    char *taf_file = "./tests/gap_column_test_out.taf";
+    char *output_file = "./tests/gap_column_test_out.maf";
+    // Run norm as its own command rather than in the middle of a pipeline, so that a norm failure
+    // is not masked by the exit status of the last stage
+    int i = st_system("./bin/taffy view -i %s -o %s", input_file, taf_file);
+    CuAssertIntEquals(testCase, 0, i);
+    int j = st_system("./bin/taffy norm -i %s -k -o %s", taf_file, output_file);
+    CuAssertIntEquals(testCase, 0, j); // return value should be zero
+    char *truth_file = "./tests/gap_column_test_truth.maf";
+    int diff_ret = st_system("diff %s %s", output_file, truth_file);
+    CuAssertIntEquals(testCase, 0, diff_ret); // return value should be zero if files same
+    st_system("rm %s %s", output_file, taf_file);
+}
+
+// Counts the columns of a maf file that consist entirely of gaps, additionally checking that each
+// row's stated length agrees with its number of non-gap bases. The latter is the invariant that
+// removing columns has to preserve: it breaks if we ever drop a column that held a base.
+static int64_t count_all_gap_columns(CuTest *testCase, char *maf_file) {
+    FILE *file = fopen(maf_file, "r");
+    CuAssertTrue(testCase, file != NULL);
+    LI *li = LI_construct(file);
+    Tag *header = maf_read_header(li);
+    tag_destruct(header);
+    int64_t all_gap_columns = 0;
+    Alignment *alignment;
+    while((alignment = maf_read_block(li)) != NULL) {
+        for(int64_t i=0; i<alignment->column_number; i++) {
+            bool all_gaps = true;
+            for(Alignment_Row *row = alignment->row; row != NULL; row = row->n_row) {
+                if(row->bases[i] != '-') {
+                    all_gaps = false;
+                    break;
+                }
+            }
+            if(all_gaps) {
+                all_gap_columns++;
+            }
+        }
+        for(Alignment_Row *row = alignment->row; row != NULL; row = row->n_row) {
+            int64_t bases = 0;
+            for(int64_t i=0; i<alignment->column_number; i++) {
+                if(row->bases[i] != '-') {
+                    bases++;
+                }
+            }
+            CuAssertIntEquals(testCase, row->length, bases);
+        }
+        alignment_destruct(alignment, 1);
+    }
+    LI_destruct(li);
+    fclose(file);
+    return all_gap_columns;
+}
+
+// The motivating case: filtering out a species leaves behind the columns that only it had a base
+// in, and norm should clean them up. The toy input gives simMouse two insertions relative to the
+// other two rows, so filtering simMouse out strands four all-gap columns.
+static void test_gap_columns_after_filtering_a_species(CuTest *testCase) {
+    char *input_file = "./tests/gap_column_filter_test.maf";
+    char *filter_file = "./tests/gap_column_filter.txt";
+    char *filtered_file = "./tests/gap_column_filtered.maf";
+    char *normalized_file = "./tests/gap_column_filtered.norm.maf";
+
+    int i = st_system("./bin/taffy view -i %s | ./bin/taffy sort -f %s | ./bin/taffy view -m > %s",
+                      input_file, filter_file, filtered_file);
+    CuAssertIntEquals(testCase, 0, i);
+    int j = st_system("./bin/taffy view -i %s | ./bin/taffy sort -f %s | ./bin/taffy norm -k > %s",
+                      input_file, filter_file, normalized_file);
+    CuAssertIntEquals(testCase, 0, j);
+
+    // Filtering on its own strands the four columns simMouse was the only row with a base in
+    CuAssertIntEquals(testCase, 4, count_all_gap_columns(testCase, filtered_file));
+    // Normalizing afterwards removes all of them
+    CuAssertIntEquals(testCase, 0, count_all_gap_columns(testCase, normalized_file));
+
+    char *truth_file = "./tests/gap_column_filter_test_truth.maf";
+    int diff_ret = st_system("diff %s %s", normalized_file, truth_file);
+    CuAssertIntEquals(testCase, 0, diff_ret);
+
+    st_system("rm -f %s %s", filtered_file, normalized_file);
+}
+
 CuSuite* normalize_test_suite(void) {
     CuSuite* suite = CuSuiteNew();
+    SUITE_ADD_TEST(suite, test_remove_all_gap_columns);
+    SUITE_ADD_TEST(suite, test_remove_all_gap_columns_all_gap_block);
+    SUITE_ADD_TEST(suite, test_all_gap_block_keeps_gap_sequence);
+    SUITE_ADD_TEST(suite, test_gap_column_filter);
+    SUITE_ADD_TEST(suite, test_gap_columns_after_filtering_a_species);
     SUITE_ADD_TEST(suite, test_normalize);
     SUITE_ADD_TEST(suite, test_maf_norm);
     SUITE_ADD_TEST(suite, test_maf_norm_to_maf);
