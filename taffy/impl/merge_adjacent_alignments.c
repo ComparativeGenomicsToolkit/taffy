@@ -2,6 +2,7 @@
 #include "ond.h"
 #include "sonLib.h"
 #include "abpoa.h"
+#include <stdlib.h>
 
 /*
  * Method to merge together two adjacent alignments.
@@ -243,7 +244,7 @@ static inline uint8_t msa_to_byte(char c) {
 }
 
 // from cactus/bar/impl/poaBarAligner.c
-abpoa_para_t* construct_abpoa_params() {
+static abpoa_para_t* construct_abpoa_params(void) {
     abpoa_para_t *abpt = abpoa_init_para();
 
     // output options
@@ -307,6 +308,38 @@ static int len_rev_cmp(const void* i1, const void* i2, void* length_list) {
     return (int64_t)len2 < (int64_t)len1 ? -1 : ((int64_t)len2 > (int64_t)len1 ? 1 : 0);
 }
 
+/*
+ * abPOA is set up once and reused for every gap alignment. Building the parameters is expensive out
+ * of proportion to the work: abpoa_post_set_para refills a 65536 entry global lookup table each
+ * time, and doing that once per merge dominated the run time of taffy norm on alignments made of
+ * many small blocks. The parameters are constant, and abpoa_msa resets the handle as its first act,
+ * so one instance serves every call. This is not thread safe, and neither is abPOA's use of the
+ * global tables that make it worth doing.
+ */
+static abpoa_t *shared_abpoa = NULL;
+static abpoa_para_t *shared_abpoa_params = NULL;
+
+static void free_shared_abpoa(void) {
+    if(shared_abpoa != NULL) {
+        abpoa_free(shared_abpoa);
+        shared_abpoa = NULL;
+    }
+    if(shared_abpoa_params != NULL) {
+        abpoa_free_para(shared_abpoa_params);
+        shared_abpoa_params = NULL;
+    }
+}
+
+static void get_shared_abpoa(abpoa_t **ab, abpoa_para_t **abpt) {
+    if(shared_abpoa == NULL) {
+        shared_abpoa = abpoa_init();
+        shared_abpoa_params = construct_abpoa_params();
+        atexit(free_shared_abpoa); // so the singleton is not reported as a leak
+    }
+    *ab = shared_abpoa;
+    *abpt = shared_abpoa_params;
+}
+
 int64_t align_interstitial_gaps_abpoa(Alignment *alignment) {
     /*
      * Align the sequences that lie within the gaps between two adjacent blocks using abPOA.
@@ -346,10 +379,9 @@ int64_t align_interstitial_gaps_abpoa(Alignment *alignment) {
     // sort by length decreasing
     stList_sort2(order_list, len_rev_cmp, (void*)length_list);
 
-    // init abpoa. todo: can move this up, esp. param construction, to avoid repeated invocations
-    // though may not make a difference in practice
-    abpoa_t *ab = abpoa_init();
-    abpoa_para_t* abpoa_params = construct_abpoa_params();
+    abpoa_t *ab;
+    abpoa_para_t *abpoa_params;
+    get_shared_abpoa(&ab, &abpoa_params);
 
     // convert into abpoa input matrix    
     int *seq_lens = (int*)st_calloc(seq_no, sizeof(int));
@@ -366,6 +398,10 @@ int64_t align_interstitial_gaps_abpoa(Alignment *alignment) {
     }
 
     // run abpoa: todo try sorting on length
+    // abpoa_msa resets the shared handle as its first act, but it returns before doing so when
+    // handed no sequences, which would leave the previous call's alignment for us to read back. The
+    // seq_no == 0 return above means that cannot happen; this is here so it stays that way.
+    assert(seq_no > 0);
     abpoa_msa(ab, abpoa_params, seq_no, NULL, seq_lens, bseqs, NULL, NULL);
 
     // copy the results from the abpoa matrix back into the left_gap_sequences
@@ -391,9 +427,7 @@ int64_t align_interstitial_gaps_abpoa(Alignment *alignment) {
     stList_destruct(length_list);
     stList_destruct(order_list);
 
-    // free abpoa
-    abpoa_free(ab);
-    abpoa_free_para(abpoa_params);
+    // The handle and parameters are shared, so they are left for get_shared_abpoa to clean up
     free(seq_lens);
     for (int64_t i = 0; i < seq_no; ++i) {
         free(bseqs[i]);
