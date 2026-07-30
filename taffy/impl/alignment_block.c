@@ -188,14 +188,32 @@ char *alignment_row_to_string(Alignment_Row *row) {
 void alignment_link_adjacent(Alignment *left_alignment, Alignment *right_alignment, bool allow_row_substitutions) {
     stList *left_rows = alignment_get_rows_in_a_list(left_alignment->row);
     stList *right_rows = alignment_get_rows_in_a_list(right_alignment->row);
-    // get the alignment of the rows
-    WFA *wfa = WFA_construct(stList_getBackingArray(left_rows), stList_getBackingArray(right_rows),
-                             stList_length(left_rows), stList_length(right_rows),
-                             sizeof(void *), (bool (*)(void *, void *))alignment_row_is_predecessor_2, 1,
-                             allow_row_substitutions ? 1 : 100000000); // Use unit gap and mismatch costs for the diff
-                             // unless we disallow substitutions, in which case use an arbitrarily large mismatch cost
-    int64_t aligned_rows[stList_length(left_rows)];
-    WFA_get_alignment(wfa, aligned_rows);
+    int64_t left_row_number = stList_length(left_rows), right_row_number = stList_length(right_rows);
+    int64_t aligned_rows[left_row_number];
+    // Adjacent blocks usually carry the same rows in the same order. Pairing them off one for one
+    // then matches every row and leaves no gaps, which scores zero and so is the optimal alignment,
+    // and it is the only alignment that can score zero. Checking for that first is linear, where the
+    // row diff below is the most expensive thing taffy norm does.
+    bool rows_correspond = left_row_number == right_row_number;
+    for(int64_t i=0; rows_correspond && i<left_row_number; i++) {
+        if(!alignment_row_is_predecessor(stList_get(left_rows, i), stList_get(right_rows, i))) {
+            rows_correspond = 0;
+        }
+    }
+    if(rows_correspond) {
+        for(int64_t i=0; i<left_row_number; i++) {
+            aligned_rows[i] = i;
+        }
+    }
+    else { // get the alignment of the rows
+        WFA *wfa = WFA_construct(stList_getBackingArray(left_rows), stList_getBackingArray(right_rows),
+                                 left_row_number, right_row_number,
+                                 sizeof(void *), (bool (*)(void *, void *))alignment_row_is_predecessor_2, 1,
+                                 allow_row_substitutions ? 1 : 100000000); // Use unit gap and mismatch costs for the diff
+                                 // unless we disallow substitutions, in which case use an arbitrarily large mismatch cost
+        WFA_get_alignment(wfa, aligned_rows);
+        WFA_destruct(wfa);
+    }
     // Remove any previous links. Note we leave the left rows' left_gap_sequence alone: it describes
     // the gap to the block before the left one, which this call does not touch. It is the right rows'
     // gap sequences that this can invalidate, and those are checked below once the new links are in.
@@ -210,7 +228,7 @@ void alignment_link_adjacent(Alignment *left_alignment, Alignment *right_alignme
         row = row->n_row;
     }
     // connect up the rows according to the alignment
-    for(int64_t i=0; i<stList_length(left_rows); i++) {
+    for(int64_t i=0; i<left_row_number; i++) {
         if(aligned_rows[i] != -1) {
             Alignment_Row *left_row = stList_get(left_rows, i);
             Alignment_Row *right_row = stList_get(right_rows, aligned_rows[i]);
@@ -243,7 +261,6 @@ void alignment_link_adjacent(Alignment *left_alignment, Alignment *right_alignme
     // clean up
     stList_destruct(left_rows);
     stList_destruct(right_rows);
-    WFA_destruct(wfa);
 }
 
 int64_t alignment_length(Alignment *alignment) {
