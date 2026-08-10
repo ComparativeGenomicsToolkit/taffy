@@ -94,7 +94,7 @@ int taf_index_main(int argc, char *argv[]) {
     }
     char *tai_fn = tai_path(taf_fn);
     st_logInfo("Output index file : %s\n", tai_fn);
-    FILE *tai_fh = fopen(tai_fn, "w");    
+    FILE *tai_fh = st_fopen(tai_fn, "w");
     LI *li = LI_construct(taf_fh);
     if (!LI_indexable(li)) {
         fprintf(stderr, "Input file must be either uncompressed or bgzipped: gzip not supported: %s\n", taf_fn);
@@ -111,7 +111,9 @@ int taf_index_main(int argc, char *argv[]) {
         fclose(taf_fh);
     }
     if(tai_fh != NULL) {
-        fclose(tai_fh);
+        // a truncated .tai is still a parseable index, it just points at the
+        // wrong places, so the close has to be checked
+        st_fclose(tai_fh, tai_fn);
     }
     free(tai_fn);
 

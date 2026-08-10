@@ -188,7 +188,7 @@ int taf_sort_main(int argc, char *argv[]) {
     LI *li = LI_construct(input);
 
     // Output taf
-    FILE *output_fh = output_file == NULL ? stdout : fopen(output_file, "w");
+    FILE *output_fh = output_file == NULL ? stdout : st_fopen(output_file, "w");
     if (output_fh == NULL) {
         fprintf(stderr, "Unable to open output file: %s\n", output_file);
         return 1;
