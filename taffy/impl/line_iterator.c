@@ -13,6 +13,11 @@
 // changes after a handle is opened do not affect that handle.
 static int bgzf_threads = 1;
 
+// Set once a compressed writer has taken stdout's descriptor and closed it, so
+// that the exit check installed by LW_check_stdout_at_exit() leaves the stale
+// FILE alone.  See LW_destruct().
+static bool lw_stdout_closed_by_bgzf = false;
+
 void LI_set_bgzf_threads(int n) {
     bgzf_threads = (n > 0) ? n : 1;
 }
@@ -291,6 +296,15 @@ void LW_destruct(LW *lw, bool clean_up_file_handle) {
         if(bgzf_close(lw->bgzf)) {
             st_errnoAbort("Failed to close the compressed output, so it may be incomplete");
         }
+        if(lw->fh == stdout) {
+            // bgzf_dopen took stdout's descriptor and bgzf_close has just
+            // closed it, so the FILE is now stale.  Flushing it at exit would
+            // write to a closed descriptor and report a failure that never
+            // happened.  Nothing is lost by skipping it: the compressed path
+            // is the one the data took, and it is checked here and in
+            // LW_flush.
+            lw_stdout_closed_by_bgzf = true;
+        }
     }
 #endif
     if(clean_up_file_handle) {
@@ -317,6 +331,12 @@ void LW_destruct(LW *lw, bool clean_up_file_handle) {
 }
 
 static void lw_stdout_exit_check(void) {
+    if(lw_stdout_closed_by_bgzf) {
+        // a compressed writer owned stdout's descriptor and has already closed
+        // it, having checked its own writes on the way; there is nothing valid
+        // left here to flush
+        return;
+    }
     // atexit handlers run before the C library flushes the streams, so the
     // flush has to happen here for the error indicator to mean anything.
     // st_errAbort cannot be used: it calls exit(), and calling exit() from an
