@@ -400,7 +400,7 @@ int taf_norm_main(int argc, char *argv[]) {
     //////////////////////////////////////////////
 
     FILE *input = inputFile == NULL ? stdin : fopen(inputFile, "r");
-    LW *output = LW_construct(outputFile == NULL ? stdout : fopen(outputFile, "w"), use_compression);
+    LW *output = LW_construct(outputFile == NULL ? stdout : st_fopen(outputFile, "w"), use_compression);
     LI *li = LI_construct(input);
 
     // Open a format-agnostic reader; for MAF input the reader transparently links adjacent

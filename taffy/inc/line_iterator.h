@@ -101,6 +101,20 @@ LW *LW_construct(FILE *fh, bool use_compression);
 
 void LW_destruct(LW *lw, bool clean_up_file_handle);
 
+/*
+ * Arrange for standard output to be checked when the program exits.
+ *
+ * Most subcommands write their result to stdout unless given -o, and stdio
+ * reports a failed write -- a full disk, a quota, a read-only mount -- only by
+ * setting an error indicator that nothing is obliged to read.  At normal exit
+ * the C library flushes stdout and throws any error away, so without this a
+ * truncated file and a complete one are indistinguishable and the tool still
+ * exits successfully.  A short MAF is still a valid MAF.
+ *
+ * Call once, at the top of main.
+ */
+void LW_check_stdout_at_exit(void);
+
 int LW_write(LW *lw, const char *string, ...);
 
 /*

@@ -237,7 +237,7 @@ int taf_view_main(int argc, char *argv[]) {
         return 1;
     }
 
-    FILE *output_fh = outputFile == NULL ? stdout : fopen(outputFile, "w");
+    FILE *output_fh = outputFile == NULL ? stdout : st_fopen(outputFile, "w");
     if (output_fh == NULL) {
         fprintf(stderr, "Unable to open output file: %s\n", outputFile);
         return 1;

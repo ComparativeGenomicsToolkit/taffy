@@ -1,5 +1,6 @@
 #include "line_iterator.h"
 #include "sonLib.h"
+#include <stdlib.h>
 
 #ifdef USE_HTSLIB
 #include "htslib/bgzf.h"
@@ -11,6 +12,11 @@
 // preserves pre-existing behaviour.  Only consulted at LI/LW open time;
 // changes after a handle is opened do not affect that handle.
 static int bgzf_threads = 1;
+
+// Set once a compressed writer has taken stdout's descriptor and closed it, so
+// that the exit check installed by LW_check_stdout_at_exit() leaves the stale
+// FILE alone.  See LW_destruct().
+static bool lw_stdout_closed_by_bgzf = false;
 
 void LI_set_bgzf_threads(int n) {
     bgzf_threads = (n > 0) ? n : 1;
@@ -176,15 +182,22 @@ LW *LW_construct(FILE *fh, bool use_compression) {
 // invoke this first so on-disk ordering matches call order.
 void LW_flush(LW *lw) {
     if (lw->buf_pos == 0) return;
+    // these are real checks rather than asserts because losing alignment data
+    // is not a debugging concern: a build that defines NDEBUG would otherwise
+    // drop them and write a short file while still exiting successfully
 #ifdef USE_HTSLIB
     if (lw->bgzf) {
         ssize_t n = bgzf_write(lw->bgzf, lw->buf, lw->buf_pos);
-        assert(n == (ssize_t)lw->buf_pos);
+        if (n != (ssize_t)lw->buf_pos) {
+            st_errnoAbort("Failed to write the compressed output, so it is incomplete");
+        }
     } else
 #endif
     {
         size_t n = fwrite(lw->buf, 1, lw->buf_pos, lw->fh);
-        assert(n == lw->buf_pos);
+        if (n != lw->buf_pos) {
+            st_errnoAbort("Failed to write the output, so it is incomplete");
+        }
     }
     lw->buf_pos = 0;
 }
@@ -278,17 +291,68 @@ void LW_destruct(LW *lw, bool clean_up_file_handle) {
 #ifdef USE_HTSLIB
     if(lw->bgzf) {
         if(bgzf_flush(lw->bgzf)) {
-            assert(0); // Flush failed
+            st_errnoAbort("Failed to flush the compressed output, so it is incomplete");
         }
         if(bgzf_close(lw->bgzf)) {
-            assert(0); // Close failed
+            st_errnoAbort("Failed to close the compressed output, so it may be incomplete");
+        }
+        if(lw->fh == stdout) {
+            // bgzf_dopen took stdout's descriptor and bgzf_close has just
+            // closed it, so the FILE is now stale.  Flushing it at exit would
+            // write to a closed descriptor and report a failure that never
+            // happened.  Nothing is lost by skipping it: the compressed path
+            // is the one the data took, and it is checked here and in
+            // LW_flush.
+            lw_stdout_closed_by_bgzf = true;
         }
     }
 #endif
     if(clean_up_file_handle) {
-        fclose(lw->fh);
+#ifdef USE_HTSLIB
+        if(lw->bgzf) {
+            // bgzf_dopen took ownership of this descriptor and bgzf_close has
+            // already closed it, so there is nothing buffered here and fclose
+            // can only report EBADF.  The data itself was checked just above.
+            fclose(lw->fh);
+        } else
+#endif
+        {
+            // closing is the last point at which buffered data reaches the
+            // operating system, so a write failing here is reported nowhere else
+            if(fflush(lw->fh) != 0 || ferror(lw->fh)) {
+                st_errnoAbort("Failed to write the output file, so it is incomplete");
+            }
+            if(fclose(lw->fh) != 0) {
+                st_errnoAbort("Failed to close the output file, so it may be incomplete");
+            }
+        }
     }
     free(lw);
+}
+
+static void lw_stdout_exit_check(void) {
+    if(lw_stdout_closed_by_bgzf) {
+        // a compressed writer owned stdout's descriptor and has already closed
+        // it, having checked its own writes on the way; there is nothing valid
+        // left here to flush
+        return;
+    }
+    // atexit handlers run before the C library flushes the streams, so the
+    // flush has to happen here for the error indicator to mean anything.
+    // st_errAbort cannot be used: it calls exit(), and calling exit() from an
+    // atexit handler is undefined.
+    if(fflush(stdout) != 0 || ferror(stdout)) {
+        fprintf(stderr, "ERROR: Failed to write to standard output, so its contents are "
+                        "incomplete. Check the free space, the quota and the permissions "
+                        "on the file system holding it.\n");
+        _Exit(EXIT_FAILURE);
+    }
+}
+
+void LW_check_stdout_at_exit(void) {
+    if(atexit(lw_stdout_exit_check) != 0) {
+        st_errAbort("Could not install the standard output check");
+    }
 }
 
 int LW_write(LW *lw, const char *string, ...) {
