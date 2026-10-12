@@ -272,6 +272,9 @@ static abpoa_para_t* construct_abpoa_params(void) {
     // progressive toggle
     abpt->progressive_poa = 1;
 
+    // keep the last gap at the end of the alignment, as abPOA always did before v1.5.4
+    abpt->put_gap_at_end = 1;
+
     // generate the substitution matrix
     abpt->use_score_matrix = 0;
     abpoa_post_set_para(abpt);
@@ -310,9 +313,9 @@ static int len_rev_cmp(const void* i1, const void* i2, void* length_list) {
  * abPOA is set up once and reused for every gap alignment. Building the parameters is expensive out
  * of proportion to the work: abpoa_post_set_para refills a 65536 entry global lookup table each
  * time, and doing that once per merge dominated the run time of taffy norm on alignments made of
- * many small blocks. The parameters are constant, and abpoa_msa resets the handle as its first act,
- * so one instance serves every call. This is not thread safe, and neither is abPOA's use of the
- * global tables that make it worth doing.
+ * many small blocks. The parameters are constant, and the handle is reset before every call (see
+ * align_interstitial_gaps_abpoa), so one instance serves every call. This is not thread safe, and
+ * neither is abPOA's use of the global tables that make it worth doing.
  */
 static abpoa_t *shared_abpoa = NULL;
 static abpoa_para_t *shared_abpoa_params = NULL;
@@ -396,10 +399,11 @@ int64_t align_interstitial_gaps_abpoa(Alignment *alignment) {
     }
 
     // run abpoa: todo try sorting on length
-    // abpoa_msa resets the shared handle as its first act, but it returns before doing so when
-    // handed no sequences, which would leave the previous call's alignment for us to read back. The
-    // seq_no == 0 return above means that cannot happen; this is here so it stays that way.
+    // abpoa_msa only starts afresh when the handle holds no sequences: since abPOA v1.5.6 it otherwise
+    // adds the new ones to the previous call's graph (incremental MSA). So reset the shared handle
+    // here, to the size abpoa_msa itself resets to.
     assert(seq_no > 0);
+    abpoa_reset(ab, abpoa_params, 1024);
     abpoa_msa(ab, abpoa_params, seq_no, NULL, seq_lens, bseqs, NULL, NULL);
 
     // copy the results from the abpoa matrix back into the left_gap_sequences

@@ -18,10 +18,14 @@ sonLib:
 	ln -f ${sonLibDir}/*.a ${LIBDIR}
 	ln -f ${sonLibDir}/sonLib.a ${LIBDIR}/libsonLib.a
 
+# abPOA names its library after the SIMD level it is built for (avx2=1 gives libabpoa_avx2.a, no
+# level gives libabpoa.a), so link whichever one was built as libabpoa.a, as cactus does
 abPOA:
 	mkdir -p ${LIBDIR} ${INCLDIR}
 	cd taffy/submodules/abPOA && ${MAKE}
-	ln -f taffy/submodules/abPOA/lib/*.a ${LIBDIR}
+	for lib in libabpoa_sse2.a libabpoa_sse41.a libabpoa_avx2.a libabpoa_avx512bw.a libabpoa.a; do \
+		if [ -f taffy/submodules/abPOA/lib/$${lib} ]; then ln -f taffy/submodules/abPOA/lib/$${lib} ${LIBDIR}/libabpoa.a; fi; \
+	done
 	ln -f taffy/submodules/abPOA/include/*.h ${INCLDIR}
 	rm -fr ${INCLDIR}/simde && cp -r taffy/submodules/abPOA/include/simde ${INCLDIR}
 
